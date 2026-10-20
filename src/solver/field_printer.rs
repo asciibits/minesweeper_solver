@@ -1,4 +1,4 @@
-use crate::solver::CellValue;
+use crate::solver::cell::CellValue;
 
 use super::MineField;
 use colored::Colorize;
@@ -29,21 +29,29 @@ fn print_row(field: &MineField, row: usize, text: &mut String) {
     for col in 0..field.width {
         text.push_str(&"│ ".bold().to_string());
         let printable = match field.cell(col, row).value {
-            CellValue::Unknown => &" ".on_bright_black().to_string(),
-            CellValue::Mine => &" ".on_bright_red().to_string(),
+            CellValue::Unknown => " ".on_bright_black(),
+            CellValue::Mine => " ".on_bright_red(),
             CellValue::Count(count) => match count {
-                1 => &"1".bright_blue().to_string(),
-                2 => &"2".green().to_string(),
-                3 => &"3".red().to_string(),
-                4 => &"4".purple().to_string(),
-                5 => &"5".yellow().to_string(),
-                6 => &"6".cyan().to_string(),
-                7 => &"6".bright_white().to_string(),
-                8 => &"8".bright_black().to_string(),
-                _ => " ",
+                1 => "1".bright_blue(),
+                2 => "2".green(),
+                3 => "3".red(),
+                4 => "4".purple(),
+                5 => "5".yellow(),
+                6 => "6".cyan(),
+                7 => "6".bright_white(),
+                8 => "8".bright_black(),
+                _ => " ".clear(),
             },
         };
-        text.push_str(printable);
+
+        // let printable = match field.cell_partition_id(col, row) {
+        //     Some(0) => printable.bold().on_yellow(),
+        //     Some(1) => printable.bold().on_magenta(),
+        //     Some(2) => printable.bold().on_white(),
+        //     _ => printable,
+        // };
+
+        text.push_str(&printable.to_string());
         text.push_str(" ");
     }
     text.push_str(&"│".bold().to_string());
@@ -96,14 +104,23 @@ mod tests {
     use rand::rng;
     use rand::seq::SliceRandom;
     use std::cmp::min;
+    use std::collections::HashSet;
 
-    fn create_test_field(width: usize, height: usize, mine_count: usize) -> MineField {
-        let mut field = MineField::new(width, height, mine_count);
+    fn create_test_field(
+        width: usize,
+        height: usize,
+        mine_count: usize,
+        open_x: isize,
+        open_y: isize,
+    ) -> Result<MineField, SolverError> {
+        let mut field = MineField::new(width, height, mine_count)?;
         let mut counts = vec![vec![0i8; height]; width];
         let mut coords: Vec<(usize, usize)> = Vec::with_capacity(width * height);
         for y in 0..height {
             for x in 0..width {
-                coords.push((x, y));
+                if (x as isize - open_x).abs() > 1 || (y as isize - open_y) > 1 {
+                    coords.push((x, y));
+                }
             }
         }
         coords.shuffle(&mut rng());
@@ -117,26 +134,34 @@ mod tests {
             }
         }
 
-        for y in 0..height {
-            for x in 0..(width / 2) {
-                field.set_cell_value(
-                    x,
-                    y,
-                    if counts[x][y] < 0 {
-                        CellValue::Mine
-                    } else {
-                        CellValue::Count(counts[x][y])
-                    },
-                );
+        // open area
+        let mut open_cells: HashSet<Cell> = HashSet::with_capacity(width * height);
+        fn open_cell(x: usize, y: usize, counts: &Vec<Vec<i8>>, cells: &mut HashSet<Cell>) {
+            let value = match counts[x][y] {
+                ..0 => CellValue::Mine,
+                n => CellValue::Count(n),
+            };
+            if cells.insert(Cell { x, y, value }) && counts[x][y] == 0 {
+                for nx in x.saturating_sub(1)..min(x + 2, counts.len()) {
+                    for ny in y.saturating_sub(1)..min(y + 2, counts[nx].len()) {
+                        open_cell(nx, ny, counts, cells);
+                    }
+                }
             }
         }
+        open_cell(open_x as usize, open_y as usize, &counts, &mut open_cells);
+        field.set_cells(&open_cells)?;
 
-        field
+        Ok(field)
     }
 
     #[test]
     fn test_print() {
-        let field = create_test_field(30, 16, 99);
+        let field = create_test_field(10, 10, 12, 5, 5).unwrap();
         println!("{}", print_field(&field));
+        for cell in field.cells {
+            eprintln!("{}\n", cell);
+        }
+        // println!("Partition: {:#?}", field.partitions().iter());
     }
 }
