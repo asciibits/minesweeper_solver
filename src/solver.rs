@@ -1,5 +1,4 @@
 use cell::{Cell, CellValue, cell_idx};
-use neighbors::Neighbors;
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -7,16 +6,18 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+use crate::solver::direction::{Direction, DirectionSet, Neighbor, Point};
+
 pub mod cell;
+mod direction;
 pub mod field_printer;
-mod neighbors;
 mod stats;
 
 #[derive(Debug, Clone)]
 pub struct MineField {
-    pub width: usize,
-    pub height: usize,
-    pub mine_count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub mine_count: u32,
     cells: Box<[ProcessedCell]>,
     dirty: HashMap<usize, CellValue>,
     partitions: HashMap<usize, Partition>,
@@ -24,8 +25,8 @@ pub struct MineField {
 }
 
 impl MineField {
-    pub fn new(width: usize, height: usize, mine_count: usize) -> Result<MineField, SolverError> {
-        if width.saturating_mul(height) > (usize::MAX >> 9) {
+    pub fn new(width: u32, height: u32, mine_count: u32) -> Result<MineField, SolverError> {
+        if (width as usize).saturating_mul(height as usize) > (usize::MAX >> 9) {
             return Err(SolverError::AreaTooLarge { width, height });
         }
         if mine_count >= width * height {
@@ -35,10 +36,10 @@ impl MineField {
                 height,
             });
         }
-        let mut cells = Vec::with_capacity(width * height);
+        let mut cells = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
             for x in 0..width {
-                cells.push(ProcessedCell::new(x, y, width, height));
+                cells.push(ProcessedCell::new(Point { x, y }, width, height));
             }
         }
 
@@ -47,26 +48,26 @@ impl MineField {
             height,
             mine_count,
             cells: cells.into_boxed_slice(),
-            dirty: HashMap::with_capacity(width * height / 4),
+            dirty: HashMap::with_capacity(width as usize * height as usize / 4),
             partitions: HashMap::with_capacity(20),
             next_partiton_id: 1,
         };
 
         Ok(field)
     }
-    pub fn cell(&self, x: usize, y: usize) -> &Cell {
-        &self.cells[self.cell_idx(x, y)].cell
+    pub fn cell(&self, p: Point) -> &Cell {
+        &self.cells[self.cell_idx(p)].cell
     }
-    fn set_cell_helper(&mut self, x: usize, y: usize, value: CellValue) -> Result<(), SolverError> {
-        if x >= self.width || y >= self.height {
+
+    fn set_cell_helper(&mut self, p: Point, value: CellValue) -> Result<(), SolverError> {
+        if p.x >= self.width || p.y >= self.height {
             return Err(SolverError::CoordinatesOutOfBounds {
-                x,
-                y,
+                p,
                 width: self.width,
                 height: self.height,
             });
         }
-        let cell = &mut self.cells[self.cell_idx(x, y)];
+        let cell = &mut self.cells[self.cell_idx(p)];
         if cell.value() != value {
             self.dirty.insert(cell.idx, cell.value());
             cell.set_value(value);
@@ -74,33 +75,28 @@ impl MineField {
         Ok(())
     }
 
-    pub fn set_cell_value(
-        &mut self,
-        x: usize,
-        y: usize,
-        value: CellValue,
-    ) -> Result<(), SolverError> {
-        self.set_cell_helper(x, y, value)?;
+    pub fn set_cell_value(&mut self, p: Point, value: CellValue) -> Result<(), SolverError> {
+        self.set_cell_helper(p, value)?;
         Ok(self.solve())
     }
     pub fn set_cell(&mut self, cell: &Cell) -> Result<(), SolverError> {
-        self.set_cell_value(cell.x, cell.y, cell.value)
+        self.set_cell_value(cell.point, cell.value)
     }
     pub fn set_cells<'a>(
         &mut self,
         cells: impl IntoIterator<Item = &'a Cell>,
     ) -> Result<(), SolverError> {
         for cell in cells.into_iter() {
-            self.set_cell_helper(cell.x, cell.y, cell.value)?;
+            self.set_cell_helper(cell.point, cell.value)?;
         }
         Ok(self.solve())
     }
 
-    fn filter_neighbors<P>(&self, neighbors: Neighbors, mut predicate: P) -> Neighbors
+    fn retain_neighbors<P>(&self, p: Point, neighbors: &mut DirectionSet, mut predicate: P)
     where
-        P: FnMut(&ProcessedCell) -> bool,
+        P: FnMut(Neighbor<&ProcessedCell>) -> bool,
     {
-        neighbors.filter(self.width, |id| predicate(&self.cells[id]))
+        neighbors.retain_mut(|to| predicate(p.neighbor(to).map(|p| &self.cells[self.cell_idx(p)])))
     }
 
     fn solve(&mut self) {
@@ -167,12 +163,14 @@ impl MineField {
                 }
             }
 
+            eprintln!("For Partition {partition_id}");
             dbg!(sorted_knowns);
         }
     }
 
     fn index_dirty(&mut self) -> HashSet<usize> {
-        let mut dirty_neighbors = HashSet::with_capacity((self.width + self.height) * 2);
+        let mut dirty_neighbors =
+            HashSet::with_capacity((self.width as usize + self.height as usize) * 2);
         for (&dirty_idx, &prev_value) in self.dirty.iter() {
             let dirty_cell = self.cells[dirty_idx];
             let mut remaining_mines = if let CellValue::Count(count) = dirty_cell.value() {
@@ -183,33 +181,42 @@ impl MineField {
             struct NeighborDelta {
                 neighbor_cell_idx: usize,
                 is_known: bool,
+                from: Direction,
             }
             let mut neighbors_to_update: [Option<NeighborDelta>; 8] = [const { Option::None }; 8];
             let mut ntu_idx = 0;
-            let alt_neighbors = self.filter_neighbors(dirty_cell.neighbors, |neighbor| {
-                if !self.dirty.contains_key(&neighbor.idx) {
-                    dirty_neighbors.insert(neighbor.idx);
-                    neighbors_to_update[ntu_idx] = Some(NeighborDelta {
-                        neighbor_cell_idx: neighbor.idx,
-                        is_known: neighbor.value().is_known(),
-                    });
-                    ntu_idx += 1;
-                }
+            let mut alt_neighbors = dirty_cell.neighbors;
 
-                if neighbor.value() == CellValue::Mine {
-                    // user provided mine - weird
-                    remaining_mines -= 1;
-                }
+            self.retain_neighbors(
+                dirty_cell.cell.point,
+                &mut alt_neighbors,
+                |Neighbor { neighbor, from }| {
+                    if !self.dirty.contains_key(&neighbor.idx) {
+                        dirty_neighbors.insert(neighbor.idx);
+                        neighbors_to_update[ntu_idx] = Some(NeighborDelta {
+                            neighbor_cell_idx: neighbor.idx,
+                            is_known: neighbor.value().is_known(),
+                            from,
+                        });
+                        ntu_idx += 1;
+                    }
 
-                // mark the alt_neighbor only for known/unknown transitions, and don't include mines
-                neighbor.value() != CellValue::Mine
-                    && dirty_cell.value().is_known() != neighbor.value().is_known()
-            });
+                    if neighbor.value() == CellValue::Mine {
+                        // user provided mine - weird
+                        remaining_mines -= 1;
+                    }
+
+                    // mark the alt_neighbor only for known/unknown transitions, and don't include mines
+                    neighbor.value() != CellValue::Mine
+                        && dirty_cell.value().is_known() != neighbor.value().is_known()
+                },
+            );
 
             for idx in 0..ntu_idx {
                 if let Some(NeighborDelta {
                     neighbor_cell_idx,
                     is_known,
+                    from,
                 }) = neighbors_to_update[idx]
                 {
                     let neighbor_cell = &mut self.cells[neighbor_cell_idx];
@@ -226,10 +233,10 @@ impl MineField {
                         && is_known != dirty_cell.value().is_known()
                     {
                         // add dirty_cell to neighbor's alt list
-                        neighbor_cell.alt_neighbors.add(self.width, dirty_idx);
+                        neighbor_cell.alt_neighbors.insert(from);
                     } else {
                         // remove dirty_cell from neighbor's alt list
-                        neighbor_cell.alt_neighbors.remove(self.width, dirty_idx);
+                        neighbor_cell.alt_neighbors.remove(from);
                     }
                 }
             }
@@ -276,12 +283,12 @@ impl MineField {
     }
 
     /// Get the cell index for the given x/y coordinates.
-    fn cell_idx(&self, x: usize, y: usize) -> usize {
-        cell_idx(x, y, self.width)
+    fn cell_idx(&self, p: Point) -> usize {
+        cell_idx(p, self.width)
     }
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessedCell {
     // `cell` contains the provided raw data
     cell: Cell,
@@ -290,14 +297,14 @@ struct ProcessedCell {
     idx: usize,
 
     // The "all neighbors" id.
-    neighbors: Neighbors,
+    neighbors: DirectionSet,
 
     // The neighbors of different type (unknown cells have known neighbors and vice versa)
-    alt_neighbors: Neighbors,
+    alt_neighbors: DirectionSet,
 
     // This is the set of all neighbors that are unknown and not inferred. It is
     // `alt_neighbors` with the inferred opens and mines removed.
-    remaining_neighbors: Neighbors,
+    remaining_neighbors: DirectionSet,
 
     // The number of mines needed to place into `remaining_neighbors`
     remaining_mines: i8,
@@ -307,16 +314,16 @@ struct ProcessedCell {
 }
 
 impl ProcessedCell {
-    fn new(x: usize, y: usize, width: usize, height: usize) -> ProcessedCell {
-        let cell = Cell::new(x, y);
-        let idx = cell_idx(x, y, width);
-        let neighbors = Neighbors::all_neighbors(x, y, width, height);
+    fn new(p: Point, width: u32, height: u32) -> ProcessedCell {
+        let cell = Cell::new(p);
+        let idx = cell_idx(p, width);
+        let neighbors = DirectionSet::all_neighbors(p, width, height);
         ProcessedCell {
             cell,
             idx,
             neighbors,
-            alt_neighbors: Neighbors::EMPTY,
-            remaining_neighbors: Neighbors::EMPTY,
+            alt_neighbors: DirectionSet::new(),
+            remaining_neighbors: DirectionSet::new(),
             remaining_mines: 0,
             partition_id: 0,
         }
@@ -333,9 +340,10 @@ impl ProcessedCell {
 
 impl Display for ProcessedCell {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let alt_formatting = if f.alternate() { "\n  " } else { "" };
         write!(
             f,
-            "ProcessedCell{{cell: {}, idx: {},\nneighbors: {},\nalt_neighbors: {},\nremaining_mines: {}}}",
+            "ProcessedCell{{{alt_formatting}cell: {}, {alt_formatting}idx: {}, {alt_formatting}neighbors: {}, {alt_formatting}alt_neighbors: {}, {alt_formatting}remaining_mines: {}}}",
             self.cell, self.idx, self.neighbors, self.alt_neighbors, self.remaining_mines
         )
     }
@@ -349,11 +357,13 @@ pub struct Partition {
 
 impl Partition {
     fn create(field: &mut MineField, cell_idx: usize) -> Option<Partition> {
-        let mut known = Vec::with_capacity((field.width + field.height) * 2);
-        let mut unknown = Vec::with_capacity((field.width + field.height) * 2);
-        let mut members = vec![false; field.width * field.height];
+        let perimiter = (field.width as usize + field.height as usize) * 2;
+        let area = field.width as usize * field.height as usize * 2;
+        let mut known = Vec::with_capacity(perimiter);
+        let mut unknown = Vec::with_capacity(perimiter);
+        let mut members = vec![false; area];
 
-        let mut to_process = VecDeque::with_capacity(field.width * field.height / 2);
+        let mut to_process = VecDeque::with_capacity(area / 2);
 
         to_process.push_back(cell_idx);
 
@@ -371,7 +381,9 @@ impl Partition {
                     unknown.push(cell_idx);
                 }
 
-                for neighbor_idx in cell.alt_neighbors.iter(field.width) {
+                for Neighbor { neighbor, from: _ } in cell.cell.point.neighbors(cell.alt_neighbors)
+                {
+                    let neighbor_idx = field.cell_idx(neighbor);
                     if !members[neighbor_idx] {
                         to_process.push_back(neighbor_idx);
                     }
@@ -379,14 +391,14 @@ impl Partition {
             }
         }
 
-        if known.is_empty() {
+        if known.is_empty() || unknown.is_empty() {
             None
         } else {
             Some(Partition { known, unknown })
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.known.len() + self.unknown.len()
     }
 }
@@ -395,19 +407,18 @@ impl Partition {
 #[non_exhaustive]
 pub enum SolverError {
     AreaTooLarge {
-        width: usize,
-        height: usize,
+        width: u32,
+        height: u32,
     },
     MineCountTooLarge {
-        mine_count: usize,
-        width: usize,
-        height: usize,
+        mine_count: u32,
+        width: u32,
+        height: u32,
     },
     CoordinatesOutOfBounds {
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
+        p: Point,
+        width: u32,
+        height: u32,
     },
 }
 
@@ -429,14 +440,9 @@ impl fmt::Display for SolverError {
                     "The mine count ({mine_count}) must be strictly less than the area of the mine field ({width} x {height}."
                 )
             }
-            SolverError::CoordinatesOutOfBounds {
-                x,
-                y,
-                width,
-                height,
-            } => write!(
+            SolverError::CoordinatesOutOfBounds { p, width, height } => write!(
                 f,
-                "The provided coordinates ({x}, {y}) are outside the mine field ({width} x {height})."
+                "The provided coordinates {p} are outside the mine field ({width} x {height})."
             ),
         }
     }
@@ -449,11 +455,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_neighbor_id() {
-        let width = 10;
-        let height = 10;
-        let x = 0;
-        let y = 0;
-        let field = MineField::new(width, height, 0).unwrap();
+        let _ = MineField::new(10, 10, 15);
     }
 
     #[test]

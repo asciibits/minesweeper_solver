@@ -1,49 +1,48 @@
 use std::fmt::{self, Display, Formatter};
 
+use crate::solver::direction::Point;
+
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the correlary to `cell_id`.
-pub fn coordinates(cell_idx: usize, width: usize) -> (usize, usize) {
+pub fn coordinates(cell_idx: usize, width: usize) -> Point {
     let y = cell_idx / width;
-    let x = cell_idx - y * width;
-    (x, y)
+    let x = (cell_idx - y * width) as u32;
+    let y = y as u32;
+    Point { x, y }
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
 /// a Vector or Array. This is the correlary to `coordinates`.
-pub fn cell_idx(x: usize, y: usize, width: usize) -> usize {
-    x + y * width
+pub fn cell_idx(p: Point, width: u32) -> usize {
+    p.x as usize + p.y as usize * width as usize
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Cell {
-    pub x: usize,
-    pub y: usize,
+    pub point: Point,
     pub value: CellValue,
 }
 
 impl Cell {
-    pub fn new(x: usize, y: usize) -> Cell {
+    pub fn new(point: Point) -> Cell {
         Cell {
-            x,
-            y,
+            point,
             value: CellValue::Unknown,
         }
     }
 
     pub fn from_index(cell_idx: usize, width: usize) -> Cell {
-        let (x, y) = coordinates(cell_idx, width);
-        Cell::new(x, y)
+        Cell::new(coordinates(cell_idx, width))
     }
 
-    pub fn idx(&self, width: usize) -> usize {
-        cell_idx(self.x, self.y, width)
+    pub fn idx(&self, width: u32) -> usize {
+        cell_idx(self.point, width)
     }
 }
 
 impl Display for Cell {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        // Customize your output format here
-        write!(f, "({}, {}): {}", self.x, self.y, self.value)
+        write!(f, "{}: {}", self.point, self.value)
     }
 }
 

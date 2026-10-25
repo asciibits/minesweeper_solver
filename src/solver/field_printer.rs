@@ -1,4 +1,4 @@
-use crate::solver::cell::CellValue;
+use crate::solver::{cell::CellValue, direction::Point};
 
 use super::MineField;
 use colored::Colorize;
@@ -10,6 +10,7 @@ pub fn print_field(field: &MineField) -> String {
         return text;
     }
 
+    print_pre_header(field, &mut text);
     print_header(field, &mut text);
     print_row(field, 0, &mut text);
     for row in 1..field.height {
@@ -21,14 +22,15 @@ pub fn print_field(field: &MineField) -> String {
     text
 }
 
-fn print_row(field: &MineField, row: usize, text: &mut String) {
+fn print_row(field: &MineField, row: u32, text: &mut String) {
     if field.width <= 0 {
         return;
     }
 
+    text.push_str(&format!("{:4}", row * field.width));
     for col in 0..field.width {
         text.push_str(&"│ ".bold().to_string());
-        let printable = match field.cell(col, row).value {
+        let printable = match field.cell(Point { x: col, y: row }).value {
             CellValue::Unknown => " ".on_bright_black(),
             CellValue::Mine => " ".on_bright_red(),
             CellValue::Count(count) => match count {
@@ -58,11 +60,23 @@ fn print_row(field: &MineField, row: usize, text: &mut String) {
     text.push_str("\n");
 }
 
+fn print_pre_header(field: &MineField, text: &mut String) {
+    if field.width <= 0 {
+        return;
+    }
+    text.push_str("     ");
+    for i in 0..field.width {
+        text.push_str(&format!("{:^4}", i));
+    }
+    text.push_str("\n");
+}
+
 fn print_header(field: &MineField, text: &mut String) {
     if field.width <= 0 {
         return;
     }
 
+    text.push_str("    ");
     text.push_str(&"┌───".bold().to_string());
     for _ in 1..field.width {
         text.push_str(&"┬───".bold().to_string());
@@ -76,6 +90,7 @@ fn print_separator(field: &MineField, text: &mut String) {
         return;
     }
 
+    text.push_str("    ");
     text.push_str(&"├───".bold().to_string());
     for _ in 1..field.width {
         text.push_str(&"┼───".bold().to_string());
@@ -89,6 +104,7 @@ fn print_footer(field: &MineField, text: &mut String) {
         return;
     }
 
+    text.push_str("    ");
     text.push_str(&"└───".bold().to_string());
     for _ in 1..field.width {
         text.push_str(&"┴───".bold().to_string());
@@ -107,49 +123,54 @@ mod tests {
     use std::collections::HashSet;
 
     fn create_test_field(
-        width: usize,
-        height: usize,
-        mine_count: usize,
-        open_x: isize,
-        open_y: isize,
+        width: u32,
+        height: u32,
+        mine_count: u32,
+        open_x: i32,
+        open_y: i32,
     ) -> Result<MineField, SolverError> {
         let mut field = MineField::new(width, height, mine_count)?;
-        let mut counts = vec![vec![0i8; height]; width];
-        let mut coords: Vec<(usize, usize)> = Vec::with_capacity(width * height);
+        let mut counts = vec![vec![0i8; height as usize]; width as usize];
+        let mut coords: Vec<Point> = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
             for x in 0..width {
-                if (x as isize - open_x).abs() > 1 || (y as isize - open_y) > 1 {
-                    coords.push((x, y));
+                if (x as i32 - open_x).abs() > 1 || (y as i32 - open_y) > 1 {
+                    coords.push(Point { x, y });
                 }
             }
         }
         coords.shuffle(&mut rng());
-        for i in 0..mine_count {
-            let (x, y) = coords[i];
-            counts[x][y] -= 10;
+        for i in 0..mine_count as usize {
+            let Point { x, y } = coords[i];
+            counts[x as usize][y as usize] -= 10;
             for ny in y.saturating_sub(1)..min(y + 2, height) {
                 for nx in x.saturating_sub(1)..min(x + 2, width) {
-                    counts[nx][ny] += 1;
+                    counts[nx as usize][ny as usize] += 1;
                 }
             }
         }
 
         // open area
-        let mut open_cells: HashSet<Cell> = HashSet::with_capacity(width * height);
-        fn open_cell(x: usize, y: usize, counts: &Vec<Vec<i8>>, cells: &mut HashSet<Cell>) {
-            let value = match counts[x][y] {
+        let mut open_cells: HashSet<Cell> =
+            HashSet::with_capacity(width as usize * height as usize);
+        fn open_cell(x: u32, y: u32, counts: &Vec<Vec<i8>>, cells: &mut HashSet<Cell>) {
+            let value = match counts[x as usize][y as usize] {
                 ..0 => CellValue::Mine,
                 n => CellValue::Count(n),
             };
-            if cells.insert(Cell { x, y, value }) && counts[x][y] == 0 {
-                for nx in x.saturating_sub(1)..min(x + 2, counts.len()) {
-                    for ny in y.saturating_sub(1)..min(y + 2, counts[nx].len()) {
+            if cells.insert(Cell {
+                point: Point { x, y },
+                value,
+            }) && counts[x as usize][y as usize] == 0
+            {
+                for nx in x.saturating_sub(1)..min(x + 2, counts.len() as u32) {
+                    for ny in y.saturating_sub(1)..min(y + 2, counts[nx as usize].len() as u32) {
                         open_cell(nx, ny, counts, cells);
                     }
                 }
             }
         }
-        open_cell(open_x as usize, open_y as usize, &counts, &mut open_cells);
+        open_cell(open_x as u32, open_y as u32, &counts, &mut open_cells);
         field.set_cells(&open_cells)?;
 
         Ok(field)
@@ -160,7 +181,7 @@ mod tests {
         let field = create_test_field(10, 10, 12, 5, 5).unwrap();
         println!("{}", print_field(&field));
         for cell in field.cells {
-            eprintln!("{}\n", cell);
+            eprintln!("{:#}", cell);
         }
         // println!("Partition: {:#?}", field.partitions().iter());
     }
