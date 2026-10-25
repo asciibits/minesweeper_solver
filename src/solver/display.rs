@@ -1,35 +1,48 @@
-use crate::solver::{cell::CellValue, direction::Point};
+//! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
+
+use crate::solver::{cell::CellValue, grid::Point};
 
 use super::MineField;
 use colored::Colorize;
+use std::fmt::{self, Display, Formatter};
 
-pub fn print_field(field: &MineField) -> String {
-    let mut text = String::new();
+impl Display for MineField {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.height == 0 {
+            return Ok(());
+        }
 
-    if field.height <= 0 {
-        return text;
+        print_pre_header(self, f)?;
+        print_header(self, f)?;
+        print_row(self, 0, f)?;
+        for row in 1..self.height {
+            print_separator(self, f)?;
+            print_row(self, row, f)?;
+        }
+        print_footer(self, f)?;
+
+        Ok(())
     }
-
-    print_pre_header(field, &mut text);
-    print_header(field, &mut text);
-    print_row(field, 0, &mut text);
-    for row in 1..field.height {
-        print_separator(field, &mut text);
-        print_row(field, row, &mut text);
-    }
-    print_footer(field, &mut text);
-
-    text
 }
 
-fn print_row(field: &MineField, row: u32, text: &mut String) {
-    if field.width <= 0 {
-        return;
+/// Formats `field` as an ANSI-colored Unicode box-drawing grid.
+///
+/// # Errors
+///
+/// Returns [`fmt::Error`] only if formatting into the underlying buffer fails.
+pub fn print_field(field: &MineField) -> Result<String, fmt::Error> {
+    Ok(field.to_string())
+}
+
+/// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
+fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
+    if field.width == 0 {
+        return Ok(());
     }
 
-    text.push_str(&format!("{:4}", row * field.width));
+    write!(f, "{:4}", row * field.width)?;
     for col in 0..field.width {
-        text.push_str(&"│ ".bold().to_string());
+        write!(f, "{}", "│ ".bold())?;
         let printable = match field.cell(Point { x: col, y: row }).value {
             CellValue::Unknown => " ".on_bright_black(),
             CellValue::Mine => " ".on_bright_red(),
@@ -40,7 +53,7 @@ fn print_row(field: &MineField, row: u32, text: &mut String) {
                 4 => "4".purple(),
                 5 => "5".yellow(),
                 6 => "6".cyan(),
-                7 => "6".bright_white(),
+                7 => "7".bright_white(),
                 8 => "8".bright_black(),
                 _ => " ".clear(),
             },
@@ -53,70 +66,74 @@ fn print_row(field: &MineField, row: u32, text: &mut String) {
         //     _ => printable,
         // };
 
-        text.push_str(&printable.to_string());
-        text.push_str(" ");
+        write!(f, "{printable}")?;
+        write!(f, " ")?;
     }
-    text.push_str(&"│".bold().to_string());
-    text.push_str("\n");
+    writeln!(f, "{}", "│".bold())?;
+    Ok(())
 }
 
-fn print_pre_header(field: &MineField, text: &mut String) {
-    if field.width <= 0 {
-        return;
+/// Writes the column coordinate header above the top border.
+fn print_pre_header(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
+    if field.width == 0 {
+        return Ok(());
     }
-    text.push_str("     ");
+    write!(f, "     ")?;
     for i in 0..field.width {
-        text.push_str(&format!("{:^4}", i));
+        write!(f, "{:^4}", i)?;
     }
-    text.push_str("\n");
+    writeln!(f)?;
+    Ok(())
 }
 
-fn print_header(field: &MineField, text: &mut String) {
-    if field.width <= 0 {
-        return;
+/// Writes the top Unicode box border (`┌───┬───┐`).
+fn print_header(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
+    if field.width == 0 {
+        return Ok(());
     }
 
-    text.push_str("    ");
-    text.push_str(&"┌───".bold().to_string());
+    write!(f, "    ")?;
+    write!(f, "{}", "┌───".bold())?;
     for _ in 1..field.width {
-        text.push_str(&"┬───".bold().to_string());
+        write!(f, "{}", "┬───".bold())?;
     }
-    text.push_str(&"┐".bold().to_string());
-    text.push_str("\n");
+    writeln!(f, "{}", "┐".bold())?;
+    Ok(())
 }
 
-fn print_separator(field: &MineField, text: &mut String) {
-    if field.width <= 0 {
-        return;
+/// Writes an interior row separator (`├───┼───┤`).
+fn print_separator(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
+    if field.width == 0 {
+        return Ok(());
     }
 
-    text.push_str("    ");
-    text.push_str(&"├───".bold().to_string());
+    write!(f, "    ")?;
+    write!(f, "{}", "├───".bold())?;
     for _ in 1..field.width {
-        text.push_str(&"┼───".bold().to_string());
+        write!(f, "{}", "┼───".bold())?;
     }
-    text.push_str(&"┤".bold().to_string());
-    text.push_str("\n");
+    writeln!(f, "{}", "┤".bold())?;
+    Ok(())
 }
 
-fn print_footer(field: &MineField, text: &mut String) {
-    if field.width <= 0 {
-        return;
+/// Writes the bottom Unicode box border (`└───┴───┘`).
+fn print_footer(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
+    if field.width == 0 {
+        return Ok(());
     }
 
-    text.push_str("    ");
-    text.push_str(&"└───".bold().to_string());
+    write!(f, "    ")?;
+    write!(f, "{}", "└───".bold())?;
     for _ in 1..field.width {
-        text.push_str(&"┴───".bold().to_string());
+        write!(f, "{}", "┴───".bold())?;
     }
-    text.push_str(&"┘".bold().to_string());
-    text.push_str("\n");
+    writeln!(f, "{}", "┘".bold())?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::*;
     use rand::rng;
     use rand::seq::SliceRandom;
     use std::cmp::min;
@@ -134,7 +151,7 @@ mod tests {
         let mut coords: Vec<Point> = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
             for x in 0..width {
-                if (x as i32 - open_x).abs() > 1 || (y as i32 - open_y) > 1 {
+                if (x as i32 - open_x).abs() > 1 || (y as i32 - open_y).abs() > 1 {
                     coords.push(Point { x, y });
                 }
             }
@@ -153,7 +170,7 @@ mod tests {
         // open area
         let mut open_cells: HashSet<Cell> =
             HashSet::with_capacity(width as usize * height as usize);
-        fn open_cell(x: u32, y: u32, counts: &Vec<Vec<i8>>, cells: &mut HashSet<Cell>) {
+        fn open_cell(x: u32, y: u32, counts: &[Vec<i8>], cells: &mut HashSet<Cell>) {
             let value = match counts[x as usize][y as usize] {
                 ..0 => CellValue::Mine,
                 n => CellValue::Count(n),
@@ -179,7 +196,7 @@ mod tests {
     #[test]
     fn test_print() {
         let field = create_test_field(10, 10, 12, 5, 5).unwrap();
-        println!("{}", print_field(&field));
+        println!("{field}");
         for cell in field.cells {
             eprintln!("{:#}", cell);
         }

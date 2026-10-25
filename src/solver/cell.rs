@@ -1,29 +1,33 @@
+//! Cell data structures representing both external board state ([`Cell`], [`CellValue`])
+//! and internal solver state ([`ProcessedCell`]).
+
 use std::fmt::{self, Display, Formatter};
 
-use crate::solver::direction::Point;
+use crate::solver::grid::{DirectionSet, Point};
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the correlary to `cell_id`.
 pub fn coordinates(cell_idx: usize, width: usize) -> Point {
-    let y = cell_idx / width;
-    let x = (cell_idx - y * width) as u32;
-    let y = y as u32;
-    Point { x, y }
+    Point::from_index(cell_idx, width as u32)
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
 /// a Vector or Array. This is the correlary to `coordinates`.
 pub fn cell_idx(p: Point, width: u32) -> usize {
-    p.x as usize + p.y as usize * width as usize
+    p.to_index(width)
 }
 
+/// A single cell on the Minesweeper board, pairing its [`Point`] coordinates with its [`CellValue`].
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Cell {
+    /// Grid coordinates of the cell.
     pub point: Point,
+    /// Current state/value of the cell.
     pub value: CellValue,
 }
 
 impl Cell {
+    /// Creates a new [`Cell`] at `point` initialized to [`CellValue::Unknown`].
     pub fn new(point: Point) -> Cell {
         Cell {
             point,
@@ -31,12 +35,14 @@ impl Cell {
         }
     }
 
+    /// Creates a new [`Cell`] from a row-major linear `cell_idx` in a board of the given `width`.
     pub fn from_index(cell_idx: usize, width: usize) -> Cell {
-        Cell::new(coordinates(cell_idx, width))
+        Cell::new(Point::from_index(cell_idx, width as u32))
     }
 
+    /// Returns the row-major linear index of this cell in a board of the given `width`.
     pub fn idx(&self, width: u32) -> usize {
-        cell_idx(self.point, width)
+        self.point.to_index(width)
     }
 }
 
@@ -46,15 +52,20 @@ impl Display for Cell {
     }
 }
 
+/// The state of a single cell on the Minesweeper board.
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
 pub enum CellValue {
+    /// The cell has not been revealed or flagged.
     #[default]
     Unknown,
+    /// The cell contains a mine.
     Mine,
+    /// The cell is revealed and has the given number of adjacent mines (`0..=8`).
     Count(i8),
 }
 
 impl CellValue {
+    /// Returns `true` if the cell is anything other than [`CellValue::Unknown`].
     pub fn is_known(&self) -> bool {
         *self != CellValue::Unknown
     }
@@ -67,5 +78,70 @@ impl Display for CellValue {
             CellValue::Mine => write!(f, "MINE"),
             CellValue::Count(c) => write!(f, "{c}"),
         }
+    }
+}
+
+/// Internal solver representation of a board cell, caching neighbor masks and partition membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProcessedCell {
+    /// `cell` contains the provided raw data.
+    pub(super) cell: Cell,
+
+    /// The id - calculated as `cell.x + cell.y * field.width`.
+    pub(super) idx: usize,
+
+    /// The "all neighbors" mask (taking board edges into account).
+    pub(super) neighbors: DirectionSet,
+
+    /// The neighbors of different type (unknown cells have known neighbors and vice versa).
+    pub(super) alt_neighbors: DirectionSet,
+
+    /// This is the set of all neighbors that are unknown and not inferred. It is
+    /// `alt_neighbors` with the inferred opens and mines removed.
+    pub(super) remaining_neighbors: DirectionSet,
+
+    /// The number of mines needed to place into `remaining_neighbors`.
+    pub(super) remaining_mines: i8,
+
+    /// The partition this cell belongs to (`0` if unpartitioned).
+    pub(super) partition_id: usize,
+}
+
+impl ProcessedCell {
+    /// Initializes a [`ProcessedCell`] at `p` for a board of dimensions `width` by `height`.
+    pub(super) fn new(p: Point, width: u32, height: u32) -> ProcessedCell {
+        let cell = Cell::new(p);
+        let idx = p.to_index(width);
+        let neighbors = DirectionSet::all_neighbors(p, width, height);
+        ProcessedCell {
+            cell,
+            idx,
+            neighbors,
+            alt_neighbors: DirectionSet::new(),
+            remaining_neighbors: DirectionSet::new(),
+            remaining_mines: 0,
+            partition_id: 0,
+        }
+    }
+
+    /// Returns the cell's current [`CellValue`].
+    pub(super) fn value(&self) -> CellValue {
+        self.cell.value
+    }
+
+    /// Updates the cell's [`CellValue`].
+    pub(super) fn set_value(&mut self, value: CellValue) {
+        self.cell.value = value;
+    }
+}
+
+impl Display for ProcessedCell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let alt_formatting = if f.alternate() { "\n  " } else { "" };
+        write!(
+            f,
+            "ProcessedCell{{{alt_formatting}cell: {}, {alt_formatting}idx: {}, {alt_formatting}neighbors: {}, {alt_formatting}alt_neighbors: {}, {alt_formatting}remaining_mines: {}}}",
+            self.cell, self.idx, self.neighbors, self.alt_neighbors, self.remaining_mines
+        )
     }
 }
