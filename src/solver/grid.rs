@@ -4,7 +4,7 @@
 
 use std::{
     fmt::{self, Display, Formatter},
-    ops::{BitAnd, BitOr, BitOrAssign, Not, Sub},
+    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
 /// A 2D coordinate (`x`, `y`) on the Minesweeper grid, with `(0, 0)` at the top-left corner.
@@ -45,7 +45,7 @@ impl Point {
     /// Returns the adjacent [`Point`] in direction `to`, paired with the reverse [`Direction`]
     /// pointing from that neighbor back to `self`.
     #[inline]
-    pub fn neighbor(&self, to: Direction) -> Neighbor<Point> {
+    pub fn neighbor(&self, to: Direction) -> Neighbor {
         Neighbor {
             neighbor: Point {
                 x: self.x.wrapping_add_signed(to.dx as i32),
@@ -72,28 +72,15 @@ pub struct NeighborIterator {
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
 /// [`Direction`] pointing from that neighbor back to the origin cell.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Neighbor<T> {
+pub struct Neighbor {
     /// The neighboring value or coordinate.
-    pub neighbor: T,
+    pub neighbor: Point,
     /// The direction from `neighbor` back to the origin cell.
     pub from: Direction,
 }
 
-impl<T> Neighbor<T> {
-    /// Transforms the inner `neighbor` value using `f` while preserving the `from` direction.
-    pub fn map<F, U>(self, f: F) -> Neighbor<U>
-    where
-        F: FnOnce(T) -> U,
-    {
-        Neighbor {
-            neighbor: f(self.neighbor),
-            from: self.from,
-        }
-    }
-}
-
 impl Iterator for NeighborIterator {
-    type Item = Neighbor<Point>;
+    type Item = Neighbor;
 
     fn next(&mut self) -> Option<Self::Item> {
         let d = self.iter.next()?;
@@ -185,6 +172,16 @@ pub const SE: Direction = ALL_DIRECTIONS[7];
 pub struct DirectionSet(u8);
 
 impl DirectionSet {
+    /// Creates an empty [`DirectionSet`].
+    pub fn new() -> DirectionSet {
+        DirectionSet::default()
+    }
+
+    /// Creates an empty [`DirectionSet`].
+    pub fn all() -> DirectionSet {
+        DirectionSet(0b111_11_111)
+    }
+
     /// Given a point in a fixed size field, return the set of neighbors, taking
     /// edges into consideration.
     pub fn all_neighbors(p: Point, width: u32, height: u32) -> DirectionSet {
@@ -204,11 +201,6 @@ impl DirectionSet {
         DirectionSet(mask)
     }
 
-    /// Creates an empty [`DirectionSet`].
-    pub fn new() -> DirectionSet {
-        DirectionSet::default()
-    }
-
     /// Returns the number of directions currently in the set (`0..=8`).
     pub fn len(&self) -> u8 {
         self.0.count_ones() as u8
@@ -222,7 +214,7 @@ impl DirectionSet {
     /// Returns `true` if the set contains direction `d`.
     #[inline]
     pub fn contains(&self, d: Direction) -> bool {
-        self.0 & d != 0
+        self.0 & d.mask != 0
     }
 
     /// Inserts direction `d` into the set, returning `true` if it was not already present.
@@ -231,7 +223,7 @@ impl DirectionSet {
         if self.contains(d) {
             false
         } else {
-            self.0 |= d;
+            self.0 |= d.mask;
             true
         }
     }
@@ -240,7 +232,7 @@ impl DirectionSet {
     #[inline]
     pub fn remove(&mut self, d: Direction) -> bool {
         if self.contains(d) {
-            self.0 &= !d;
+            self.0 &= !d.mask;
             true
         } else {
             false
@@ -249,17 +241,17 @@ impl DirectionSet {
 
     /// Returns a new [`DirectionSet`] containing all directions in `self` or `other`.
     pub fn union(&self, other: DirectionSet) -> DirectionSet {
-        DirectionSet(self.0 | other.0)
+        *self | other
     }
 
     /// Returns a new [`DirectionSet`] containing directions in `self` that are not in `other`.
     pub fn difference(&self, other: DirectionSet) -> DirectionSet {
-        DirectionSet(self.0 & !other.0)
+        *self - other
     }
 
     /// Returns a new [`DirectionSet`] containing only directions present in both `self` and `other`.
     pub fn intersection(&self, other: DirectionSet) -> DirectionSet {
-        DirectionSet(self.0 & other.0)
+        *self & other
     }
 
     /// Retains only the directions specified by the predicate `f`.
@@ -267,7 +259,11 @@ impl DirectionSet {
     where
         F: FnMut(Direction) -> bool,
     {
-        self.0 = self.iter().filter(|&d| f(d)).fold(0u8, |acc, d| acc | d);
+        self.0 = self
+            .iter()
+            .filter(|&d| f(d))
+            .fold(DirectionSet::new(), |acc, d| acc | d)
+            .0;
     }
 
     /// Returns an iterator over all [`Direction`]s in `self`.
@@ -276,11 +272,39 @@ impl DirectionSet {
     }
 }
 
+impl Not for DirectionSet {
+    type Output = DirectionSet;
+
+    fn not(self) -> Self::Output {
+        DirectionSet(!self.0)
+    }
+}
+
 impl BitOr for DirectionSet {
     type Output = DirectionSet;
 
     fn bitor(self, rhs: DirectionSet) -> Self::Output {
-        self.union(rhs)
+        DirectionSet(self.0 | rhs.0)
+    }
+}
+
+impl BitOr<Direction> for DirectionSet {
+    type Output = DirectionSet;
+
+    fn bitor(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 | rhs.mask)
+    }
+}
+
+impl BitOrAssign for DirectionSet {
+    fn bitor_assign(&mut self, rhs: DirectionSet) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitOrAssign<Direction> for DirectionSet {
+    fn bitor_assign(&mut self, rhs: Direction) {
+        self.0 |= rhs.mask;
     }
 }
 
@@ -288,7 +312,55 @@ impl BitAnd for DirectionSet {
     type Output = DirectionSet;
 
     fn bitand(self, rhs: DirectionSet) -> Self::Output {
-        self.intersection(rhs)
+        DirectionSet(self.0 & rhs.0)
+    }
+}
+
+impl BitAnd<Direction> for DirectionSet {
+    type Output = DirectionSet;
+
+    fn bitand(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 & rhs.mask)
+    }
+}
+
+impl BitAndAssign for DirectionSet {
+    fn bitand_assign(&mut self, rhs: DirectionSet) {
+        self.0 &= rhs.0;
+    }
+}
+
+impl BitAndAssign<Direction> for DirectionSet {
+    fn bitand_assign(&mut self, rhs: Direction) {
+        self.0 &= rhs.mask;
+    }
+}
+
+impl BitXor for DirectionSet {
+    type Output = DirectionSet;
+
+    fn bitxor(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.0 ^ rhs.0)
+    }
+}
+
+impl BitXor<Direction> for DirectionSet {
+    type Output = DirectionSet;
+
+    fn bitxor(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 ^ rhs.mask)
+    }
+}
+
+impl BitXorAssign for DirectionSet {
+    fn bitxor_assign(&mut self, rhs: DirectionSet) {
+        self.0 ^= rhs.0;
+    }
+}
+
+impl BitXorAssign<Direction> for DirectionSet {
+    fn bitxor_assign(&mut self, rhs: Direction) {
+        self.0 ^= rhs.mask;
     }
 }
 
@@ -296,13 +368,39 @@ impl Sub for DirectionSet {
     type Output = DirectionSet;
 
     fn sub(self, rhs: DirectionSet) -> Self::Output {
-        self.difference(rhs)
+        DirectionSet(self.0 & !rhs.0)
+    }
+}
+
+impl Sub<Direction> for DirectionSet {
+    type Output = DirectionSet;
+
+    fn sub(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 & !rhs.mask)
+    }
+}
+
+impl SubAssign for DirectionSet {
+    fn sub_assign(&mut self, rhs: DirectionSet) {
+        self.0 &= !rhs.0;
+    }
+}
+
+impl SubAssign<Direction> for DirectionSet {
+    fn sub_assign(&mut self, rhs: Direction) {
+        self.0 &= !rhs.mask;
+    }
+}
+
+impl From<Direction> for DirectionSet {
+    fn from(d: Direction) -> Self {
+        DirectionSet(d.mask)
     }
 }
 
 impl FromIterator<Direction> for DirectionSet {
     fn from_iter<I: IntoIterator<Item = Direction>>(iter: I) -> DirectionSet {
-        DirectionSet(iter.into_iter().fold(0u8, |acc, d| acc | d))
+        iter.into_iter().fold(DirectionSet::new(), |acc, d| acc | d)
     }
 }
 
@@ -339,8 +437,27 @@ pub struct Direction {
 }
 
 impl Direction {
+    /// Returns the single-bit mask (`1 << 0..8`) identifying this direction.
+    #[inline]
+    pub const fn mask(&self) -> u8 {
+        self.mask
+    }
+
+    /// Returns the horizontal column offset (`-1`, `0`, or `1`) of this direction.
+    #[inline]
+    pub const fn dx(&self) -> i8 {
+        self.dx
+    }
+
+    /// Returns the vertical row offset (`-1`, `0`, or `1`) of this direction.
+    #[inline]
+    pub const fn dy(&self) -> i8 {
+        self.dy
+    }
+
     /// Returns the opposite [`Direction`] (e.g., [`NW`] $\leftrightarrow$ [`SE`]).
-    pub fn reverse(&self) -> Direction {
+    #[inline]
+    pub const fn reverse(&self) -> Direction {
         Direction {
             mask: self.mask.reverse_bits(),
             dx: -self.dx,
@@ -360,76 +477,74 @@ impl Display for Direction {
 }
 
 impl Not for Direction {
-    type Output = u8;
+    type Output = DirectionSet;
 
     fn not(self) -> Self::Output {
-        !self.mask
+        DirectionSet(!self.mask)
     }
 }
 
 impl BitOr for Direction {
-    type Output = u8;
+    type Output = DirectionSet;
 
     fn bitor(self, rhs: Direction) -> Self::Output {
-        self.mask | rhs.mask
+        DirectionSet(self.mask | rhs.mask)
     }
 }
 
-impl BitOr<u8> for Direction {
-    type Output = u8;
+impl BitOr<DirectionSet> for Direction {
+    type Output = DirectionSet;
 
-    fn bitor(self, rhs: u8) -> Self::Output {
-        self.mask | rhs
-    }
-}
-
-impl BitOr<Direction> for u8 {
-    type Output = u8;
-
-    fn bitor(self, rhs: Direction) -> Self::Output {
-        self | rhs.mask
-    }
-}
-
-impl BitOrAssign for Direction {
-    fn bitor_assign(&mut self, rhs: Direction) {
-        self.mask |= rhs.mask
-    }
-}
-
-impl BitOrAssign<u8> for Direction {
-    fn bitor_assign(&mut self, rhs: u8) {
-        self.mask |= rhs
-    }
-}
-
-impl BitOrAssign<Direction> for u8 {
-    fn bitor_assign(&mut self, rhs: Direction) {
-        *self |= rhs.mask
+    fn bitor(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.mask | rhs.0)
     }
 }
 
 impl BitAnd for Direction {
-    type Output = u8;
+    type Output = DirectionSet;
 
     fn bitand(self, rhs: Direction) -> Self::Output {
-        self.mask & rhs.mask
+        DirectionSet(self.mask & rhs.mask)
     }
 }
 
-impl BitAnd<u8> for Direction {
-    type Output = u8;
+impl BitAnd<DirectionSet> for Direction {
+    type Output = DirectionSet;
 
-    fn bitand(self, rhs: u8) -> Self::Output {
-        self.mask & rhs
+    fn bitand(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.mask & rhs.0)
     }
 }
 
-impl BitAnd<Direction> for u8 {
-    type Output = u8;
+impl BitXor for Direction {
+    type Output = DirectionSet;
 
-    fn bitand(self, rhs: Direction) -> Self::Output {
-        self & rhs.mask
+    fn bitxor(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.mask ^ rhs.mask)
+    }
+}
+
+impl BitXor<DirectionSet> for Direction {
+    type Output = DirectionSet;
+
+    fn bitxor(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.mask ^ rhs.0)
+    }
+}
+
+impl Sub for Direction {
+    type Output = DirectionSet;
+
+    fn sub(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.mask & !rhs.mask)
+    }
+}
+
+impl Sub<DirectionSet> for Direction {
+    type Output = DirectionSet;
+
+    fn sub(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.mask & !rhs.0)
     }
 }
 
@@ -517,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn test_point_neighbor_and_map() {
+    fn test_point_neighbor() {
         let origin = Point { x: 5, y: 5 };
         for d in ALL_DIRECTIONS {
             let step = origin.neighbor(d);
@@ -525,10 +640,6 @@ mod tests {
             let back = step.neighbor.neighbor(step.from);
             assert_eq!(back.neighbor, origin);
             assert_eq!(back.from, d);
-
-            let mapped = step.map(|pt| pt.to_index(10));
-            assert_eq!(mapped.neighbor, step.neighbor.to_index(10));
-            assert_eq!(mapped.from, step.from);
         }
     }
 
@@ -601,14 +712,84 @@ mod tests {
     }
 
     #[test]
-    fn test_direction_bitwise_operators() {
-        let mask: u8 = NW | SE;
-        assert_eq!(mask, 0b100_00_001);
-        assert_eq!(NW | 0b000_00_010u8, 0b000_00_011);
-        assert_eq!(0b000_00_010u8 | NW, 0b000_00_011);
-        assert_eq!(NW & mask, NW.mask);
-        assert_eq!(mask & NW, NW.mask);
-        assert_eq!(NW & SE, 0);
-        assert_eq!(!NW, !0b000_00_001u8);
+    fn test_direction_and_direction_set_bitwise_operators() {
+        let a: DirectionSet = [NW, N, E].into_iter().collect();
+        let b: DirectionSet = [N, E, SE].into_iter().collect();
+
+        // Not (!) on DirectionSet and Direction
+        assert_eq!(!DirectionSet::new(), DirectionSet::all());
+        assert_eq!(!DirectionSet::all(), DirectionSet::new());
+        assert_eq!(!a, [NE, W, SW, S, SE].into_iter().collect());
+        assert_eq!(!NW, DirectionSet::all() - NW);
+
+        // BitOr (|) across (DirectionSet, DirectionSet), (DirectionSet, Direction),
+        // (Direction, DirectionSet), and (Direction, Direction)
+        assert_eq!(a | b, [NW, N, E, SE].into_iter().collect());
+        assert_eq!(a.union(b), a | b);
+        assert_eq!(a | S, [NW, N, E, S].into_iter().collect());
+        assert_eq!(S | a, [NW, N, E, S].into_iter().collect());
+        assert_eq!(NW | SE, [NW, SE].into_iter().collect());
+
+        // BitAnd (&) across all 4 combinations
+        assert_eq!(a & b, [N, E].into_iter().collect());
+        assert_eq!(a.intersection(b), a & b);
+        assert_eq!(a & N, [N].into_iter().collect());
+        assert_eq!(a & S, DirectionSet::new());
+        assert_eq!(N & a, [N].into_iter().collect());
+        assert_eq!(S & a, DirectionSet::new());
+        assert_eq!(NW & NW, [NW].into_iter().collect());
+        assert_eq!(NW & SE, DirectionSet::new());
+
+        // BitXor (^) across all 4 combinations
+        assert_eq!(a ^ b, [NW, SE].into_iter().collect());
+        assert_eq!(a ^ N, [NW, E].into_iter().collect());
+        assert_eq!(a ^ S, [NW, N, E, S].into_iter().collect());
+        assert_eq!(N ^ a, [NW, E].into_iter().collect());
+        assert_eq!(S ^ a, [NW, N, E, S].into_iter().collect());
+        assert_eq!(NW ^ SE, [NW, SE].into_iter().collect());
+        assert_eq!(NW ^ NW, DirectionSet::new());
+
+        // Sub (-) across all 4 combinations
+        assert_eq!(a - b, [NW].into_iter().collect());
+        assert_eq!(a.difference(b), a - b);
+        assert_eq!(a - N, [NW, E].into_iter().collect());
+        assert_eq!(a - S, a);
+        assert_eq!(N - a, DirectionSet::new());
+        assert_eq!(S - a, [S].into_iter().collect());
+        assert_eq!(NW - SE, [NW].into_iter().collect());
+        assert_eq!(NW - NW, DirectionSet::new());
+    }
+
+    #[test]
+    fn test_direction_set_bitwise_assign_operators() {
+        let mut s = DirectionSet::new();
+
+        // BitOrAssign (|=) with Direction and DirectionSet
+        s |= NW;
+        assert_eq!(s, [NW].into_iter().collect());
+        s |= E | SE;
+        assert_eq!(s, [NW, E, SE].into_iter().collect());
+
+        // BitXorAssign (^=) with Direction and DirectionSet
+        s ^= E; // removes E
+        assert_eq!(s, [NW, SE].into_iter().collect());
+        s ^= N | SE; // adds N, removes SE
+        assert_eq!(s, [NW, N].into_iter().collect());
+
+        // BitAndAssign (&=) with DirectionSet and Direction
+        let mask_set: DirectionSet = [N, E, S].into_iter().collect();
+        s &= mask_set;
+        assert_eq!(s, [N].into_iter().collect());
+        s |= S;
+        s &= S;
+        assert_eq!(s, [S].into_iter().collect());
+
+        // SubAssign (-=) with Direction and DirectionSet
+        s |= NW | N | E;
+        assert_eq!(s, [NW, N, E, S].into_iter().collect());
+        s -= N;
+        assert_eq!(s, [NW, E, S].into_iter().collect());
+        s -= E | S;
+        assert_eq!(s, [NW].into_iter().collect());
     }
 }
