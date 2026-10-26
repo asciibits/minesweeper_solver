@@ -4,7 +4,7 @@ use cell::{Cell, CellValue, ProcessedCell};
 use grid::{DirectionSet, Neighbor, Point};
 use partition::{OrderedCell, Partition};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     error::Error,
     fmt,
 };
@@ -26,12 +26,16 @@ pub struct MineField {
     pub mine_count: u32,
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
     cells: Box<[ProcessedCell]>,
-    /// Map of cell indices modified since the last [`MineField::solve`] pass to their previous [`CellValue`].
-    dirty: HashMap<usize, CellValue>,
+    /// Map of cell indices pending modification.
+    pending: Vec<usize>,
+    /// Set of non-dirty neighbor cell indices whose adjacency state changed.
+    /// Note: Users of this vector must be prepared for duplicates, as the same
+    /// neighbor may be adjacent to multiple dirty cells.
+    dirty_neighbors: Vec<usize>,
     /// Active connected components of frontier cells, keyed by partition ID.
     partitions: HashMap<usize, Partition>,
     /// Monotonically increasing counter used to assign unique partition IDs.
-    next_partiton_id: usize,
+    next_partition_id: usize,
 }
 
 impl MineField {
@@ -66,9 +70,10 @@ impl MineField {
             height,
             mine_count,
             cells: cells.into_boxed_slice(),
-            dirty: HashMap::with_capacity(width as usize * height as usize / 4),
+            pending: Vec::with_capacity(width as usize * height as usize / 4),
             partitions: HashMap::with_capacity(20),
-            next_partiton_id: 1,
+            next_partition_id: 1,
+            dirty_neighbors: Vec::with_capacity((width as usize + height as usize) * 4),
         };
 
         Ok(field)
@@ -98,10 +103,13 @@ impl MineField {
         }
         let cell = &mut self.cells[self.cell_idx(p)];
         if cell.value() != value {
-            // always clobber the cell value. If the user sets a cell value twice before a
-            // solve, we want the last value to be the one that is used.
-            self.dirty.insert(cell.idx, cell.value());
-            cell.set_value(value);
+            // Prepare the value to be set in the next solver pass.
+            if cell.staged_value.is_none() {
+                self.pending.push(cell.idx);
+            }
+            cell.staged_value = Some(value);
+        } else {
+            cell.staged_value = None;
         }
         Ok(())
     }
@@ -144,31 +152,33 @@ impl MineField {
 
     /// Re-indexes modified cells, rebuilds affected frontier partitions, and runs deduction passes.
     fn solve(&mut self) {
-        // clear the current dirty map, and get the values here
-        let mut dirty = std::mem::take(&mut self.dirty);
-
-        // update all indexed data
-        let dirty_neighbors = self.index_dirty(&dirty);
+        // update all indexed data, and set dirty_neighbors to the set of
+        // non-dirty neighbors whose adjacency state changed
+        self.index_pending();
 
         // Clear existing dirty partitions and repartition
-        let new_partition_ids = self.partition_dirty(&dirty, &dirty_neighbors);
+        let start_id = self.next_partition_id;
+        self.partition_dirty();
 
-        self.basic_solve(&new_partition_ids);
+        self.basic_solve(start_id);
 
-        dirty.clear();
-        self.dirty = dirty;
+        self.pending.clear();
+        self.dirty_neighbors.clear();
     }
 
     /// Updates neighbor masks (`alt_neighbors`, `remaining_neighbors`) and `remaining_mines`
     /// for all cells in `dirty` and their immediate neighbors.
     ///
     /// Returns the set of non-dirty neighbor cell indices whose adjacency state changed.
-    fn index_dirty(&mut self, dirty: &HashMap<usize, CellValue>) -> HashSet<usize> {
-        let mut dirty_neighbors =
-            HashSet::with_capacity((self.width as usize + self.height as usize) * 2);
-        for (&dirty_idx, &prev_value) in dirty.iter() {
-            let dirty_cell = self.cells[dirty_idx];
-            let mut remaining_mines = if let CellValue::Count(count) = dirty_cell.value() {
+    fn index_pending(&mut self) {
+        for &pending_idx in &self.pending {
+            let dirty_cell = self.cells[pending_idx];
+            let Some(new_value) = dirty_cell.staged_value else {
+                continue;
+            };
+
+            let prev_value = dirty_cell.value();
+            let mut remaining_mines = if let CellValue::Count(count) = new_value {
                 count
             } else {
                 0
@@ -182,71 +192,77 @@ impl MineField {
             {
                 let neighbor_idx = self.cell_idx(neighbor_pt);
                 let neighbor_cell = &mut self.cells[neighbor_idx];
-                let neighbor_val = neighbor_cell.value();
+                let staged_neighbor = neighbor_cell.staged_value;
+                let neighbor_val = staged_neighbor.unwrap_or_else(|| neighbor_cell.value());
 
                 // update the modified cell with the neighbor's data
                 if neighbor_val == CellValue::Mine {
                     // user provided mine - weird. This handles one of our
                     // mines, so decrement the `remaining_mines` counter
                     remaining_mines -= 1;
-                } else if dirty_cell.value() != CellValue::Mine
-                    && dirty_cell.value().is_known() != neighbor_val.is_known()
+                } else if new_value != CellValue::Mine
+                    && new_value.is_known() != neighbor_val.is_known()
                 {
                     alt_neighbors.insert(from.reverse());
                 }
 
                 // update any neighbors
-                if !dirty.contains_key(&neighbor_idx) {
-                    dirty_neighbors.insert(neighbor_idx);
-                    if dirty_cell.value() == CellValue::Mine {
+                if staged_neighbor.is_none() {
+                    // Note: The same neighbor may be adjacent to multiple dirty
+                    // cells, so we may index it multiple times. Future users of
+                    // the dirty_neighbors must be prepared for duplicates.
+                    self.dirty_neighbors.push(neighbor_idx);
+                    if new_value == CellValue::Mine {
                         neighbor_cell.remaining_mines -= 1;
                     }
                     if prev_value == CellValue::Mine {
                         neighbor_cell.remaining_mines += 1;
                     }
-                    if dirty_cell.value() != CellValue::Mine
-                        && neighbor_val.is_known() != dirty_cell.value().is_known()
+                    if new_value != CellValue::Mine
+                        && neighbor_val.is_known() != new_value.is_known()
                     {
                         neighbor_cell.alt_neighbors.insert(from);
+                        neighbor_cell.remaining_neighbors.insert(from);
                     } else {
                         neighbor_cell.alt_neighbors.remove(from);
+                        neighbor_cell.remaining_neighbors.remove(from);
                     }
                 }
             }
 
-            let dirty_cell = &mut self.cells[dirty_idx];
+            let dirty_cell = &mut self.cells[pending_idx];
+            dirty_cell.set_value(new_value);
             dirty_cell.alt_neighbors = alt_neighbors;
             dirty_cell.remaining_neighbors = alt_neighbors;
             dirty_cell.remaining_mines = remaining_mines;
         }
 
-        dirty_neighbors
+        // clear all staged values now that they have been applied
+        for &pending_idx in &self.pending {
+            self.cells[pending_idx].staged_value = None;
+        }
     }
 
     /// Invalidates partitions touched by `dirty` or `dirty_neighbors` and constructs
     /// new connected [`Partition`]s from the updated frontier.
     ///
     /// Returns the IDs of all newly created partitions.
-    fn partition_dirty(
-        &mut self,
-        dirty: &HashMap<usize, CellValue>,
-        dirty_neighbors: &HashSet<usize>,
-    ) -> Vec<usize> {
-        dirty
-            .keys()
-            .chain(dirty_neighbors.iter())
-            .map(|&i| self.cells[i].partition_id)
-            .for_each(|p| {
-                self.partitions.remove(&p);
-            });
+    fn partition_dirty(&mut self) {
+        for &cell_idx in self.pending.iter().chain(self.dirty_neighbors.iter()) {
+            self.partitions.remove(&self.cells[cell_idx].partition_id);
+        }
 
         // Re-partition the new cells
         // clone the keys to allow for mutating self.cells[xx].partition_id
-        let mut new_partition_ids = Vec::with_capacity(10);
-        for cell_idx in dirty.keys().chain(dirty_neighbors.iter()).copied() {
+        for cell_idx in self
+            .pending
+            .iter()
+            .chain(self.dirty_neighbors.iter())
+            .copied()
+        {
             let cell = &self.cells[cell_idx];
             if !self.partitions.contains_key(&cell.partition_id) {
-                let partition_id = self.next_partiton_id;
+                let partition_id = self.next_partition_id;
                 if let Some(partition) = Partition::create(
                     &mut self.cells,
                     self.width,
@@ -254,21 +270,18 @@ impl MineField {
                     cell_idx,
                     partition_id,
                 ) {
-                    new_partition_ids.push(partition_id);
                     self.partitions.insert(partition_id, partition);
-                    self.next_partiton_id += 1;
+                    self.next_partition_id += 1;
                 }
             }
         }
-
-        new_partition_ids
     }
 
     /// Performs local constraint deductions on the newly created partitions.
-    fn basic_solve(&mut self, new_partition_ids: &[usize]) {
+    fn basic_solve(&mut self, start_partition_id: usize) {
         // Find all basic logic solutions
-        for partition_id in new_partition_ids {
-            let partition = &self.partitions[partition_id];
+        for partition_id in start_partition_id..self.next_partition_id {
+            let partition = &self.partitions[&partition_id];
 
             let mut sorted_knowns = BTreeSet::new();
             for &known_cell_idx in &partition.known {
@@ -294,10 +307,7 @@ impl MineField {
 #[non_exhaustive]
 pub enum SolverError {
     /// The requested board dimensions exceed the maximum supported cell count.
-    AreaTooLarge {
-        width: u32,
-        height: u32,
-    },
+    AreaTooLarge { width: u32, height: u32 },
     /// The requested mine count is greater than or equal to the total number of cells.
     MineCountTooLarge {
         mine_count: u32,
@@ -305,11 +315,7 @@ pub enum SolverError {
         height: u32,
     },
     /// A cell coordinate lies outside the board's `width` and `height`.
-    CoordinatesOutOfBounds {
-        p: Point,
-        width: u32,
-        height: u32,
-    },
+    CoordinatesOutOfBounds { p: Point, width: u32, height: u32 },
 }
 
 impl fmt::Display for SolverError {
@@ -351,10 +357,7 @@ mod tests {
         assert_eq!(field.width, 10);
         assert_eq!(field.height, 10);
         assert_eq!(field.mine_count, 15);
-        assert_eq!(
-            field.cell(Point { x: 0, y: 0 }).value,
-            CellValue::Unknown
-        );
+        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Unknown);
 
         // AreaTooLarge
         let err = MineField::new(u32::MAX, u32::MAX, 10).unwrap_err();

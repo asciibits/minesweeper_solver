@@ -6,13 +6,13 @@ use std::fmt::{self, Display, Formatter};
 use crate::solver::grid::{DirectionSet, Point};
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
-/// width field. This is the correlary to `cell_id`.
+/// width field. This is the corollary to `cell_id`.
 pub fn coordinates(cell_idx: usize, width: usize) -> Point {
     Point::from_index(cell_idx, width as u32)
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
-/// a Vector or Array. This is the correlary to `coordinates`.
+/// a Vector or Array. This is the corollary to `coordinates`.
 pub fn cell_idx(p: Point, width: u32) -> usize {
     p.to_index(width)
 }
@@ -93,6 +93,10 @@ pub(super) struct ProcessedCell {
     /// The "all neighbors" mask (taking board edges into account).
     pub(super) neighbors: DirectionSet,
 
+    /// The value that is staged to be applied to the cell. Used prior
+    /// to a `solve`.
+    pub(super) staged_value: Option<CellValue>,
+
     /// The neighbors of different type (unknown cells have known neighbors and vice versa).
     pub(super) alt_neighbors: DirectionSet,
 
@@ -100,7 +104,11 @@ pub(super) struct ProcessedCell {
     /// `alt_neighbors` with the inferred opens and mines removed.
     pub(super) remaining_neighbors: DirectionSet,
 
-    /// The number of mines needed to place into `remaining_neighbors`.
+    /// The number of mines needed to place into `remaining_neighbors`. For
+    /// unknown cells, this is a negative value indicating how many mines are
+    /// already placed in the neighbors. This allows simpler updates when a
+    /// neighbor is revealed to be a mine or opened, as we can just
+    /// increment/decrement this value.
     pub(super) remaining_mines: i8,
 
     /// The partition this cell belongs to (`0` if unpartitioned).
@@ -117,6 +125,7 @@ impl ProcessedCell {
             cell,
             idx,
             neighbors,
+            staged_value: None,
             alt_neighbors: DirectionSet::new(),
             remaining_neighbors: DirectionSet::new(),
             remaining_mines: 0,

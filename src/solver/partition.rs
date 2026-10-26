@@ -38,10 +38,10 @@ impl Partition {
             return None;
         }
 
-        let perimiter = (width as usize + height as usize) * 2;
-        let mut known = Vec::with_capacity(perimiter);
-        let mut unknown = Vec::with_capacity(perimiter);
-        let mut to_process = VecDeque::with_capacity(perimiter);
+        let perimeter = (width as usize + height as usize) * 2;
+        let mut known = Vec::with_capacity(perimeter);
+        let mut unknown = Vec::with_capacity(perimeter);
+        let mut to_process = VecDeque::with_capacity(perimeter);
 
         cells[start_idx].partition_id = partition_id;
         to_process.push_back(start_idx);
@@ -101,7 +101,7 @@ impl OrderedCell {
     /// Constructs an [`OrderedCell`] if `cell` holds a [`CellValue::Count`], or `None` otherwise.
     pub(super) fn from_cell(cell: &ProcessedCell) -> Option<OrderedCell> {
         if let CellValue::Count(mine_count) = cell.value() {
-            let available_cells = cell.alt_neighbors.len() as i8;
+            let available_cells = cell.remaining_neighbors.len() as i8;
             Some(OrderedCell {
                 idx: cell.idx,
                 mine_count,
@@ -196,19 +196,19 @@ mod tests {
         let mut cell_a = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
         cell_a.set_value(CellValue::Count(2));
         cell_a.remaining_mines = 2;
-        cell_a.alt_neighbors = [E, S].into_iter().collect();
+        cell_a.remaining_neighbors = [E, S].into_iter().collect();
 
         // Trivial cell B: 2 available, 0 remaining -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = ProcessedCell::new(Point { x: 1, y: 0 }, 3, 3);
         cell_b.set_value(CellValue::Count(1));
         cell_b.remaining_mines = 0;
-        cell_b.alt_neighbors = [W, E].into_iter().collect();
+        cell_b.remaining_neighbors = [W, E].into_iter().collect();
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = ProcessedCell::new(Point { x: 2, y: 0 }, 3, 3);
         cell_c.set_value(CellValue::Count(1));
         cell_c.remaining_mines = 1;
-        cell_c.alt_neighbors = [W, E, S].into_iter().collect();
+        cell_c.remaining_neighbors = [W, E, S].into_iter().collect();
 
         let ord_a = OrderedCell::from_cell(&cell_a).unwrap();
         let ord_b = OrderedCell::from_cell(&cell_b).unwrap();

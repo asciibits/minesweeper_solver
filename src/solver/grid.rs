@@ -1,3 +1,5 @@
+#![allow(clippy::unusual_byte_groupings)]
+
 //! 2D grid coordinates, compass directions, and bitset-backed neighbor iteration.
 
 use std::{
@@ -27,6 +29,7 @@ impl Point {
 
     /// Get a unique ID for the point in a given-width field. Useful for indexing in
     /// a Vector or Array. This is the corollary to [`Point::from_index`].
+    #[inline]
     pub const fn to_index(self, width: u32) -> usize {
         self.x as usize + self.y as usize * width as usize
     }
@@ -41,6 +44,7 @@ impl Point {
 
     /// Returns the adjacent [`Point`] in direction `to`, paired with the reverse [`Direction`]
     /// pointing from that neighbor back to `self`.
+    #[inline]
     pub fn neighbor(&self, to: Direction) -> Neighbor<Point> {
         Neighbor {
             neighbor: Point {
@@ -216,11 +220,13 @@ impl DirectionSet {
     }
 
     /// Returns `true` if the set contains direction `d`.
+    #[inline]
     pub fn contains(&self, d: Direction) -> bool {
         self.0 & d != 0
     }
 
     /// Inserts direction `d` into the set, returning `true` if it was not already present.
+    #[inline]
     pub fn insert(&mut self, d: Direction) -> bool {
         if self.contains(d) {
             false
@@ -231,6 +237,7 @@ impl DirectionSet {
     }
 
     /// Removes direction `d` from the set, returning `true` if it was present.
+    #[inline]
     pub fn remove(&mut self, d: Direction) -> bool {
         if self.contains(d) {
             self.0 &= !d;
@@ -452,6 +459,7 @@ struct BinaryIterator(u8);
 impl Iterator for BinaryIterator {
     type Item = u8;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.0 == 0 {
             return None;

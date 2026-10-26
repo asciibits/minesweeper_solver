@@ -158,8 +158,7 @@ mod tests {
             }
         }
         coords.shuffle(&mut rng());
-        for i in 0..mine_count as usize {
-            let Point { x, y } = coords[i];
+        for &Point { x, y } in coords.iter().take(mine_count as usize) {
             counts[x as usize][y as usize] -= 10;
             for ny in y.saturating_sub(1)..min(y + 2, height) {
                 for nx in x.saturating_sub(1)..min(x + 2, width) {

@@ -31,6 +31,7 @@ const fn pascal_triangle() -> [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] {
 /// # Panics
 ///
 /// Panics if `n >= 9` or `k >= 9`.
+#[inline]
 pub fn choose(n: i8, k: i8) -> u64 {
     if n < 0 || k < 0 {
         return 0;
