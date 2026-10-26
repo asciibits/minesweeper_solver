@@ -178,6 +178,9 @@ impl MineField {
             };
 
             let prev_value = dirty_cell.value();
+            if prev_value == new_value {
+                continue;
+            }
             let mut remaining_mines = if let CellValue::Count(count) = new_value {
                 count
             } else {
@@ -479,5 +482,139 @@ mod tests {
         assert_eq!(field.partitions.len(), 1);
         let merged_partition = field.partitions.values().next().unwrap();
         assert_eq!(merged_partition.len(), 5);
+    }
+
+    #[test]
+    fn test_partition_split_with_distant_non_dirty_cells() {
+        // 5x1 strip: [Unknown(0), Count(1), Unknown(2), Count(3), Unknown(4)]
+        // Initially all 5 cells are connected via Unknown(2) into a single partition.
+        let mut field = MineField::new(5, 1, 2).unwrap();
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 1, y: 0 },
+                    value: CellValue::Count(1),
+                },
+                Cell {
+                    point: Point { x: 3, y: 0 },
+                    value: CellValue::Count(1),
+                },
+            ])
+            .unwrap();
+        assert_eq!(field.partitions.len(), 1);
+        let initial_pid = field.cells[0].partition_id;
+        assert!(field.cells.iter().all(|c| c.partition_id == initial_pid));
+
+        // Now reveal the bridge cell (2, 0) as Count(0).
+        // Note that (0, 0) and (4, 0) are 2 hops away, so they are in neither `pending`
+        // nor `dirty_neighbors` and still hold `initial_pid` entering Loop 2.
+        field
+            .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(0))
+            .unwrap();
+
+        // Should split into two 2-cell partitions: {(0,0), (1,0)} and {(3,0), (4,0)},
+        // while interior cell (2,0) has no unknown neighbors and gets partition_id == 0.
+        assert_eq!(field.partitions.len(), 2);
+        assert_eq!(field.cells[2].partition_id, 0);
+        let left_pid = field.cells[0].partition_id;
+        let right_pid = field.cells[4].partition_id;
+        assert_ne!(left_pid, 0);
+        assert_ne!(right_pid, 0);
+        assert_ne!(left_pid, right_pid);
+        assert_eq!(field.cells[1].partition_id, left_pid);
+        assert_eq!(field.cells[3].partition_id, right_pid);
+        assert_eq!(field.partitions[&left_pid].len(), 2);
+        assert_eq!(field.partitions[&right_pid].len(), 2);
+    }
+
+    #[test]
+    fn test_partition_complete_dissolution() {
+        // 2x1 board: [(0,0) = Count(1), (1,0) = Unknown]
+        let mut field = MineField::new(2, 1, 1).unwrap();
+        field
+            .set_cell_value(Point { x: 0, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.partitions.len(), 1);
+
+        // Flag the only unknown cell (1, 0) as a Mine: no frontier remains.
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Mine)
+            .unwrap();
+        assert!(field.partitions.is_empty());
+        assert_eq!(field.cells[0].partition_id, 0);
+        assert_eq!(field.cells[1].partition_id, 0);
+        assert_eq!(field.cells[0].remaining_mines, 0);
+        assert!(field.cells[0].alt_neighbors.is_empty());
+        assert!(field.cells[0].remaining_neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_batch_adjacent_cells_and_duplicate_dirty_neighbors() {
+        // 3x2 board: reveal (1, 0) as Count(2) first
+        let mut field = MineField::new(3, 2, 2).unwrap();
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(2))
+            .unwrap();
+        assert_eq!(field.cells[1].remaining_mines, 2);
+
+        // In one batch, set both (0, 0) and (2, 0) to Mine, and (1, 1) to Count(2).
+        // (1, 0) is a non-dirty neighbor of all three pending cells, so it appears 3 times
+        // in `dirty_neighbors`.
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Mine,
+                },
+                Cell {
+                    point: Point { x: 2, y: 0 },
+                    value: CellValue::Mine,
+                },
+                Cell {
+                    point: Point { x: 1, y: 1 },
+                    value: CellValue::Count(2),
+                },
+            ])
+            .unwrap();
+
+        // Both (1, 0) and (1, 1) are adjacent to the two mines at (0, 0) and (2, 0),
+        // so both should have remaining_mines == 0 and should not list each other in alt_neighbors.
+        let c10 = field.cells[field.cell_idx(Point { x: 1, y: 0 })];
+        let c11 = field.cells[field.cell_idx(Point { x: 1, y: 1 })];
+        assert_eq!(c10.remaining_mines, 0);
+        assert_eq!(c11.remaining_mines, 0);
+        assert!(!c10.alt_neighbors.contains(S));
+        assert_eq!(field.partitions.len(), 1);
+    }
+
+    #[test]
+    fn test_repeated_and_reverted_staging_on_same_cell() {
+        let mut field = MineField::new(3, 1, 1).unwrap();
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.cells[1].remaining_mines, 1);
+
+        // Stage (0, 0) as Mine -> revert to Unknown -> stage again as Mine in one batch.
+        // Neighbor (1, 0)'s remaining_mines must only decrement once (to 0, not -1).
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Mine,
+                },
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Unknown,
+                },
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Mine,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Mine);
+        assert_eq!(field.cells[1].remaining_mines, 0);
     }
 }
