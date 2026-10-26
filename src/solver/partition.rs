@@ -14,19 +14,16 @@ use crate::solver::{
 #[derive(Debug, Clone)]
 pub struct Partition {
     /// Linear cell indices of revealed clue cells on this partition's boundary.
-    pub(super) known: Vec<usize>,
-    /// Linear cell indices of unrevealed cells adjacent to `known` cells in this partition.
-    pub(super) unknown: Vec<usize>,
+    pub(super) members: Vec<usize>,
     pub(super) inferred: Vec<usize>,
     pub(super) invalid: Vec<usize>,
 }
 
 impl Partition {
-    pub(super) fn new(known: Vec<usize>, unknown: Vec<usize>) -> Partition {
-        let unknown_len = unknown.len();
+    pub(super) fn new(members: Vec<usize>) -> Partition {
+        let unknown_len = members.len();
         Partition {
-            known,
-            unknown,
+            members,
             inferred: Vec::with_capacity(unknown_len),
             invalid: Vec::new(),
         }
@@ -45,51 +42,46 @@ impl Partition {
         partition_id: u32,
     ) -> Option<Partition> {
         let start_cell = &mut cells[start_idx];
-        if start_cell.value() == CellValue::Mine || start_cell.alt_neighbors().is_empty() {
-            start_cell.clear_partition();
+        if start_cell.is_mine() || start_cell.alt_inferred_neighbors().is_empty() {
+            start_cell.partition_id = 0;
             return None;
         }
 
         let perimeter = (width as usize + height as usize) * 2;
-        let mut known = Vec::with_capacity(perimeter);
-        let mut unknown = Vec::with_capacity(perimeter);
+        let mut members = Vec::with_capacity(perimeter);
         let mut to_process = VecDeque::with_capacity(perimeter);
 
-        cells[start_idx].set_partition(partition_id);
+        cells[start_idx].partition_id = partition_id;
         to_process.push_back(start_idx);
 
         while let Some(cell_idx) = to_process.pop_front() {
             let cell = &cells[cell_idx];
-            if cell.value() == CellValue::Mine {
+            if cell.is_mine() {
                 continue;
             }
-            if cell.value().is_known() {
-                known.push(cell_idx);
-            } else {
-                unknown.push(cell_idx);
-            }
+            members.push(cell_idx);
 
-            for Neighbor { neighbor, .. } in cell.cell.point.neighbors(cell.alt_neighbors()) {
+            for Neighbor { neighbor, .. } in cell.point.neighbors(cell.alt_inferred_neighbors()) {
                 let neighbor_idx = neighbor.to_index(width);
                 let neighbor_cell = &mut cells[neighbor_idx];
                 if neighbor_cell.partition_id != partition_id {
-                    neighbor_cell.set_partition(partition_id);
+                    neighbor_cell.partition_id = partition_id;
                     to_process.push_back(neighbor_idx);
                 }
             }
         }
 
-        (!known.is_empty() && !unknown.is_empty()).then_some(Partition::new(known, unknown))
+        (!members.is_empty()).then_some(Partition::new(members))
     }
 
     /// Returns the total number of cells (`known + unknown`) in this partition.
     pub fn len(&self) -> usize {
-        self.known.len() + self.unknown.len()
+        self.members.len()
     }
 
     /// Returns `true` if the partition contains neither known nor unknown cells.
     pub fn is_empty(&self) -> bool {
-        self.known.is_empty() && self.unknown.is_empty()
+        self.members.is_empty()
     }
 }
 
@@ -112,7 +104,7 @@ pub(super) struct OrderedCell {
 impl OrderedCell {
     /// Constructs an [`OrderedCell`] if `cell` holds a [`CellValue::Count`], or `None` otherwise.
     pub(super) fn from_cell(cell: &ProcessedCell) -> Option<OrderedCell> {
-        if let CellValue::Count(mine_count) = cell.value() {
+        if let CellValue::Count(mine_count) = cell.value {
             let available_cells = cell.inferred_unknown_neighbors.len() as i8;
             let remaining_mines = mine_count - cell.inferred_mine_neighbors.len() as i8;
             let solution_count = stats::choose(available_cells, remaining_mines) as u8;
@@ -151,7 +143,7 @@ impl Ord for OrderedCell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::grid::{DirectionSet, E, Point, S, W};
+    use crate::solver::grid::{E, Point, S, SE, W};
 
     #[test]
     fn test_partition_create_skips_mines_and_isolated_cells() {
@@ -164,9 +156,10 @@ mod tests {
         assert!(Partition::create(&mut cells, 2, 1, 0, 1).is_none());
         assert_eq!(cells[0].partition_id, 0);
 
-        // Cell 1 is a Mine even if unknown_neighbors/open_neighbors are non-empty
-        cells[1].set_value(CellValue::Mine);
+        // Cell 1 is a Mine even if open_neighbors is non-empty
+        cells[1].value = CellValue::Mine;
         cells[1].open_neighbors.insert(W);
+        cells[1].unknown_neighbors.remove(W);
         cells[1].partition_id = 99;
         assert!(Partition::create(&mut cells, 2, 1, 1, 1).is_none());
         assert_eq!(cells[1].partition_id, 0);
@@ -180,22 +173,23 @@ mod tests {
             ProcessedCell::new(Point { x: 1, y: 0 }, 3, 1),
             ProcessedCell::new(Point { x: 2, y: 0 }, 3, 1),
         ];
-        cells[0].set_value(CellValue::Count(1));
-        cells[0].unknown_neighbors = [E].into_iter().collect();
+        cells[0].value = CellValue::Count(1);
 
-        cells[1].set_value(CellValue::Unknown);
-        cells[1].unknown_neighbors = DirectionSet::new();
-        cells[1].open_neighbors = [W, E].into_iter().collect();
+        cells[1].value = CellValue::Unknown;
+        cells[1].remove_unknown_neighbor(E);
+        cells[1].remove_unknown_neighbor(W);
+        cells[1].add_open_neighbor(W);
+        cells[1].add_open_neighbor(E);
 
-        cells[2].set_value(CellValue::Count(2));
-        cells[2].unknown_neighbors = [W].into_iter().collect();
+        cells[2].value = CellValue::Count(2);
 
         let partition = Partition::create(&mut cells, 3, 1, 0, 7).expect("should create partition");
         assert!(!partition.is_empty());
         assert_eq!(partition.len(), 3);
-        assert_eq!(partition.known, vec![0, 2]);
-        assert_eq!(partition.unknown, vec![1]);
-        assert!(cells.iter().all(|c| c.partition_id == 7));
+        assert_eq!(partition.members, vec![0, 1, 2]);
+        for c in &cells {
+            assert_eq!(c.partition_id, 7);
+        }
     }
 
     #[test]
@@ -203,26 +197,23 @@ mod tests {
         let mut unknown_cell = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
         assert!(OrderedCell::from_cell(&unknown_cell).is_none());
 
-        unknown_cell.set_value(CellValue::Mine);
+        unknown_cell.value = CellValue::Mine;
         assert!(OrderedCell::from_cell(&unknown_cell).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
-        cell_a.set_value(CellValue::Count(2));
-        cell_a.inferred_mine_neighbors = DirectionSet::new();
-        cell_a.inferred_unknown_neighbors = [E, S].into_iter().collect();
+        cell_a.value = CellValue::Count(2);
+        cell_a.remove_unknown_neighbor(SE);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = ProcessedCell::new(Point { x: 1, y: 0 }, 3, 3);
-        cell_b.set_value(CellValue::Count(1));
-        cell_b.inferred_mine_neighbors = [S].into_iter().collect();
-        cell_b.inferred_unknown_neighbors = [W, E].into_iter().collect();
+        cell_b.value = CellValue::Count(1);
+        cell_b.add_mine_neighbor(S);
+        cell_b.remove_unknown_neighbor(S);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = ProcessedCell::new(Point { x: 2, y: 0 }, 3, 3);
-        cell_c.set_value(CellValue::Count(1));
-        cell_c.inferred_mine_neighbors = DirectionSet::new();
-        cell_c.inferred_unknown_neighbors = [W, E, S].into_iter().collect();
+        cell_c.value = CellValue::Count(1);
 
         let ord_a = OrderedCell::from_cell(&cell_a).unwrap();
         let ord_b = OrderedCell::from_cell(&cell_b).unwrap();
