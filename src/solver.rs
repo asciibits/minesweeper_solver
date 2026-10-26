@@ -249,7 +249,11 @@ impl MineField {
     /// Returns the IDs of all newly created partitions.
     fn partition_dirty(&mut self) {
         for &cell_idx in self.pending.iter().chain(self.dirty_neighbors.iter()) {
-            self.partitions.remove(&self.cells[cell_idx].partition_id);
+            let cell = &mut self.cells[cell_idx];
+            if cell.partition_id != 0 {
+                self.partitions.remove(&cell.partition_id);
+                cell.partition_id = 0;
+            }
         }
 
         // Re-partition the new cells
@@ -261,7 +265,7 @@ impl MineField {
             .copied()
         {
             let cell = &self.cells[cell_idx];
-            if !self.partitions.contains_key(&cell.partition_id) {
+            if cell.partition_id == 0 {
                 let partition_id = self.next_partition_id;
                 if let Some(partition) = Partition::create(
                     &mut self.cells,
