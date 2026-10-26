@@ -87,32 +87,64 @@ pub(super) struct ProcessedCell {
     /// `cell` contains the provided raw data.
     pub(super) cell: Cell,
 
+    // ========== Cached neighbor data ==========
+    // The following fields are derived from the cell's coordinates and the
+    // board dimensions. They do not change on cell value changes.
+    //
+    //
     /// The id - calculated as `cell.x + cell.y * field.width`.
     pub(super) idx: usize,
 
     /// The "all neighbors" mask (taking board edges into account).
     pub(super) neighbors: DirectionSet,
 
+    // ========== Cached neighbor data (inferred from cell values) ==========
+    // The following fields are derived from the cell's neighbors' values. They are updated
+    // whenever a neighbor's value changes, and are used to determine the cell's
+    // inferred state. Note: these fields are a disjoint set the collectively
+    // cover all neighbors of the cell.
+    //
+    //
+    /// The neighbors that are have a CellValue of type Unknown.
+    pub(super) unknown_neighbors: DirectionSet,
+
+    /// The neighbors that are have a CellValue of type Count.
+    pub(super) open_neighbors: DirectionSet,
+
+    /// The neighbors that are have a CellValue of type Mine.
+    pub(super) mine_neighbors: DirectionSet,
+
+    // ========== Solver state data ==========
+    //
+    //
     /// The value that is staged to be applied to the cell. Used prior
     /// to a `solve`.
     pub(super) staged_value: Option<CellValue>,
 
-    /// The neighbors of different type (unknown cells have known neighbors and vice versa).
-    pub(super) alt_neighbors: DirectionSet,
+    /// The inferred state of the cell.
+    pub(super) inferred_state: InferredState,
 
-    /// This is the set of all neighbors that are unknown and not inferred. It is
-    /// `alt_neighbors` with the inferred opens and mines removed.
-    pub(super) remaining_neighbors: DirectionSet,
+    /// The remaining neighbors left after [`inferred_open_neighbors`] and
+    /// [`inferred_mine_neighbors`].
+    pub(super) inferred_unknown_neighbors: DirectionSet,
 
-    /// The number of mines needed to place into `remaining_neighbors`. For
-    /// unknown cells, this is a negative value indicating how many mines are
-    /// already placed in the neighbors. This allows simpler updates when a
-    /// neighbor is revealed to be a mine or opened, as we can just
-    /// increment/decrement this value.
-    pub(super) remaining_mines: i8,
+    /// [`open_neighbors`] unioned with unknown neighbors that have their
+    /// inferred_state set to Open.
+    pub(super) inferred_open_neighbors: DirectionSet,
+
+    /// [`mine_neighbors`] unioned with unknown neighbors that have their
+    /// inferred_state set to Mine.
+    pub(super) inferred_mine_neighbors: DirectionSet,
 
     /// The partition this cell belongs to (`0` if unpartitioned).
-    pub(super) partition_id: usize,
+    pub(super) partition_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InferredState {
+    None,
+    Open,
+    Mine,
 }
 
 impl ProcessedCell {
@@ -125,10 +157,14 @@ impl ProcessedCell {
             cell,
             idx,
             neighbors,
+            unknown_neighbors: neighbors,
+            open_neighbors: DirectionSet::new(),
+            mine_neighbors: DirectionSet::new(),
             staged_value: None,
-            alt_neighbors: DirectionSet::new(),
-            remaining_neighbors: DirectionSet::new(),
-            remaining_mines: 0,
+            inferred_state: InferredState::None,
+            inferred_unknown_neighbors: neighbors,
+            inferred_open_neighbors: DirectionSet::new(),
+            inferred_mine_neighbors: DirectionSet::new(),
             partition_id: 0,
         }
     }
@@ -142,6 +178,34 @@ impl ProcessedCell {
     pub(super) fn set_value(&mut self, value: CellValue) {
         self.cell.value = value;
     }
+
+    pub(super) fn alt_neighbors(&self) -> DirectionSet {
+        match self.cell.value {
+            CellValue::Unknown => self.open_neighbors,
+            CellValue::Count(_) => self.unknown_neighbors,
+            CellValue::Mine => DirectionSet::new(),
+        }
+    }
+
+    pub(super) fn alt_inferred_neighbors(&self) -> DirectionSet {
+        match self.cell.value {
+            CellValue::Unknown => self.inferred_open_neighbors,
+            CellValue::Count(_) => self.inferred_unknown_neighbors,
+            CellValue::Mine => DirectionSet::new(),
+        }
+    }
+
+    pub(super) fn set_partition(&mut self, partition_id: u32) {
+        self.partition_id = partition_id;
+        self.inferred_state = InferredState::None;
+        self.inferred_unknown_neighbors = self.unknown_neighbors;
+        self.inferred_open_neighbors = self.open_neighbors;
+        self.inferred_mine_neighbors = self.mine_neighbors;
+    }
+
+    pub(super) fn clear_partition(&mut self) {
+        self.set_partition(0);
+    }
 }
 
 impl Display for ProcessedCell {
@@ -149,8 +213,8 @@ impl Display for ProcessedCell {
         let alt_formatting = if f.alternate() { "\n  " } else { "" };
         write!(
             f,
-            "ProcessedCell{{{alt_formatting}cell: {}, {alt_formatting}idx: {}, {alt_formatting}neighbors: {}, {alt_formatting}alt_neighbors: {}, {alt_formatting}remaining_mines: {}}}",
-            self.cell, self.idx, self.neighbors, self.alt_neighbors, self.remaining_mines
+            "ProcessedCell{{{alt_formatting}cell: {}, {alt_formatting}idx: {}, {alt_formatting}neighbors: {}, {alt_formatting}open_neighbors: {}, {alt_formatting}mine_neighbors: {}, {alt_formatting}unknown_neighbors: {}, {alt_formatting}staged_value: {:?}, {alt_formatting}inferred_open_neighbors: {}, {alt_formatting}inferred_mine_neighbors: {}, {alt_formatting}inferred_unknown_neighbors: {}, {alt_formatting}inferred_state: {:?}, {alt_formatting}partition_id: {}{alt_formatting}}}",
+            self.cell, self.idx, self.neighbors, self.open_neighbors, self.mine_neighbors, self.unknown_neighbors, self.staged_value, self.inferred_open_neighbors, self.inferred_mine_neighbors, self.inferred_unknown_neighbors, self.inferred_state, self.partition_id
         )
     }
 }
@@ -197,9 +261,14 @@ mod tests {
         assert_eq!(pc.idx, 0);
         assert_eq!(pc.value(), CellValue::Unknown);
         assert_eq!(pc.neighbors, [E, S, SE].into_iter().collect());
-        assert!(pc.alt_neighbors.is_empty());
-        assert!(pc.remaining_neighbors.is_empty());
-        assert_eq!(pc.remaining_mines, 0);
+        assert_eq!(pc.open_neighbors, DirectionSet::new());
+        assert_eq!(pc.mine_neighbors, DirectionSet::new());
+        assert_eq!(pc.unknown_neighbors, [E, S, SE].into_iter().collect());
+        assert_eq!(pc.staged_value, None);
+        assert_eq!(pc.inferred_open_neighbors, DirectionSet::new());
+        assert_eq!(pc.inferred_mine_neighbors, DirectionSet::new());
+        assert_eq!(pc.inferred_unknown_neighbors, [E, S, SE].into_iter().collect());
+        assert_eq!(pc.inferred_state, InferredState::None);
         assert_eq!(pc.partition_id, 0);
 
         pc.set_value(CellValue::Count(2));
