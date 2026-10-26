@@ -343,11 +343,134 @@ impl Error for SolverError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::solver::grid::{E, S, SE, W};
+
     #[test]
-    fn test_neighbor_id() {
-        let _ = MineField::new(10, 10, 15);
+    fn test_new_minefield_validation() {
+        let field = MineField::new(10, 10, 15).expect("valid field");
+        assert_eq!(field.width, 10);
+        assert_eq!(field.height, 10);
+        assert_eq!(field.mine_count, 15);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            CellValue::Unknown
+        );
+
+        // AreaTooLarge
+        let err = MineField::new(u32::MAX, u32::MAX, 10).unwrap_err();
+        assert!(matches!(err, SolverError::AreaTooLarge { .. }));
+        assert!(err.to_string().contains("must be below"));
+
+        // MineCountTooLarge
+        let err = MineField::new(4, 4, 16).unwrap_err();
+        assert!(matches!(
+            err,
+            SolverError::MineCountTooLarge {
+                mine_count: 16,
+                width: 4,
+                height: 4
+            }
+        ));
+        assert!(err.to_string().contains("must be strictly less"));
+
+        // 0x0 field rejected as MineCountTooLarge
+        assert!(matches!(
+            MineField::new(0, 0, 0),
+            Err(SolverError::MineCountTooLarge { .. })
+        ));
     }
 
     #[test]
-    fn do_fun_stuff() {}
+    fn test_set_cell_out_of_bounds() {
+        let mut field = MineField::new(3, 3, 1).unwrap();
+        let err = field
+            .set_cell_value(Point { x: 3, y: 0 }, CellValue::Count(1))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SolverError::CoordinatesOutOfBounds {
+                p: Point { x: 3, y: 0 },
+                width: 3,
+                height: 3
+            }
+        ));
+        assert!(err.to_string().contains("outside the mine field"));
+
+        let err_y = field
+            .set_cell(&Cell {
+                point: Point { x: 0, y: 3 },
+                value: CellValue::Count(1),
+            })
+            .unwrap_err();
+        assert!(matches!(err_y, SolverError::CoordinatesOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn test_index_dirty_and_remaining_mines_tracking() {
+        let mut field = MineField::new(3, 3, 2).unwrap();
+
+        // Reveal (0, 0) as Count(2)
+        field
+            .set_cell_value(Point { x: 0, y: 0 }, CellValue::Count(2))
+            .unwrap();
+        let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
+        assert_eq!(c00.remaining_mines, 2);
+        assert_eq!(c00.alt_neighbors, [E, S, SE].into_iter().collect());
+
+        // Neighbor (1, 0) is Unknown and should now list W in its alt_neighbors
+        let c10 = field.cells[field.cell_idx(Point { x: 1, y: 0 })];
+        assert!(c10.alt_neighbors.contains(W));
+
+        // Mark (1, 0) as a Mine: (0, 0)'s remaining_mines should decrement to 1
+        // and E should be removed from (0, 0)'s alt_neighbors
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Mine)
+            .unwrap();
+        let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
+        assert_eq!(c00.remaining_mines, 1);
+        assert_eq!(c00.alt_neighbors, [S, SE].into_iter().collect());
+
+        // Change (1, 0) from Mine to Count(1): (0, 0)'s remaining_mines should restore to 2
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
+        assert_eq!(c00.remaining_mines, 2);
+        assert_eq!(c00.alt_neighbors, [S, SE].into_iter().collect());
+    }
+
+    #[test]
+    fn test_partitioning_and_repartitioning_across_updates() {
+        // 5x1 strip: [Count(1), Unknown, Unknown, Unknown, Count(1)]
+        let mut field = MineField::new(5, 1, 2).unwrap();
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Count(1),
+                },
+                Cell {
+                    point: Point { x: 4, y: 0 },
+                    value: CellValue::Count(1),
+                },
+            ])
+            .unwrap();
+
+        // Two disconnected frontier components: {(0,0), (1,0)} and {(3,0), (4,0)}
+        assert_eq!(field.partitions.len(), 2);
+        let p_left = field.cells[0].partition_id;
+        let p_right = field.cells[4].partition_id;
+        assert_ne!(p_left, p_right);
+        assert_eq!(field.partitions[&p_left].len(), 2);
+        assert_eq!(field.partitions[&p_right].len(), 2);
+
+        // Reveal the middle cell (2, 0) as Count(1): now (1, 0) and (3, 0) are both
+        // adjacent to (2, 0), merging both components into a single 5-cell partition!
+        field
+            .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.partitions.len(), 1);
+        let merged_partition = field.partitions.values().next().unwrap();
+        assert_eq!(merged_partition.len(), 5);
+    }
 }

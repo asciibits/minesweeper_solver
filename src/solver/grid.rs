@@ -473,10 +473,134 @@ mod tests {
 
     #[test]
     fn binary_iterator_iterates() {
+        let iter = BinaryIterator(0b1011001);
+        assert_eq!(iter.len(), 4);
         assert_eq!(
-            BinaryIterator(0b1011001).collect::<Vec<u8>>(),
+            iter.collect::<Vec<u8>>(),
             vec![0b1, 0b1000, 0b10000, 0b1000000]
         );
         assert_eq!(BinaryIterator(0).collect::<Vec<u8>>(), vec![]);
+    }
+
+    #[test]
+    fn test_point_index_round_trip_and_display() {
+        let width = 10;
+        let p = Point { x: 4, y: 7 };
+        let idx = p.to_index(width);
+        assert_eq!(idx, 74);
+        assert_eq!(Point::from_index(idx, width), p);
+        assert_eq!(p.to_string(), "(4, 7)");
+    }
+
+    #[test]
+    fn test_direction_reverse_and_display() {
+        let expected_pairs = [
+            (NW, SE, "NW", "SE"),
+            (N, S, "N", "S"),
+            (NE, SW, "NE", "SW"),
+            (W, E, "W", "E"),
+        ];
+        for (d, rev, name, rev_name) in expected_pairs {
+            assert_eq!(d.reverse(), rev);
+            assert_eq!(rev.reverse(), d);
+            assert_eq!(d.to_string(), name);
+            assert_eq!(rev.to_string(), rev_name);
+        }
+    }
+
+    #[test]
+    fn test_point_neighbor_and_map() {
+        let origin = Point { x: 5, y: 5 };
+        for d in ALL_DIRECTIONS {
+            let step = origin.neighbor(d);
+            assert_eq!(step.from, d.reverse());
+            let back = step.neighbor.neighbor(step.from);
+            assert_eq!(back.neighbor, origin);
+            assert_eq!(back.from, d);
+
+            let mapped = step.map(|pt| pt.to_index(10));
+            assert_eq!(mapped.neighbor, step.neighbor.to_index(10));
+            assert_eq!(mapped.from, step.from);
+        }
+    }
+
+    #[test]
+    fn test_direction_set_operations() {
+        let mut set = DirectionSet::new();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+        assert_eq!(set.to_string(), "[]");
+
+        assert!(set.insert(NW));
+        assert!(!set.insert(NW));
+        assert!(set.insert(E));
+        assert!(set.insert(SE));
+        assert!(!set.is_empty());
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(NW));
+        assert!(!set.contains(N));
+        assert_eq!(set.to_string(), "[NW, E, SE]");
+
+        let other: DirectionSet = [E, S, SW].into_iter().collect();
+        assert_eq!(set | other, [NW, E, SW, S, SE].into_iter().collect());
+        assert_eq!(set & other, [E].into_iter().collect());
+        assert_eq!(set - other, [NW, SE].into_iter().collect());
+
+        assert!(set.remove(E));
+        assert!(!set.remove(E));
+        assert_eq!(set.len(), 2);
+
+        set.retain(|d| d == NW);
+        assert_eq!(set.into_iter().collect::<Vec<_>>(), vec![NW]);
+    }
+
+    #[test]
+    fn test_all_neighbors_3x3_and_degenerate_grids() {
+        // 3x3 grid corners, edges, and center
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 0, y: 0 }, 3, 3),
+            [E, S, SE].into_iter().collect()
+        );
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 2, y: 0 }, 3, 3),
+            [W, SW, S].into_iter().collect()
+        );
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 0, y: 2 }, 3, 3),
+            [N, NE, E].into_iter().collect()
+        );
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 2, y: 2 }, 3, 3),
+            [NW, N, W].into_iter().collect()
+        );
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 1, y: 0 }, 3, 3),
+            [W, E, SW, S, SE].into_iter().collect()
+        );
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 1, y: 1 }, 3, 3).len(),
+            8
+        );
+
+        // 1x1 grid has no valid neighbors
+        assert!(DirectionSet::all_neighbors(Point { x: 0, y: 0 }, 1, 1).is_empty());
+
+        // 1x3 vertical strip (middle cell only has N and S)
+        assert_eq!(
+            DirectionSet::all_neighbors(Point { x: 0, y: 1 }, 1, 3),
+            [N, S].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn test_direction_bitwise_operators() {
+        let mask: u8 = NW | SE;
+        assert_eq!(mask, 0b100_00_001);
+        assert_eq!(NW | 0b000_00_010u8, 0b000_00_011);
+        assert_eq!(0b000_00_010u8 | NW, 0b000_00_011);
+        assert_eq!(NW & mask, NW.mask);
+        assert_eq!(mask & NW, NW.mask);
+        assert_eq!(NW & SE, 0);
+        assert_eq!(!NW, !0b000_00_001u8);
     }
 }

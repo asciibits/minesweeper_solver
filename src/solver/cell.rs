@@ -145,3 +145,60 @@ impl Display for ProcessedCell {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solver::grid::{E, S, SE};
+
+    #[test]
+    fn test_coordinates_and_cell_idx_round_trip() {
+        let width = 7u32;
+        for idx in 0..35usize {
+            let p = coordinates(idx, width as usize);
+            assert_eq!(cell_idx(p, width), idx);
+        }
+    }
+
+    #[test]
+    fn test_cell_creation_and_display() {
+        let c = Cell::from_index(12, 5);
+        assert_eq!(c.point, Point { x: 2, y: 2 });
+        assert_eq!(c.value, CellValue::Unknown);
+        assert_eq!(c.idx(5), 12);
+        assert_eq!(c.to_string(), "(2, 2): Unknown");
+    }
+
+    #[test]
+    fn test_cell_value_is_known_and_display() {
+        assert_eq!(CellValue::default(), CellValue::Unknown);
+        assert!(!CellValue::Unknown.is_known());
+        assert!(CellValue::Mine.is_known());
+        assert!(CellValue::Count(0).is_known());
+        assert!(CellValue::Count(3).is_known());
+
+        assert_eq!(CellValue::Unknown.to_string(), "Unknown");
+        assert_eq!(CellValue::Mine.to_string(), "MINE");
+        assert_eq!(CellValue::Count(4).to_string(), "4");
+    }
+
+    #[test]
+    fn test_processed_cell_initialization_and_display() {
+        let mut pc = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        assert_eq!(pc.idx, 0);
+        assert_eq!(pc.value(), CellValue::Unknown);
+        assert_eq!(pc.neighbors, [E, S, SE].into_iter().collect());
+        assert!(pc.alt_neighbors.is_empty());
+        assert!(pc.remaining_neighbors.is_empty());
+        assert_eq!(pc.remaining_mines, 0);
+        assert_eq!(pc.partition_id, 0);
+
+        pc.set_value(CellValue::Count(2));
+        assert_eq!(pc.value(), CellValue::Count(2));
+
+        let compact = format!("{pc}");
+        let alternate = format!("{pc:#}");
+        assert!(compact.contains("ProcessedCell{cell: (0, 0): 2"));
+        assert!(alternate.contains("ProcessedCell{\n  cell: (0, 0): 2"));
+    }
+}

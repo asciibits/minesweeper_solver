@@ -133,3 +133,94 @@ impl Ord for OrderedCell {
             .then(self.idx.cmp(&other.idx))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solver::grid::{E, Point, S, W};
+
+    #[test]
+    fn test_partition_create_skips_mines_and_isolated_cells() {
+        let mut cells = vec![
+            ProcessedCell::new(Point { x: 0, y: 0 }, 2, 1),
+            ProcessedCell::new(Point { x: 1, y: 0 }, 2, 1),
+        ];
+        // Cell 0 is Unknown with no alt_neighbors (isolated)
+        cells[0].partition_id = 99;
+        assert!(Partition::create(&mut cells, 2, 1, 0, 1).is_none());
+        assert_eq!(cells[0].partition_id, 0);
+
+        // Cell 1 is a Mine even if alt_neighbors is non-empty
+        cells[1].set_value(CellValue::Mine);
+        cells[1].alt_neighbors.insert(W);
+        cells[1].partition_id = 99;
+        assert!(Partition::create(&mut cells, 2, 1, 1, 1).is_none());
+        assert_eq!(cells[1].partition_id, 0);
+    }
+
+    #[test]
+    fn test_partition_create_connected_bipartite_component() {
+        // 3x1 board: [Count(1), Unknown, Count(2)]
+        let mut cells = vec![
+            ProcessedCell::new(Point { x: 0, y: 0 }, 3, 1),
+            ProcessedCell::new(Point { x: 1, y: 0 }, 3, 1),
+            ProcessedCell::new(Point { x: 2, y: 0 }, 3, 1),
+        ];
+        cells[0].set_value(CellValue::Count(1));
+        cells[0].alt_neighbors.insert(E);
+
+        cells[1].set_value(CellValue::Unknown);
+        cells[1].alt_neighbors.insert(W);
+        cells[1].alt_neighbors.insert(E);
+
+        cells[2].set_value(CellValue::Count(2));
+        cells[2].alt_neighbors.insert(W);
+
+        let partition = Partition::create(&mut cells, 3, 1, 0, 7).expect("should create partition");
+        assert!(!partition.is_empty());
+        assert_eq!(partition.len(), 3);
+        assert_eq!(partition.known, vec![0, 2]);
+        assert_eq!(partition.unknown, vec![1]);
+        assert!(cells.iter().all(|c| c.partition_id == 7));
+    }
+
+    #[test]
+    fn test_ordered_cell_from_cell_and_ordering() {
+        let mut unknown_cell = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        assert!(OrderedCell::from_cell(&unknown_cell).is_none());
+
+        unknown_cell.set_value(CellValue::Mine);
+        assert!(OrderedCell::from_cell(&unknown_cell).is_none());
+
+        // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
+        let mut cell_a = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        cell_a.set_value(CellValue::Count(2));
+        cell_a.remaining_mines = 2;
+        cell_a.alt_neighbors = [E, S].into_iter().collect();
+
+        // Trivial cell B: 2 available, 0 remaining -> choose(2, 0) = 1 solution, lower mine_count
+        let mut cell_b = ProcessedCell::new(Point { x: 1, y: 0 }, 3, 3);
+        cell_b.set_value(CellValue::Count(1));
+        cell_b.remaining_mines = 0;
+        cell_b.alt_neighbors = [W, E].into_iter().collect();
+
+        // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
+        let mut cell_c = ProcessedCell::new(Point { x: 2, y: 0 }, 3, 3);
+        cell_c.set_value(CellValue::Count(1));
+        cell_c.remaining_mines = 1;
+        cell_c.alt_neighbors = [W, E, S].into_iter().collect();
+
+        let ord_a = OrderedCell::from_cell(&cell_a).unwrap();
+        let ord_b = OrderedCell::from_cell(&cell_b).unwrap();
+        let ord_c = OrderedCell::from_cell(&cell_c).unwrap();
+
+        assert_eq!(ord_a.solution_count, 1);
+        assert_eq!(ord_b.solution_count, 1);
+        assert_eq!(ord_c.solution_count, 3);
+
+        // ord_b < ord_a (both have solution_count <= 1, but ord_b has smaller mine_count)
+        assert!(ord_b < ord_a);
+        // ord_a < ord_c (1 solution < 3 solutions)
+        assert!(ord_a < ord_c);
+    }
+}

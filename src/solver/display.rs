@@ -134,6 +134,7 @@ fn print_footer(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::*;
     use rand::rng;
     use rand::seq::SliceRandom;
     use std::cmp::min;
@@ -201,5 +202,58 @@ mod tests {
             eprintln!("{:#}", cell);
         }
         // println!("Partition: {:#?}", field.partitions().iter());
+    }
+
+    #[test]
+    fn test_display_all_cell_states() {
+        let mut field = MineField::new(5, 2, 1).unwrap();
+        let cells = [
+            Cell {
+                point: Point { x: 0, y: 0 },
+                value: CellValue::Mine,
+            },
+            Cell {
+                point: Point { x: 1, y: 0 },
+                value: CellValue::Count(0),
+            },
+            Cell {
+                point: Point { x: 2, y: 0 },
+                value: CellValue::Count(1),
+            },
+            Cell {
+                point: Point { x: 3, y: 0 },
+                value: CellValue::Count(2),
+            },
+            Cell {
+                point: Point { x: 4, y: 0 },
+                value: CellValue::Count(3),
+            },
+            Cell {
+                point: Point { x: 0, y: 1 },
+                value: CellValue::Count(4),
+            },
+            Cell {
+                point: Point { x: 1, y: 1 },
+                value: CellValue::Count(5),
+            },
+            Cell {
+                point: Point { x: 2, y: 1 },
+                value: CellValue::Count(6),
+            },
+            Cell {
+                point: Point { x: 3, y: 1 },
+                value: CellValue::Count(7),
+            },
+            Cell {
+                point: Point { x: 4, y: 1 },
+                value: CellValue::Count(8),
+            },
+        ];
+        field.set_cells(&cells).unwrap();
+        let rendered = print_field(&field).unwrap();
+        assert_eq!(rendered, field.to_string());
+        assert!(rendered.contains("┌───"));
+        assert!(rendered.contains("├───"));
+        assert!(rendered.contains("└───"));
     }
 }
