@@ -116,6 +116,10 @@ impl MineField {
         self.cells[self.cell_idx(p)].cell()
     }
 
+    pub(crate) fn cells(&self) -> &[ProcessedCell] {
+        &self.cells
+    }
+
     /// Updates a single cell's value and records it in `self.dirty` without running the solver.
     ///
     /// # Errors
@@ -211,13 +215,11 @@ impl MineField {
         let start_id = self.next_partition_id;
         self.partition_dirty(inference_broken);
 
-        self.basic_solve(start_id);
-
         // Do another partitioning round if any new inferences were found in the
         // basic_solve phase
-
-        self.pending.clear();
-        self.dirty_neighbors.clear();
+        if self.basic_solve(start_id) {
+            self.partition_dirty(false);
+        }
     }
 
     /// Clears any solver inference on `cell_idx` and restores its neighbors' `inferred_*_neighbors` masks.
@@ -274,7 +276,12 @@ impl MineField {
 
             // If this cell previously held an inference, revert its inferred contribution
             // on all neighbors before applying its new real value.
-            Self::clear_cell_inference(&mut self.cells, &mut self.inferred, self.width, pending_idx);
+            Self::clear_cell_inference(
+                &mut self.cells,
+                &mut self.inferred,
+                self.width,
+                pending_idx,
+            );
 
             let count_to_count = matches!(
                 (prev_value, new_value),
@@ -320,14 +327,14 @@ impl MineField {
         // under existing inferences, treat this update as inference-breaking so the affected
         // partition is reset and re-evaluated from lowest to highest mine_count.
         if !inference_breaking {
-            inference_breaking = self
-                .pending
-                .iter()
-                .chain(self.dirty_neighbors.iter())
-                .any(|&idx| {
-                    CellOrdering::from_cell(&self.cells[idx])
-                        .is_some_and(|ord| ord.solution_count() == 0)
-                });
+            inference_breaking =
+                self.pending
+                    .iter()
+                    .chain(self.dirty_neighbors.iter())
+                    .any(|&idx| {
+                        CellOrdering::from_cell(&self.cells[idx])
+                            .is_some_and(|ord| ord.solution_count() == 0)
+                    });
         }
 
         inference_breaking
@@ -343,7 +350,12 @@ impl MineField {
                 self.cells[cell_idx].set_partition_id(0);
             }
             if reset_inferred {
-                Self::clear_cell_inference(&mut self.cells, &mut self.inferred, self.width, cell_idx);
+                Self::clear_cell_inference(
+                    &mut self.cells,
+                    &mut self.inferred,
+                    self.width,
+                    cell_idx,
+                );
                 self.invalid.remove(&cell_idx);
             }
         }
@@ -389,10 +401,16 @@ impl MineField {
                 }
             }
         }
+
+        self.pending.clear();
+        self.dirty_neighbors.clear();
     }
 
     /// Performs local constraint deductions on the newly created partitions.
-    fn basic_solve(&mut self, start_partition_id: u32) {
+    ///
+    /// Populates `self.pending` with newly inferred cells and `self.dirty_neighbors`
+    /// with their neighbors, returning `true` if at least one cell was inferred.
+    fn basic_solve(&mut self, start_partition_id: u32) -> bool {
         // Find all basic logic solutions
         let mut sorted_knowns = BTreeSet::new();
 
@@ -445,10 +463,13 @@ impl MineField {
             {
                 let inferred_idx = self.cell_idx(inferred_pt);
                 let inferred_cell = &mut self.cells[inferred_idx];
+                #[cfg(debug_assertions)]
+                let inferred_partition = inferred_cell.partition_id();
                 debug_assert_eq!(inferred_cell.value(), CellValue::Unknown);
                 inferred_cell.set_inferred_value(inferred_state);
                 let neighbor_iter = inferred_pt.neighbors(inferred_cell.neighbors());
                 self.inferred.insert(inferred_idx);
+                self.pending.push(inferred_idx);
 
                 for Neighbor {
                     neighbor: neighbor_pt,
@@ -457,6 +478,10 @@ impl MineField {
                 {
                     let neighbor_idx = self.cell_idx(neighbor_pt);
                     let neighbor_cell = &mut self.cells[neighbor_idx];
+                    if neighbor_cell.partition_id() != 0 && neighbor_cell.is_open(false) {
+                        debug_assert_eq!(neighbor_cell.partition_id(), inferred_partition);
+                        self.dirty_neighbors.push(neighbor_idx);
+                    }
                     let prev_cell_ord = CellOrdering::from_cell(neighbor_cell);
                     neighbor_cell.remove_inferred_unknown_neighbor(from);
                     if inferred_state == InferredValue::Mine {
@@ -474,6 +499,8 @@ impl MineField {
                 }
             }
         }
+
+        !self.pending.is_empty()
     }
 
     /// Get the cell index for the given x/y coordinates.
@@ -802,9 +829,9 @@ mod tests {
 
     #[test]
     fn test_partition_split_with_distant_non_dirty_cells() {
-        // 5x1 strip: [Unknown(0), Count(1), Unknown(2), Count(3), Unknown(4)]
-        // Initially all 5 cells are connected via Unknown(2) into a single partition.
-        let mut field = MineField::new(5, 1, 2).unwrap();
+        // 5x2 board: reveal (1, 0) = Count(1) and (3, 0) = Count(1).
+        // Initially all 10 cells are connected via (2, 0) and (2, 1) into a single partition.
+        let mut field = MineField::new(5, 2, 2).unwrap();
         field
             .set_cells(&[
                 Cell {
@@ -822,17 +849,28 @@ mod tests {
         assert!(field.cells.iter().all(|c| c.partition_id() == initial_pid));
 
         // Now reveal the bridge cell (2, 0) as Count(0).
-        // Note that (0, 0) and (4, 0) are 2 hops away, so they are in neither `pending`
-        // nor `dirty_neighbors` and still hold `initial_pid` entering Loop 2.
+        // `basic_solve` infers (1, 1), (2, 1), and (3, 1) as InferredValue::Open,
+        // and the post-`basic_solve` repartition pass splits the board into two 3-cell
+        // partitions: {(0,0), (0,1), (1,0)} and {(3,0), (4,0), (4,1)}, while (2,0)
+        // and its inferred-open neighbors get partition_id == 0.
         field
             .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(0))
             .unwrap();
 
-        // Should split into two 2-cell partitions: {(0,0), (1,0)} and {(3,0), (4,0)},
-        // while interior cell (2,0) has no unknown_neighbors and gets partition_id == 0.
         assert_eq!(field.partitions.len(), 2);
         assert_eq!(field.cells[2].partition_id(), 0);
-        assert!(field.cells[2].unknown_neighbors().is_empty());
+        assert_eq!(
+            field.cells[field.cell_idx(Point { x: 1, y: 1 })].partition_id(),
+            0
+        );
+        assert_eq!(
+            field.cells[field.cell_idx(Point { x: 2, y: 1 })].partition_id(),
+            0
+        );
+        assert_eq!(
+            field.cells[field.cell_idx(Point { x: 3, y: 1 })].partition_id(),
+            0
+        );
         assert_eq!(
             field.cells[2].open_neighbors(),
             [W, E].into_iter().collect()
@@ -844,9 +882,17 @@ mod tests {
         assert_ne!(right_pid, 0);
         assert_ne!(left_pid, right_pid);
         assert_eq!(field.cells[1].partition_id(), left_pid);
+        assert_eq!(
+            field.cells[field.cell_idx(Point { x: 0, y: 1 })].partition_id(),
+            left_pid
+        );
         assert_eq!(field.cells[3].partition_id(), right_pid);
-        assert_eq!(field.partitions[&left_pid].len(), 2);
-        assert_eq!(field.partitions[&right_pid].len(), 2);
+        assert_eq!(
+            field.cells[field.cell_idx(Point { x: 4, y: 1 })].partition_id(),
+            right_pid
+        );
+        assert_eq!(field.partitions[&left_pid].len(), 3);
+        assert_eq!(field.partitions[&right_pid].len(), 3);
 
         // Verify all cells (including distant cell 0) have synced inferred neighbor sets
         for cell in &field.cells {
@@ -856,41 +902,47 @@ mod tests {
 
     #[test]
     fn test_partition_complete_dissolution() {
-        // 2x1 board: [(0,0) = Count(1), (1,0) = Unknown]
-        let mut field = MineField::new(2, 1, 1).unwrap();
+        // 3x1 board: [(0,0) = Unknown, (1,0) = Count(1), (2,0) = Unknown]
+        // (1,0) has 2 unknown neighbors (choose(2, 1) = 2 > 1), so 1 partition of 3 cells remains.
+        let mut field = MineField::new(3, 1, 1).unwrap();
         field
-            .set_cell_value(Point { x: 0, y: 0 }, CellValue::Count(1))
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(1))
             .unwrap();
         assert_eq!(field.partitions.len(), 1);
         assert_eq!(
-            field.cells[0].unknown_neighbors(),
-            [E].into_iter().collect()
+            field.cells[1].unknown_neighbors(),
+            [W, E].into_iter().collect()
         );
-        assert_eq!(field.cells[1].open_neighbors(), [W].into_iter().collect());
+        assert_eq!(field.cells[0].open_neighbors(), [E].into_iter().collect());
+        assert_eq!(field.cells[2].open_neighbors(), [W].into_iter().collect());
 
-        // Flag the only unknown cell (1, 0) as a Mine: no frontier remains.
+        // Flag (0, 0) as a Mine: basic_solve infers (2, 0) is Open, and the post-basic_solve
+        // repartition pass dissolves the partition completely.
         field
-            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Mine)
+            .set_cell_value(Point { x: 0, y: 0 }, CellValue::Mine)
             .unwrap();
         assert!(field.partitions.is_empty());
         assert_eq!(field.cells[0].partition_id(), 0);
         assert_eq!(field.cells[1].partition_id(), 0);
+        assert_eq!(field.cells[2].partition_id(), 0);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
         assert_eq!(
-            CellOrdering::from_cell(&field.cells[0])
+            CellOrdering::from_cell(&field.cells[1])
                 .unwrap()
                 .remaining_mines(),
             0
         );
-        assert!(field.cells[0].unknown_neighbors().is_empty());
-        assert!(field.cells[0].open_neighbors().is_empty());
-        assert_eq!(field.cells[0].mine_neighbors(), [E].into_iter().collect());
+        assert_eq!(
+            field.cells[1].unknown_neighbors(),
+            [E].into_iter().collect()
+        );
+        assert!(field.cells[1].inferred_unknown_neighbors().is_empty());
+        assert!(field.cells[1].open_neighbors().is_empty());
+        assert_eq!(field.cells[1].mine_neighbors(), [W].into_iter().collect());
 
-        assert!(field.cells[1].unknown_neighbors().is_empty());
-        assert_eq!(field.cells[1].open_neighbors(), [W].into_iter().collect());
-        assert!(field.cells[1].mine_neighbors().is_empty());
-
-        assert_neighbor_invariants(&field.cells[0]);
-        assert_neighbor_invariants(&field.cells[1]);
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
     }
 
     #[test]
@@ -928,7 +980,8 @@ mod tests {
             .unwrap();
 
         // Both (1, 0) and (1, 1) are adjacent to the two mines at (0, 0) and (2, 0),
-        // so both should have remaining_mines == 0 and list each other in open_neighbors.
+        // so both have remaining_mines == 0, basic_solve infers (0, 1) and (2, 1) as Open,
+        // and the post-basic_solve repartition pass dissolves the solved partition.
         let c10 = field.cells[field.cell_idx(Point { x: 1, y: 0 })];
         let c11 = field.cells[field.cell_idx(Point { x: 1, y: 1 })];
         assert_eq!(CellOrdering::from_cell(&c10).unwrap().remaining_mines(), 0);
@@ -937,12 +990,14 @@ mod tests {
         assert_eq!(c10.mine_neighbors(), W | E);
         assert_eq!(c10.open_neighbors(), !!S);
         assert_eq!(c10.unknown_neighbors(), SW | SE);
+        assert!(c10.inferred_unknown_neighbors().is_empty());
 
         assert_eq!(c11.mine_neighbors(), NW | NE);
         assert_eq!(c11.open_neighbors(), !!N);
         assert_eq!(c11.unknown_neighbors(), W | E);
+        assert!(c11.inferred_unknown_neighbors().is_empty());
 
-        assert_eq!(field.partitions.len(), 1);
+        assert!(field.partitions.is_empty());
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }
@@ -1308,6 +1363,63 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(field.invalid, HashSet::from([6]));
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_repartition_after_basic_solve_splits_via_inferred_mine() {
+        // 5x2 board where a bridge is inferred as Mine during basic_solve,
+        // splitting a single 10-cell partition into two independent 3-cell partitions.
+        // Row 0: (1,0)=Count(2), (2,0)=Count(1), (3,0)=Count(2)
+        // Row 1: (1,1)=Count(1), (2,1)=Unknown,  (3,1)=Count(1)
+        // Here (2,0)=Count(1) has only 1 unknown neighbor (2,1), so basic_solve infers
+        // (2,1) is Mine! That also satisfies (1,1)=Count(1) and (3,1)=Count(1), which
+        // then infer? Wait: if (1,1) and (3,1) are Count(2) and (2,0) is Count(3) with
+        // unknown neighbors (1,1), (2,1), (3,1):
+        // Let's use (1,0)=Count(3), (2,0)=Count(3), (3,0)=Count(3):
+        // - (2,0)=Count(3) has only 3 unknown neighbors: (1,1), (2,1), (3,1) -> all 3 inferred as Mine!
+        // - (1,0)=Count(3) now has 2 inferred mines at (1,1) and (2,1), leaving 1 mine among {(0,0), (0,1)}!
+        // - (3,0)=Count(3) now has 2 inferred mines at (2,1) and (3,1), leaving 1 mine among {(4,0), (4,1)}!
+        let mut field = MineField::new(5, 2, 5).unwrap();
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 1, y: 0 },
+                    value: CellValue::Count(3),
+                },
+                Cell {
+                    point: Point { x: 2, y: 0 },
+                    value: CellValue::Count(3),
+                },
+                Cell {
+                    point: Point { x: 3, y: 0 },
+                    value: CellValue::Count(3),
+                },
+            ])
+            .unwrap();
+
+        // (1,1), (2,1), (3,1) are inferred as Mine and removed from partitions (partition_id == 0).
+        // (2,0) has no remaining unknown neighbors and gets partition_id == 0.
+        // The board splits into two 3-cell partitions:
+        // Left:  {(0,0), (0,1), (1,0)}
+        // Right: {(3,0), (4,0), (4,1)}
+        assert_eq!(field.partitions.len(), 2);
+        assert_eq!(field.cells[2].partition_id(), 0);
+        for x in 1..=3 {
+            let idx = field.cell_idx(Point { x, y: 1 });
+            assert_eq!(field.cells[idx].inferred_value(), InferredValue::Mine);
+            assert_eq!(field.cells[idx].partition_id(), 0);
+        }
+
+        let left_pid = field.cells[0].partition_id();
+        let right_pid = field.cells[4].partition_id();
+        assert_ne!(left_pid, 0);
+        assert_ne!(right_pid, 0);
+        assert_ne!(left_pid, right_pid);
+        assert_eq!(field.partitions[&left_pid].len(), 3);
+        assert_eq!(field.partitions[&right_pid].len(), 3);
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }

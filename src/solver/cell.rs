@@ -269,10 +269,22 @@ impl ProcessedCell {
     pub(super) fn alt_neighbors(&self, ignore_inferred: bool) -> DirectionSet {
         match self.value {
             CellValue::Unknown => {
+                // if ignore_inferred || self.inferred_value == InferredValue::None {
+                //     self.open_neighbors
+                // } else {
+                //     DirectionSet::new()
+                // }
+
+                // TODO : Why does the  above work? And the below fail?
+
                 if ignore_inferred {
                     self.open_neighbors
                 } else {
-                    self.inferred_open_neighbors
+                    match self.inferred_value {
+                        InferredValue::Open => self.inferred_unknown_neighbors,
+                        InferredValue::Mine => DirectionSet::new(),
+                        InferredValue::None => self.open_neighbors,
+                    }
                 }
             }
             CellValue::Count(_) => {

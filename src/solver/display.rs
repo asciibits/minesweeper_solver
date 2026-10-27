@@ -1,6 +1,6 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::{cell::CellValue, grid::Point};
+use crate::solver::{InferredValue, cell::CellValue, grid::Point};
 
 use super::MineField;
 use colored::Colorize;
@@ -56,8 +56,15 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
     write!(f, "{:4}", row * field.width)?;
     for col in 0..field.width {
         write!(f, "{}", "│ ".bold())?;
-        let printable = match field.cell(Point { x: col, y: row }).value {
-            CellValue::Unknown => " ".on_bright_black(),
+        let cell = field.cells()[col as usize + row as usize * field.width as usize];
+        let printable = match cell.value() {
+            CellValue::Unknown => {
+                match cell.inferred_value() {
+                    InferredValue::None => " ".on_bright_black(),
+                    InferredValue::Mine => " ".on_bright_red(),
+                    InferredValue::Open => " ".on_green(),
+                }
+            },
             CellValue::Mine => " ".on_bright_red(),
             CellValue::Count(count) => match count {
                 1 => "1".bright_blue(),
@@ -72,12 +79,12 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             },
         };
 
-        // let printable = match field.cell_partition_id(col, row) {
-        //     Some(0) => printable.bold().on_yellow(),
-        //     Some(1) => printable.bold().on_magenta(),
-        //     Some(2) => printable.bold().on_white(),
-        //     _ => printable,
-        // };
+        let printable = match cell.partition_id() {
+            2 => printable.bold().on_yellow(),
+            3 => printable.bold().on_magenta(),
+            4 => printable.bold().on_white(),
+            _ => printable,
+        };
 
         write!(f, "{printable}")?;
         write!(f, " ")?;
@@ -201,6 +208,7 @@ mod tests {
             }
         }
         open_cell(open_x as u32, open_y as u32, &counts, &mut open_cells);
+        eprintln!("{:?}", open_cells.iter().collect::<Vec<&Cell>>());
         field.set_cells(&open_cells)?;
 
         Ok(field)
@@ -208,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_print() {
-        let field = create_test_field(10, 10, 12, 5, 5).unwrap();
+        let field = create_test_field(30, 16, 99, 10, 5).unwrap();
         println!("{}", ColoredMineField(&field));
         eprintln!("{field:#}");
     }
