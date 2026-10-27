@@ -208,8 +208,7 @@ mod tests {
             }
         }
         open_cell(open_x as u32, open_y as u32, &counts, &mut open_cells);
-        eprintln!("{:?}", open_cells.iter().collect::<Vec<&Cell>>());
-        field.set_cells(&open_cells)?;
+        field.set_cells(open_cells)?;
 
         Ok(field)
     }
@@ -219,54 +218,13 @@ mod tests {
         let field = create_test_field(30, 16, 99, 10, 5).unwrap();
         println!("{}", ColoredMineField(&field));
         eprintln!("{field:#}");
+        eprintln!("{:#}", DetailMineField(&field));
+        
     }
 
     #[test]
     fn test_display_all_cell_states() {
-        let mut field = MineField::new(5, 2, 1).unwrap();
-        let cells = [
-            Cell {
-                point: Point { x: 0, y: 0 },
-                value: CellValue::Mine,
-            },
-            Cell {
-                point: Point { x: 1, y: 0 },
-                value: CellValue::Count(0),
-            },
-            Cell {
-                point: Point { x: 2, y: 0 },
-                value: CellValue::Count(1),
-            },
-            Cell {
-                point: Point { x: 3, y: 0 },
-                value: CellValue::Count(2),
-            },
-            Cell {
-                point: Point { x: 4, y: 0 },
-                value: CellValue::Count(3),
-            },
-            Cell {
-                point: Point { x: 0, y: 1 },
-                value: CellValue::Count(4),
-            },
-            Cell {
-                point: Point { x: 1, y: 1 },
-                value: CellValue::Count(5),
-            },
-            Cell {
-                point: Point { x: 2, y: 1 },
-                value: CellValue::Count(6),
-            },
-            Cell {
-                point: Point { x: 3, y: 1 },
-                value: CellValue::Count(7),
-            },
-            Cell {
-                point: Point { x: 4, y: 1 },
-                value: CellValue::Count(8),
-            },
-        ];
-        field.set_cells(&cells).unwrap();
+        let field = crate::solver::test_utils::create_minefield(["*0123", "45678"], 1);
         let rendered = print_field(&field).unwrap();
         assert_eq!(rendered, ColoredMineField(&field).to_string());
         assert!(rendered.contains("┌───"));
