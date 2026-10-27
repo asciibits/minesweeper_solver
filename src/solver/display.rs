@@ -1,6 +1,6 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::{InferredValue, cell::CellValue, grid::Point};
+use crate::solver::{InferredValue, cell::CellValue};
 
 use super::MineField;
 use colored::Colorize;

@@ -67,7 +67,7 @@ impl Display for CellValue {
 /// Internal solver representation of a board cell, caching neighbor masks and partition membership.
 // Note: Try to keep this under 32 bytes to fit in a single cache line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ProcessedCell {
+pub(crate) struct ProcessedCell {
     /// Inline the contents of Cell - this removes some internal padding and
     /// keeps ProcessedCell within the 32 byte boundary
     point: Point,
@@ -196,18 +196,21 @@ impl ProcessedCell {
 
     /// Returns the mask of neighbors currently holding [`CellValue::Unknown`].
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn unknown_neighbors(&self) -> DirectionSet {
         self.unknown_neighbors
     }
 
     /// Returns the mask of neighbors currently holding [`CellValue::Count`].
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn open_neighbors(&self) -> DirectionSet {
         self.open_neighbors
     }
 
     /// Returns the mask of neighbors currently holding [`CellValue::Mine`].
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn mine_neighbors(&self) -> DirectionSet {
         self.mine_neighbors
     }
@@ -244,6 +247,7 @@ impl ProcessedCell {
 
     /// Returns the mask of neighbors known or inferred to be open.
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn inferred_open_neighbors(&self) -> DirectionSet {
         self.inferred_open_neighbors
     }
@@ -281,7 +285,8 @@ impl ProcessedCell {
                     self.open_neighbors
                 } else {
                     match self.inferred_value {
-                        InferredValue::Open => self.inferred_unknown_neighbors,
+                        // InferredValue::Open => self.inferred_unknown_neighbors,
+                        InferredValue::Open => DirectionSet::new(),
                         InferredValue::Mine => DirectionSet::new(),
                         InferredValue::None => self.open_neighbors,
                     }
@@ -412,17 +417,14 @@ mod tests {
         let mut pc = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
         assert_eq!(pc.idx, 0);
         assert_eq!(pc.value, CellValue::Unknown);
-        assert_eq!(pc.neighbors, [E, S, SE].into_iter().collect());
+        assert_eq!(pc.neighbors, E | S | SE);
         assert_eq!(pc.open_neighbors, DirectionSet::new());
         assert_eq!(pc.mine_neighbors, DirectionSet::new());
-        assert_eq!(pc.unknown_neighbors, [E, S, SE].into_iter().collect());
+        assert_eq!(pc.unknown_neighbors, E | S | SE);
         assert_eq!(pc.staged_value, None);
         assert_eq!(pc.inferred_open_neighbors, DirectionSet::new());
         assert_eq!(pc.inferred_mine_neighbors, DirectionSet::new());
-        assert_eq!(
-            pc.inferred_unknown_neighbors,
-            [E, S, SE].into_iter().collect()
-        );
+        assert_eq!(pc.inferred_unknown_neighbors, E | S | SE);
         assert_eq!(pc.inferred_value, InferredValue::None);
         assert_eq!(pc.partition_id, 0);
 
@@ -444,11 +446,11 @@ mod tests {
 
         // Unknown cells return open_neighbors from alt_neighbors()
         pc.value = CellValue::Unknown;
-        assert_eq!(pc.alt_neighbors(false), [S].into_iter().collect());
+        assert_eq!(pc.alt_neighbors(false), !!S);
 
         // Count cells return unknown_neighbors from alt_neighbors()
         pc.value = CellValue::Count(1);
-        assert_eq!(pc.alt_neighbors(false), [E].into_iter().collect());
+        assert_eq!(pc.alt_neighbors(false), !!E);
 
         // Mine cells return an empty set from alt_neighbors()
         pc.value = CellValue::Mine;

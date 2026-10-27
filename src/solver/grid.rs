@@ -660,10 +660,10 @@ mod tests {
         assert!(!set.contains(N));
         assert_eq!(set.to_string(), "[NW, E, SE]");
 
-        let other: DirectionSet = [E, S, SW].into_iter().collect();
-        assert_eq!(set | other, [NW, E, SW, S, SE].into_iter().collect());
-        assert_eq!(set & other, [E].into_iter().collect());
-        assert_eq!(set - other, [NW, SE].into_iter().collect());
+        let other: DirectionSet = E | S | SW;
+        assert_eq!(set | other, NW | E | SW | S | SE);
+        assert_eq!(set & other, !!E);
+        assert_eq!(set - other, NW | SE);
 
         assert!(set.remove(E));
         assert!(!set.remove(E));
@@ -678,23 +678,23 @@ mod tests {
         // 3x3 grid corners, edges, and center
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 0, y: 0 }, 3, 3),
-            [E, S, SE].into_iter().collect()
+            E | S | SE
         );
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 2, y: 0 }, 3, 3),
-            [W, SW, S].into_iter().collect()
+            W | SW | S
         );
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 0, y: 2 }, 3, 3),
-            [N, NE, E].into_iter().collect()
+            N | NE | E
         );
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 2, y: 2 }, 3, 3),
-            [NW, N, W].into_iter().collect()
+            NW | N | W
         );
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 1, y: 0 }, 3, 3),
-            [W, E, SW, S, SE].into_iter().collect()
+            W | E | SW | S | SE
         );
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 1, y: 1 }, 3, 3).len(),
@@ -707,56 +707,56 @@ mod tests {
         // 1x3 vertical strip (middle cell only has N and S)
         assert_eq!(
             DirectionSet::all_neighbors(Point { x: 0, y: 1 }, 1, 3),
-            [N, S].into_iter().collect()
+            N | S
         );
     }
 
     #[test]
     fn test_direction_and_direction_set_bitwise_operators() {
-        let a: DirectionSet = [NW, N, E].into_iter().collect();
-        let b: DirectionSet = [N, E, SE].into_iter().collect();
+        let a: DirectionSet = NW | N | E;
+        let b: DirectionSet = N | E | SE;
 
         // Not (!) on DirectionSet and Direction
         assert_eq!(!DirectionSet::new(), DirectionSet::all());
         assert_eq!(!DirectionSet::all(), DirectionSet::new());
-        assert_eq!(!a, [NE, W, SW, S, SE].into_iter().collect());
+        assert_eq!(!a, NE | W | SW | S | SE);
         assert_eq!(!NW, DirectionSet::all() - NW);
 
         // BitOr (|) across (DirectionSet, DirectionSet), (DirectionSet, Direction),
         // (Direction, DirectionSet), and (Direction, Direction)
-        assert_eq!(a | b, [NW, N, E, SE].into_iter().collect());
+        assert_eq!(a | b, NW | N | E | SE);
         assert_eq!(a.union(b), a | b);
-        assert_eq!(a | S, [NW, N, E, S].into_iter().collect());
-        assert_eq!(S | a, [NW, N, E, S].into_iter().collect());
+        assert_eq!(a | S, NW | N | E | S);
+        assert_eq!(S | a, NW | N | E | S);
         assert_eq!(NW | SE, [NW, SE].into_iter().collect());
 
         // BitAnd (&) across all 4 combinations
-        assert_eq!(a & b, [N, E].into_iter().collect());
+        assert_eq!(a & b, N | E);
         assert_eq!(a.intersection(b), a & b);
-        assert_eq!(a & N, [N].into_iter().collect());
+        assert_eq!(a & N, !!N);
         assert_eq!(a & S, DirectionSet::new());
-        assert_eq!(N & a, [N].into_iter().collect());
+        assert_eq!(N & a, !!N);
         assert_eq!(S & a, DirectionSet::new());
-        assert_eq!(NW & NW, [NW].into_iter().collect());
+        assert_eq!(NW & NW, !!NW);
         assert_eq!(NW & SE, DirectionSet::new());
 
         // BitXor (^) across all 4 combinations
-        assert_eq!(a ^ b, [NW, SE].into_iter().collect());
-        assert_eq!(a ^ N, [NW, E].into_iter().collect());
-        assert_eq!(a ^ S, [NW, N, E, S].into_iter().collect());
-        assert_eq!(N ^ a, [NW, E].into_iter().collect());
-        assert_eq!(S ^ a, [NW, N, E, S].into_iter().collect());
-        assert_eq!(NW ^ SE, [NW, SE].into_iter().collect());
+        assert_eq!(a ^ b, NW | SE);
+        assert_eq!(a ^ N, NW | E);
+        assert_eq!(a ^ S, NW | N | E | S);
+        assert_eq!(N ^ a, NW | E);
+        assert_eq!(S ^ a, NW | N | E | S);
+        assert_eq!(NW ^ SE, NW | SE);
         assert_eq!(NW ^ NW, DirectionSet::new());
 
         // Sub (-) across all 4 combinations
-        assert_eq!(a - b, [NW].into_iter().collect());
+        assert_eq!(a - b, !!NW);
         assert_eq!(a.difference(b), a - b);
-        assert_eq!(a - N, [NW, E].into_iter().collect());
+        assert_eq!(a - N, NW | E);
         assert_eq!(a - S, a);
         assert_eq!(N - a, DirectionSet::new());
-        assert_eq!(S - a, [S].into_iter().collect());
-        assert_eq!(NW - SE, [NW].into_iter().collect());
+        assert_eq!(S - a, !!S);
+        assert_eq!(NW - SE, !!NW);
         assert_eq!(NW - NW, DirectionSet::new());
     }
 
@@ -766,30 +766,30 @@ mod tests {
 
         // BitOrAssign (|=) with Direction and DirectionSet
         s |= NW;
-        assert_eq!(s, [NW].into_iter().collect());
+        assert_eq!(s, !!NW);
         s |= E | SE;
-        assert_eq!(s, [NW, E, SE].into_iter().collect());
+        assert_eq!(s, NW | E | SE);
 
         // BitXorAssign (^=) with Direction and DirectionSet
         s ^= E; // removes E
-        assert_eq!(s, [NW, SE].into_iter().collect());
+        assert_eq!(s, NW | SE);
         s ^= N | SE; // adds N, removes SE
-        assert_eq!(s, [NW, N].into_iter().collect());
+        assert_eq!(s, NW | N);
 
         // BitAndAssign (&=) with DirectionSet and Direction
-        let mask_set: DirectionSet = [N, E, S].into_iter().collect();
+        let mask_set: DirectionSet = N | E | S;
         s &= mask_set;
-        assert_eq!(s, [N].into_iter().collect());
+        assert_eq!(s, !!N);
         s |= S;
         s &= S;
-        assert_eq!(s, [S].into_iter().collect());
+        assert_eq!(s, !!S);
 
         // SubAssign (-=) with Direction and DirectionSet
         s |= NW | N | E;
-        assert_eq!(s, [NW, N, E, S].into_iter().collect());
+        assert_eq!(s, NW | N | E | S);
         s -= N;
-        assert_eq!(s, [NW, E, S].into_iter().collect());
+        assert_eq!(s, NW | E | S);
         s -= E | S;
-        assert_eq!(s, [NW].into_iter().collect());
+        assert_eq!(s, !!NW);
     }
 }
