@@ -4,12 +4,12 @@ use cell::{Cell, CellValue, ProcessedCell};
 use grid::{Neighbor, Point};
 use partition::{CellOrdering, Partition};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     error::Error,
     fmt::{self, Display},
 };
 
-use crate::solver::cell::InferredState;
+use crate::solver::cell::InferredValue;
 
 pub mod cell;
 pub mod display;
@@ -36,6 +36,8 @@ pub struct MineField {
     dirty_neighbors: Vec<usize>,
     /// Active connected components of frontier cells, keyed by partition ID.
     partitions: HashMap<u32, Partition>,
+    inferred: HashSet<usize>,
+    invalid: HashSet<usize>,
     /// Monotonically increasing counter used to assign unique partition IDs.
     next_partition_id: u32,
 }
@@ -50,17 +52,19 @@ impl MineField {
     /// * Returns [`SolverError::AreaTooLarge`] if `width * height` exceeds `usize::MAX >> 9`.
     /// * Returns [`SolverError::MineCountTooLarge`] if `mine_count >= width * height`.
     pub fn new(width: u32, height: u32, mine_count: u32) -> Result<MineField, SolverError> {
-        if (width as usize).saturating_mul(height as usize) > (usize::MAX >> 9) {
+        let area = (width as usize).saturating_mul(height as usize);
+        let perimeter = (width as usize + height as usize) * 2;
+        if area > (usize::MAX >> 9) {
             return Err(SolverError::AreaTooLarge { width, height });
         }
-        if mine_count as usize >= width as usize * height as usize {
+        if mine_count as usize >= area {
             return Err(SolverError::MineCountTooLarge {
                 mine_count,
                 width,
                 height,
             });
         }
-        let mut cells = Vec::with_capacity(width as usize * height as usize);
+        let mut cells = Vec::with_capacity(area);
         for y in 0..height {
             for x in 0..width {
                 cells.push(ProcessedCell::new(Point { x, y }, width, height));
@@ -72,10 +76,12 @@ impl MineField {
             height,
             mine_count,
             cells: cells.into_boxed_slice(),
-            pending: Vec::with_capacity(width as usize * height as usize / 4),
+            pending: Vec::with_capacity(area / 4),
             partitions: HashMap::with_capacity(20),
+            dirty_neighbors: Vec::with_capacity(perimeter * 2),
+            inferred: HashSet::with_capacity(perimeter),
+            invalid: HashSet::new(),
             next_partition_id: 1,
-            dirty_neighbors: Vec::with_capacity((width as usize + height as usize) * 4),
         };
 
         Ok(field)
@@ -170,6 +176,24 @@ impl MineField {
         Ok(())
     }
 
+    pub fn inferred_safe(&self) -> Vec<Point> {
+        self.inferred
+            .iter()
+            .map(|&idx| self.cells[idx])
+            .filter(|c| c.inferred_value() == InferredValue::Open)
+            .map(|c| c.point())
+            .collect()
+    }
+
+    pub fn inferred_mines(&self) -> Vec<Point> {
+        self.inferred
+            .iter()
+            .map(|&idx| self.cells[idx])
+            .filter(|c| c.inferred_value() == InferredValue::Mine)
+            .map(|c| c.point())
+            .collect()
+    }
+
     /// Re-indexes modified cells, rebuilds affected frontier partitions, and runs deduction passes.
     fn solve(&mut self) {
         let inference_broken = self.index_pending();
@@ -187,8 +211,27 @@ impl MineField {
         self.dirty_neighbors.clear();
     }
 
-    /// Updates neighbor masks (`unknown_neighbors`, `remaining_neighbors`) and `remaining_mines`
-    /// for all cells in `dirty` and their immediate neighbors.
+    /// Clears any solver inference on `cell_idx` and restores its neighbors' `inferred_*_neighbors` masks.
+    fn clear_cell_inference(cells: &mut [ProcessedCell], width: u32, cell_idx: usize) {
+        let cell = &mut cells[cell_idx];
+        let inferred_state = cell.inferred_value();
+        if inferred_state != InferredValue::None {
+            cell.set_inferred_value(InferredValue::None);
+            for Neighbor { neighbor, from } in cell.point().neighbors(cell.neighbors()) {
+                let neighbor_idx = neighbor.to_index(width);
+                let neighbor_cell = &mut cells[neighbor_idx];
+                neighbor_cell.add_inferred_unknown_neighbor(from);
+                if inferred_state == InferredValue::Open {
+                    neighbor_cell.remove_inferred_open_neighbor(from);
+                } else {
+                    neighbor_cell.remove_inferred_mine_neighbor(from);
+                }
+            }
+        }
+    }
+
+    /// Updates neighbor masks (`unknown_neighbors`, `open_neighbors`, `mine_neighbors`)
+    /// for all cells in `pending` and their immediate neighbors.
     ///
     /// Returns `true` if any inference was broken, `false` otherwise.
     fn index_pending(&mut self) -> bool {
@@ -200,39 +243,47 @@ impl MineField {
             };
 
             let prev_value = dirty_cell.value();
-
-            match prev_value {
-                CellValue::Count(_) => {
-                    // Transitioning from Count to Count. No changes to
-                    // neighbor sets
-                    if matches!(new_value, CellValue::Count(_)) {
-                        continue;
-                    }
-                }
-                val => {
-                    if val == new_value {
-                        continue;
-                    }
-                }
+            if prev_value == new_value {
+                continue;
             }
+
+            // Transitioning from Open or Mine breaks previous inference passes,
+            // as does a direct violation of existing inferences.
+            inference_breaking = inference_breaking
+                || !matches!(prev_value, CellValue::Unknown)
+                || match dirty_cell.inferred_value() {
+                    InferredValue::Mine => new_value != CellValue::Mine,
+                    InferredValue::Open => !matches!(new_value, CellValue::Count(_)),
+                    InferredValue::None => false,
+                };
+
+            // If this cell previously held an inference, revert its inferred contribution
+            // on all neighbors before applying its new real value.
+            Self::clear_cell_inference(&mut self.cells, self.width, pending_idx);
+
+            let count_to_count = matches!(
+                (prev_value, new_value),
+                (CellValue::Count(_), CellValue::Count(_))
+            );
 
             for Neighbor {
                 neighbor: neighbor_pt,
                 from,
             } in dirty_cell.point().neighbors(dirty_cell.neighbors())
             {
-                let neighbor_cell = &mut self.cells[self.cell_idx(neighbor_pt)];
-                // update any neighbors
-                match prev_value {
-                    CellValue::Unknown => neighbor_cell.remove_unknown_neighbor(from),
-                    CellValue::Count(_) => neighbor_cell.remove_open_neighbor(from),
-                    CellValue::Mine => neighbor_cell.remove_mine_neighbor(from),
-                };
-                match new_value {
-                    CellValue::Unknown => neighbor_cell.add_unknown_neighbor(from),
-                    CellValue::Count(_) => neighbor_cell.add_open_neighbor(from),
-                    CellValue::Mine => neighbor_cell.add_mine_neighbor(from),
-                };
+                let neighbor_cell = &mut self.cells[neighbor_pt.to_index(self.width)];
+                if !count_to_count {
+                    match prev_value {
+                        CellValue::Unknown => neighbor_cell.remove_unknown_neighbor(from),
+                        CellValue::Count(_) => neighbor_cell.remove_open_neighbor(from),
+                        CellValue::Mine => neighbor_cell.remove_mine_neighbor(from),
+                    };
+                    match new_value {
+                        CellValue::Unknown => neighbor_cell.add_unknown_neighbor(from),
+                        CellValue::Count(_) => neighbor_cell.add_open_neighbor(from),
+                        CellValue::Mine => neighbor_cell.add_mine_neighbor(from),
+                    };
+                }
                 if neighbor_cell.staged_value().is_none() {
                     // Note: The same neighbor may be adjacent to multiple dirty
                     // cells, so we may index it multiple times. Future users of
@@ -241,19 +292,8 @@ impl MineField {
                 }
             }
 
-            // Transitioning from Open or Mine breaks previous inference passes,
-            // as does a direct violation of existing inferences.
-            inference_breaking = inference_breaking
-                || !matches!(prev_value, CellValue::Unknown)
-                || match dirty_cell.inferred_state() {
-                    InferredState::Mine => new_value != CellValue::Mine,
-                    InferredState::Open => !matches!(new_value, CellValue::Count(_)),
-                    InferredState::None => false,
-                };
-
             let dirty_cell = &mut self.cells[pending_idx];
             dirty_cell.set_value(new_value);
-            dirty_cell.set_inferred_state(InferredState::None);
         }
 
         // clear all staged values now that they have been applied
@@ -266,14 +306,23 @@ impl MineField {
 
     /// Invalidates partitions touched by `dirty` or `dirty_neighbors` and constructs
     /// new connected [`Partition`]s from the updated frontier.
-    ///
-    /// Returns the IDs of all newly created partitions.
     fn partition_dirty(&mut self, reset_inferred: bool) {
         for &cell_idx in self.pending.iter().chain(self.dirty_neighbors.iter()) {
-            let cell = &mut self.cells[cell_idx];
-            if cell.partition_id() != 0 {
-                self.partitions.remove(&cell.partition_id());
-                cell.set_partition_id(0);
+            let pid = self.cells[cell_idx].partition_id();
+            if pid != 0 {
+                if let Some(old_partition) = self.partitions.remove(&pid) {
+                    if reset_inferred {
+                        // I don't think this is necessary - I think just the new generated
+                        // partitions need clearing
+                        // for &inferred_idx in old_partition.inferred() {
+                        //     Self::clear_cell_inference(&mut self.cells, self.width, inferred_idx);
+                        // }
+                    }
+                }
+                self.cells[cell_idx].set_partition_id(0);
+            }
+            if reset_inferred {
+                Self::clear_cell_inference(&mut self.cells, self.width, cell_idx);
             }
         }
 
@@ -299,24 +348,8 @@ impl MineField {
                     if reset_inferred {
                         // clear out all inferences from this partition,
                         // updating all neighbors as needed
-                        for &cell_idx in partition.members() {
-                            let cell = &mut self.cells[cell_idx];
-                            let inferred_state = cell.inferred_state();
-                            if inferred_state != InferredState::None {
-                                cell.set_inferred_state(InferredState::None);
-                                for Neighbor { neighbor, from } in
-                                    cell.point().neighbors(cell.neighbors())
-                                {
-                                    let neighbor_idx = self.cell_idx(neighbor);
-                                    let neighbor_cell = &mut self.cells[neighbor_idx];
-                                    neighbor_cell.add_inferred_unknown_neighbor(from);
-                                    if inferred_state == InferredState::Open {
-                                        neighbor_cell.remove_inferred_unknown_neighbor(from);
-                                    } else {
-                                        neighbor_cell.remove_inferred_unknown_neighbor(from);
-                                    }
-                                }
-                            }
+                        for &member_idx in partition.members() {
+                            Self::clear_cell_inference(&mut self.cells, self.width, member_idx);
                         }
                     }
                     self.partitions.insert(partition_id, partition);
@@ -347,79 +380,68 @@ impl MineField {
             }
         }
 
-        loop {
-            if let Some(solve_cell_ord) = sorted_knowns.pop_first() {
-                if solve_cell_ord.solution_count() > 1 {
-                    // We have exhausted the easy deductions for this partition
-                    sorted_knowns.insert(solve_cell_ord);
-                    break;
-                }
+        while let Some(solve_cell_ord) = sorted_knowns.pop_first() {
+            if solve_cell_ord.solution_count() > 1 {
+                // We have exhausted the easy deductions for this partition
+                sorted_knowns.insert(solve_cell_ord);
+                break;
+            }
 
-                let solve_cell = &mut self.cells[solve_cell_ord.cell_idx()];
+            let solve_cell = self.cells[solve_cell_ord.cell_idx()];
 
-                if solve_cell_ord.solution_count() == 0 {
-                    // This is an impossible state, but we can still mark the
-                    // alt_neighbors as open and update their neighbors.
-                    self.partitions
-                        .get_mut(&solve_cell.partition_id())
-                        .unwrap()
-                        .add_invalid(solve_cell.idx());
-                }
+            if solve_cell_ord.solution_count() == 0 {
+                // This is indicates an invalid board was presented. This is OK,
+                // we will still attempt to solve whatever we can, and report
+                // the places where solves were not possible.
+                self.invalid.insert(solve_cell.idx());
+            }
 
-                // two options here: either the remaining_mines are all in
-                // the remaining_neighbors, or none of them are
-                let inferred_state;
-                if solve_cell_ord.remaining_mines() > 0 {
-                    inferred_state = InferredState::Mine;
-                } else {
-                    inferred_state = InferredState::Open;
-                }
+            // two options here: either the remaining_mines are all in
+            // the remaining_neighbors, or none of them are
+            let inferred_state = if solve_cell_ord.remaining_mines() > 0 {
+                InferredValue::Mine
+            } else {
+                InferredValue::Open
+            };
+
+            for Neighbor {
+                neighbor: inferred_pt,
+                ..
+            } in solve_cell
+                .point()
+                .neighbors(solve_cell.inferred_unknown_neighbors())
+            {
+                let inferred_idx = self.cell_idx(inferred_pt);
+                let inferred_cell = &mut self.cells[inferred_idx];
+                debug_assert_eq!(inferred_cell.value(), CellValue::Unknown);
+                inferred_cell.set_inferred_value(inferred_state);
+                let neighbor_iter = inferred_pt.neighbors(inferred_cell.neighbors());
+                self.inferred.insert(solve_cell.idx());
+
                 for Neighbor {
-                    neighbor: inferred_pt,
-                    ..
-                } in solve_cell
-                    .point()
-                    .neighbors(solve_cell.inferred_unknown_neighbors())
+                    neighbor: neighbor_pt,
+                    from,
+                } in neighbor_iter
                 {
-                    let inferred_idx = self.cell_idx(inferred_pt);
-                    let inferred_cell = &mut self.cells[inferred_idx];
-                    debug_assert_eq!(inferred_cell.value(), CellValue::Unknown);
-                    inferred_cell.set_inferred_state(inferred_state);
-                    let neighbor_iter = inferred_pt.neighbors(inferred_cell.neighbors());
-                    self.partitions
-                        .get_mut(&self.cells[solve_cell_ord.cell_idx()].partition_id())
-                        .unwrap()
-                        .add_inferred(inferred_idx);
-
-                    for Neighbor {
-                        neighbor: neighbor_pt,
-                        from,
-                    } in neighbor_iter
-                    {
-                        let neighbor_idx = self.cell_idx(neighbor_pt);
-                        let neighbor_cell = &mut self.cells[neighbor_idx];
-                        let prev_cell_ord = CellOrdering::from_cell(neighbor_cell);
-                        neighbor_cell.remove_inferred_unknown_neighbor(from);
-                        if inferred_state == InferredState::Mine {
-                            neighbor_cell.add_inferred_mine_neighbor(from);
-                        } else {
-                            neighbor_cell.add_inferred_open_neighbor(from);
-                        }
-                        if let Some(prev_ord_cell) = prev_cell_ord {
-                            if sorted_knowns.remove(&prev_ord_cell) {
-                                if let Some(new_cell_ord) = CellOrdering::from_cell(neighbor_cell) {
-                                    sorted_knowns.insert(new_cell_ord);
-                                }
+                    let neighbor_idx = self.cell_idx(neighbor_pt);
+                    let neighbor_cell = &mut self.cells[neighbor_idx];
+                    let prev_cell_ord = CellOrdering::from_cell(neighbor_cell);
+                    neighbor_cell.remove_inferred_unknown_neighbor(from);
+                    if inferred_state == InferredValue::Mine {
+                        neighbor_cell.add_inferred_mine_neighbor(from);
+                    } else {
+                        neighbor_cell.add_inferred_open_neighbor(from);
+                    }
+                    if let Some(prev_ord_cell) = prev_cell_ord {
+                        if sorted_knowns.remove(&prev_ord_cell) {
+                            if let Some(new_cell_ord) = CellOrdering::from_cell(neighbor_cell) {
+                                sorted_knowns.insert(new_cell_ord);
                             }
                         }
                     }
                 }
-            } else {
-                break;
             }
         }
-
-        dbg!(sorted_knowns);
     }
 
     /// Get the cell index for the given x/y coordinates.
@@ -663,7 +685,9 @@ mod tests {
         assert!(c10.mine_neighbors().is_empty());
         assert_neighbor_invariants(&c10);
 
-        // Change (1, 0) from Mine to Count(1): (0, 0) moves E from mine_neighbors to open_neighbors
+        // Change (1, 0) from Mine to Count(1): (0, 0) moves E from mine_neighbors to open_neighbors.
+        // Because (0, 0) is Count(2) and now has only 2 unknown neighbors left (S and SE),
+        // basic_solve infers both S and SE are mines, reducing remaining_mines() to 0!
         field
             .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(1))
             .unwrap();
@@ -671,10 +695,12 @@ mod tests {
         assert!(c00.mine_neighbors().is_empty());
         assert_eq!(c00.open_neighbors(), [E].into_iter().collect());
         assert_eq!(c00.unknown_neighbors(), [S, SE].into_iter().collect());
-        assert_eq!(CellOrdering::from_cell(&c00).unwrap().remaining_mines(), 2);
+        assert_eq!(c00.inferred_mine_neighbors(), [S, SE].into_iter().collect());
+        assert_eq!(CellOrdering::from_cell(&c00).unwrap().remaining_mines(), 0);
         assert_neighbor_invariants(&c00);
 
-        // Revert (1, 0) back to Unknown: (0, 0) moves E from open_neighbors back to unknown_neighbors
+        // Revert (1, 0) back to Unknown (inference-breaking): (0, 0) moves E from open_neighbors
+        // back to unknown_neighbors, and the inferences on S and SE are cleared!
         field
             .set_cell_value(Point { x: 1, y: 0 }, CellValue::Unknown)
             .unwrap();
@@ -682,13 +708,16 @@ mod tests {
         assert!(c00.mine_neighbors().is_empty());
         assert!(c00.open_neighbors().is_empty());
         assert_eq!(c00.unknown_neighbors(), [E, S, SE].into_iter().collect());
+        assert!(c00.inferred_mine_neighbors().is_empty());
+        assert_eq!(CellOrdering::from_cell(&c00).unwrap().remaining_mines(), 2);
         assert_neighbor_invariants(&c00);
     }
 
     #[test]
     fn test_partitioning_and_repartitioning_across_updates() {
-        // 5x1 strip: [Count(1), Unknown, Unknown, Unknown, Count(1)]
-        let mut field = MineField::new(5, 1, 2).unwrap();
+        // 5x2 board with Count(1) at top-left (0, 0) and top-right (4, 0)
+        // Each corner has 3 unknown neighbors (choose(3, 1) = 3 > 1), so neither is trivially solved.
+        let mut field = MineField::new(5, 2, 2).unwrap();
         field
             .set_cells(&[
                 Cell {
@@ -702,38 +731,38 @@ mod tests {
             ])
             .unwrap();
 
-        // Two disconnected frontier components: {(0,0), (1,0)} and {(3,0), (4,0)}
+        // Two disconnected frontier components:
+        // Left: {(0,0), (1,0), (0,1), (1,1)} (4 cells)
+        // Right: {(4,0), (3,0), (4,1), (3,1)} (4 cells)
         assert_eq!(field.partitions.len(), 2);
         let p_left = field.cells[0].partition_id();
         let p_right = field.cells[4].partition_id();
         assert_ne!(p_left, p_right);
-        assert_eq!(field.partitions[&p_left].len(), 2);
-        assert_eq!(field.partitions[&p_right].len(), 2);
+        assert_eq!(field.partitions[&p_left].len(), 4);
+        assert_eq!(field.partitions[&p_right].len(), 4);
         assert_eq!(field.cells[2].partition_id(), 0);
         assert_eq!(
             field.cells[2].unknown_neighbors(),
-            [W, E].into_iter().collect()
+            [W, E, SW, S, SE].into_iter().collect()
         );
         assert!(field.cells[2].open_neighbors().is_empty());
 
-        // Reveal the middle cell (2, 0) as Count(1): now (1, 0) and (3, 0) both have
-        // open_neighbors == [W, E], merging both components into a single 5-cell partition!
+        // Reveal the middle top cell (2, 0) as Count(2): now both components are bridged
+        // into a single 10-cell partition!
         field
-            .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(1))
+            .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(2))
             .unwrap();
         assert_eq!(field.partitions.len(), 1);
         let merged_partition = field.partitions.values().next().unwrap();
-        assert_eq!(merged_partition.len(), 5);
+        assert_eq!(merged_partition.len(), 10);
         assert_eq!(
             field.cells[1].open_neighbors(),
             [W, E].into_iter().collect()
         );
-        assert!(field.cells[1].unknown_neighbors().is_empty());
         assert_eq!(
             field.cells[3].open_neighbors(),
             [W, E].into_iter().collect()
         );
-        assert!(field.cells[3].unknown_neighbors().is_empty());
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }
@@ -933,6 +962,169 @@ mod tests {
             0
         );
         for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_basic_solve_mine_and_open_inferences_and_cascading() {
+        // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Count(1), (3,0)=Unknown]
+        // 1. (0,0)=Count(1) has only 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
+        // 2. That satisfies (2,0)=Count(1), which then infers (3,0) is Open!
+        let mut field = MineField::new(4, 1, 1).unwrap();
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Count(1),
+                },
+                Cell {
+                    point: Point { x: 2, y: 0 },
+                    value: CellValue::Count(1),
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Mine);
+        assert_eq!(field.cells[3].inferred_value(), InferredValue::Open);
+
+        // Verify inferred neighbor sets reflect the deductions
+        assert_eq!(field.cells[0].inferred_mine_neighbors(), E | E);
+        assert!(field.cells[0].inferred_unknown_neighbors().is_empty());
+        assert_eq!(field.cells[2].inferred_mine_neighbors(), W | W);
+        assert_eq!(field.cells[2].inferred_open_neighbors(), E | E);
+        assert!(field.cells[2].inferred_unknown_neighbors().is_empty());
+
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_basic_solve_detects_impossible_contradictory_clues() {
+        // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
+        // (0,0)=Count(0) infers (1,0) is Open, leaving (2,0)=Count(1) with 0 available cells
+        // and 1 remaining mine (solution_count == 0 -> recorded in partition.invalid).
+        let mut field = MineField::new(3, 1, 1).unwrap();
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Count(0),
+                },
+                Cell {
+                    point: Point { x: 2, y: 0 },
+                    value: CellValue::Count(1),
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.invalid.len(), 1);
+        assert!(field.invalid.contains(&2));
+        // assert_eq!(field.invalid, &[2]);
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_inference_compatible_update_preserves_inferences() {
+        // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Unknown, (3,0)=Unknown]
+        // Round 1: Reveal (0,0)=Count(1) -> infers (1,0) is Mine, and updates (2,0)'s
+        // inferred_mine_neighbors to include W.
+        let mut field = MineField::new(4, 1, 1).unwrap();
+        field
+            .set_cell_value(Point { x: 0, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Mine);
+        assert_eq!(field.cells[2].inferred_mine_neighbors(), W | W);
+
+        // Round 2 (inference-compatible): Reveal (2,0) as Count(1).
+        // Because (1,0)'s Mine inference is preserved, (2,0) immediately knows its 1 mine is at W
+        // and infers (3,0) is Open!
+        field
+            .set_cell_value(Point { x: 2, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Mine);
+        assert_eq!(field.cells[3].inferred_value(), InferredValue::Open);
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_inference_breaking_updates_clear_and_recompute_inferences() {
+        // 3x1 strip: [(0,0), (1,0), (2,0)]
+        let mut field = MineField::new(3, 1, 2).unwrap();
+
+        // Round 1: Reveal (1,0) as Count(2) -> both (0,0) and (2,0) are inferred as Mine.
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(2))
+            .unwrap();
+        assert_eq!(field.cells[0].inferred_value(), InferredValue::Mine);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Mine);
+
+        // Round 2 (Inference-breaking Case A): Change (1,0) from Count(2) to Count(1).
+        // Neither (0,0) nor (2,0) can be inferred anymore; both must reset to InferredState::None!
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(1))
+            .unwrap();
+        assert_eq!(field.cells[0].inferred_value(), InferredValue::None);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::None);
+        assert_eq!(field.cells[1].inferred_unknown_neighbors(), W | E);
+        assert!(field.cells[1].inferred_mine_neighbors().is_empty());
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+
+        // Round 3: Change (1,0) to Count(0) -> both (0,0) and (2,0) are inferred as Open.
+        field
+            .set_cell_value(Point { x: 1, y: 0 }, CellValue::Count(0))
+            .unwrap();
+        assert_eq!(field.cells[0].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
+
+        // Round 4 (Inference-breaking Case B): Directly violate inference on (0,0) by setting it to Mine,
+        // and simultaneously change (1,0) to Count(1).
+        // (2,0) must remain/be recomputed as Open, and all neighbor invariants must hold.
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Mine,
+                },
+                Cell {
+                    point: Point { x: 1, y: 0 },
+                    value: CellValue::Count(1),
+                },
+            ])
+            .unwrap();
+        assert_eq!(field.cells[0].inferred_value(), InferredValue::None);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+
+        // Round 5 (Inference-breaking Case C): Dissolve the partition completely by resetting
+        // (0,0) and (1,0) to Unknown. Verify (2,0)'s Open inference is cleared even though no
+        // new partition is created!
+        field
+            .set_cells(&[
+                Cell {
+                    point: Point { x: 0, y: 0 },
+                    value: CellValue::Unknown,
+                },
+                Cell {
+                    point: Point { x: 1, y: 0 },
+                    value: CellValue::Unknown,
+                },
+            ])
+            .unwrap();
+        assert!(field.partitions.is_empty());
+        for cell in &field.cells {
+            assert_eq!(cell.inferred_value(), InferredValue::None);
+            assert_eq!(cell.inferred_unknown_neighbors(), cell.unknown_neighbors());
             assert_neighbor_invariants(cell);
         }
     }

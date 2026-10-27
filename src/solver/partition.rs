@@ -15,48 +15,17 @@ use crate::solver::{
 pub struct Partition {
     /// Linear cell indices of frontier cells belonging to this partition.
     members: Vec<usize>,
-    inferred: Vec<usize>,
-    invalid: Vec<usize>,
 }
 
 impl Partition {
     pub(super) fn new(members: Vec<usize>) -> Partition {
-        let unknown_len = members.len();
-        Partition {
-            members,
-            inferred: Vec::with_capacity(unknown_len),
-            invalid: Vec::new(),
-        }
+        Partition { members }
     }
 
     /// Returns the slice of linear cell indices belonging to this partition.
     #[inline]
     pub(super) fn members(&self) -> &[usize] {
         &self.members
-    }
-
-    /// Returns the slice of cell indices whose states were inferred within this partition.
-    #[inline]
-    pub(super) fn inferred(&self) -> &[usize] {
-        &self.inferred
-    }
-
-    /// Records a cell index whose state was inferred within this partition.
-    #[inline]
-    pub(super) fn add_inferred(&mut self, cell_idx: usize) {
-        self.inferred.push(cell_idx);
-    }
-
-    /// Returns the slice of cell indices found to have contradictory constraints.
-    #[inline]
-    pub(super) fn invalid(&self) -> &[usize] {
-        &self.invalid
-    }
-
-    /// Records a cell index that entered an impossible/contradictory constraint state.
-    #[inline]
-    pub(super) fn add_invalid(&mut self, cell_idx: usize) {
-        self.invalid.push(cell_idx);
     }
 
     /// Performs a breadth-first traversal over `alt_neighbors` starting from `start_idx`
@@ -73,7 +42,9 @@ impl Partition {
         ignore_inferred: bool,
     ) -> Option<Partition> {
         let start_cell = &mut cells[start_idx];
-        if start_cell.is_mine() || start_cell.alt_neighbors(ignore_inferred).is_empty() {
+        if start_cell.is_mine(ignore_inferred)
+            || start_cell.alt_neighbors(ignore_inferred).is_empty()
+        {
             start_cell.set_partition_id(0);
             return None;
         }
@@ -87,7 +58,7 @@ impl Partition {
 
         while let Some(cell_idx) = to_process.pop_front() {
             let cell = &cells[cell_idx];
-            if cell.is_mine() {
+            if cell.is_mine(ignore_inferred) {
                 continue;
             }
             members.push(cell_idx);
@@ -159,22 +130,10 @@ impl CellOrdering {
         self.cell_idx
     }
 
-    /// Returns the original clue count on the cell.
-    #[inline]
-    pub(super) fn mine_count(&self) -> i8 {
-        self.mine_count
-    }
-
     /// Returns the number of mines still unaccounted for among the cell's unknown neighbors.
     #[inline]
     pub(super) fn remaining_mines(&self) -> i8 {
         self.remaining_mines
-    }
-
-    /// Returns the number of adjacent unknown cells available to hold `remaining_mines`.
-    #[inline]
-    pub(super) fn available_cells(&self) -> i8 {
-        self.available_cells
     }
 
     /// Returns the number of ways to choose `remaining_mines` from `available_cells`.

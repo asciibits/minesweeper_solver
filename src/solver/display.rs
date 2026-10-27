@@ -4,25 +4,22 @@ use crate::solver::{cell::CellValue, grid::Point};
 
 use super::MineField;
 use colored::Colorize;
-use std::{fmt::{self, Display, Formatter}, ops::{Deref, DerefMut}};
+use std::{
+    fmt::{self, Display, Formatter},
+    ops::Deref,
+};
 
-struct ColoredMineField(MineField);
+struct ColoredMineField<'a>(&'a MineField);
 
-impl Deref for ColoredMineField {
+impl Deref for ColoredMineField<'_> {
     type Target = MineField;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0
     }
 }
 
-impl DerefMut for ColoredMineField {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Display for ColoredMineField {
+impl Display for ColoredMineField<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if self.height == 0 {
             return Ok(());
@@ -47,7 +44,7 @@ impl Display for ColoredMineField {
 ///
 /// Returns [`fmt::Error`] only if formatting into the underlying buffer fails.
 pub fn print_field(field: &MineField) -> Result<String, fmt::Error> {
-    Ok(field.to_string())
+    Ok(ColoredMineField(field).to_string())
 }
 
 /// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
@@ -211,64 +208,61 @@ mod tests {
 
     #[test]
     fn test_print() {
-        let field = ColoredMineField(create_test_field(10, 10, 12, 5, 5).unwrap());
-        println!("{field}");
-        // for cell in &field.cells {
-        //     eprintln!("{:#}", cell);
-        // }
-        // println!("Partition: {:#?}", field.partitions().iter());
+        let field = create_test_field(10, 10, 12, 5, 5).unwrap();
+        println!("{}", ColoredMineField(&field));
+        eprintln!("{field:#}");
     }
 
-    // #[test]
-    // fn test_display_all_cell_states() {
-    //     let mut field = ColoredMineField(MineField::new(5, 2, 1).unwrap());
-    //     let cells = [
-    //         Cell {
-    //             point: Point { x: 0, y: 0 },
-    //             value: CellValue::Mine,
-    //         },
-    //         Cell {
-    //             point: Point { x: 1, y: 0 },
-    //             value: CellValue::Count(0),
-    //         },
-    //         Cell {
-    //             point: Point { x: 2, y: 0 },
-    //             value: CellValue::Count(1),
-    //         },
-    //         Cell {
-    //             point: Point { x: 3, y: 0 },
-    //             value: CellValue::Count(2),
-    //         },
-    //         Cell {
-    //             point: Point { x: 4, y: 0 },
-    //             value: CellValue::Count(3),
-    //         },
-    //         Cell {
-    //             point: Point { x: 0, y: 1 },
-    //             value: CellValue::Count(4),
-    //         },
-    //         Cell {
-    //             point: Point { x: 1, y: 1 },
-    //             value: CellValue::Count(5),
-    //         },
-    //         Cell {
-    //             point: Point { x: 2, y: 1 },
-    //             value: CellValue::Count(6),
-    //         },
-    //         Cell {
-    //             point: Point { x: 3, y: 1 },
-    //             value: CellValue::Count(7),
-    //         },
-    //         Cell {
-    //             point: Point { x: 4, y: 1 },
-    //             value: CellValue::Count(8),
-    //         },
-    //     ];
-    //     field.set_cells(&cells).unwrap();
-    //     let rendered = print_field(&field).unwrap();
-    //     assert_eq!(rendered, field.to_string());
-    //     assert!(rendered.contains("┌───"));
-    //     assert!(rendered.contains("├───"));
-    //     assert!(rendered.contains("└───"));
-    // }
+    #[test]
+    fn test_display_all_cell_states() {
+        let mut field = MineField::new(5, 2, 1).unwrap();
+        let cells = [
+            Cell {
+                point: Point { x: 0, y: 0 },
+                value: CellValue::Mine,
+            },
+            Cell {
+                point: Point { x: 1, y: 0 },
+                value: CellValue::Count(0),
+            },
+            Cell {
+                point: Point { x: 2, y: 0 },
+                value: CellValue::Count(1),
+            },
+            Cell {
+                point: Point { x: 3, y: 0 },
+                value: CellValue::Count(2),
+            },
+            Cell {
+                point: Point { x: 4, y: 0 },
+                value: CellValue::Count(3),
+            },
+            Cell {
+                point: Point { x: 0, y: 1 },
+                value: CellValue::Count(4),
+            },
+            Cell {
+                point: Point { x: 1, y: 1 },
+                value: CellValue::Count(5),
+            },
+            Cell {
+                point: Point { x: 2, y: 1 },
+                value: CellValue::Count(6),
+            },
+            Cell {
+                point: Point { x: 3, y: 1 },
+                value: CellValue::Count(7),
+            },
+            Cell {
+                point: Point { x: 4, y: 1 },
+                value: CellValue::Count(8),
+            },
+        ];
+        field.set_cells(&cells).unwrap();
+        let rendered = print_field(&field).unwrap();
+        assert_eq!(rendered, ColoredMineField(&field).to_string());
+        assert!(rendered.contains("┌───"));
+        assert!(rendered.contains("├───"));
+        assert!(rendered.contains("└───"));
+    }
 }

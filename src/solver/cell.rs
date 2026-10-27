@@ -108,7 +108,7 @@ pub(super) struct ProcessedCell {
     staged_value: Option<CellValue>,
 
     /// The inferred state of the cell.
-    inferred_state: InferredState,
+    inferred_value: InferredValue,
 
     /// The remaining neighbors left after [`inferred_open_neighbors`] and
     /// [`inferred_mine_neighbors`].
@@ -127,7 +127,7 @@ pub(super) struct ProcessedCell {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum InferredState {
+pub(super) enum InferredValue {
     None,
     Open,
     Mine,
@@ -147,7 +147,7 @@ impl ProcessedCell {
             open_neighbors: DirectionSet::new(),
             mine_neighbors: DirectionSet::new(),
             staged_value: None,
-            inferred_state: InferredState::None,
+            inferred_value: InferredValue::None,
             inferred_unknown_neighbors: neighbors,
             inferred_open_neighbors: DirectionSet::new(),
             inferred_mine_neighbors: DirectionSet::new(),
@@ -226,14 +226,14 @@ impl ProcessedCell {
 
     /// Returns the solver's current [`InferredState`] for this cell.
     #[inline]
-    pub(super) fn inferred_state(&self) -> InferredState {
-        self.inferred_state
+    pub(super) fn inferred_value(&self) -> InferredValue {
+        self.inferred_value
     }
 
     /// Updates the solver's [`InferredState`] for this cell.
     #[inline]
-    pub(super) fn set_inferred_state(&mut self, inferred_state: InferredState) {
-        self.inferred_state = inferred_state;
+    pub(super) fn set_inferred_value(&mut self, inferred_state: InferredValue) {
+        self.inferred_value = inferred_state;
     }
 
     /// Returns the mask of neighbors still unknown after applying solver inferences.
@@ -286,12 +286,14 @@ impl ProcessedCell {
         }
     }
 
-    pub(super) fn is_mine(&self) -> bool {
-        self.value == CellValue::Mine || self.inferred_state == InferredState::Mine
+    pub(super) fn is_mine(&self, ignore_inferred: bool) -> bool {
+        self.value == CellValue::Mine
+            || (!ignore_inferred && self.inferred_value == InferredValue::Mine)
     }
 
-    pub(super) fn is_open(&self) -> bool {
-        matches!(self.value, CellValue::Count(_)) || self.inferred_state == InferredState::Open
+    pub(super) fn is_open(&self, ignore_inferred: bool) -> bool {
+        matches!(self.value, CellValue::Count(_))
+            || (!ignore_inferred && self.inferred_value == InferredValue::Open)
     }
 
     pub(super) fn add_unknown_neighbor(&mut self, direction: Direction) {
@@ -365,7 +367,7 @@ impl Display for ProcessedCell {
             self.inferred_open_neighbors,
             self.inferred_mine_neighbors,
             self.inferred_unknown_neighbors,
-            self.inferred_state,
+            self.inferred_value,
             self.partition_id
         )
     }
@@ -409,7 +411,7 @@ mod tests {
             pc.inferred_unknown_neighbors,
             [E, S, SE].into_iter().collect()
         );
-        assert_eq!(pc.inferred_state, InferredState::None);
+        assert_eq!(pc.inferred_value, InferredValue::None);
         assert_eq!(pc.partition_id, 0);
 
         pc.value = CellValue::Count(2);
