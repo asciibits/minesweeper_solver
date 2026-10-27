@@ -58,12 +58,10 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
         write!(f, "{}", "│ ".bold())?;
         let cell = field.cells()[col as usize + row as usize * field.width as usize];
         let printable = match cell.value() {
-            CellValue::Unknown => {
-                match cell.inferred_value() {
-                    InferredValue::None => " ".on_bright_black(),
-                    InferredValue::Mine => " ".on_bright_red(),
-                    InferredValue::Open => " ".on_green(),
-                }
+            CellValue::Unknown => match cell.inferred_value() {
+                InferredValue::None => " ".on_bright_black(),
+                InferredValue::Mine => " ".on_bright_red(),
+                InferredValue::Open => " ".on_green(),
             },
             CellValue::Mine => " ".on_bright_red(),
             CellValue::Count(count) => match count {
@@ -153,73 +151,30 @@ fn print_footer(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
 
 #[cfg(test)]
 mod tests {
+    use crate::solver::test_utils::FieldBuilder;
+
     use super::super::*;
     use super::*;
-    use rand::rng;
-    use rand::seq::SliceRandom;
-    use std::cmp::min;
-    use std::collections::HashSet;
 
     fn create_test_field(
         width: u32,
         height: u32,
         mine_count: u32,
-        open_x: i32,
-        open_y: i32,
-    ) -> Result<MineField, SolverError> {
-        let mut field = MineField::new(width, height, mine_count)?;
-        let mut counts = vec![vec![0i8; height as usize]; width as usize];
-        let mut coords: Vec<Point> = Vec::with_capacity(width as usize * height as usize);
-        for y in 0..height {
-            for x in 0..width {
-                if (x as i32 - open_x).abs() > 1 || (y as i32 - open_y).abs() > 1 {
-                    coords.push(Point { x, y });
-                }
-            }
-        }
-        coords.shuffle(&mut rng());
-        for &Point { x, y } in coords.iter().take(mine_count as usize) {
-            counts[x as usize][y as usize] -= 10;
-            for ny in y.saturating_sub(1)..min(y + 2, height) {
-                for nx in x.saturating_sub(1)..min(x + 2, width) {
-                    counts[nx as usize][ny as usize] += 1;
-                }
-            }
-        }
+        zero_point: Point,
+    ) -> FieldBuilder {
+        let mut field_builder =
+            FieldBuilder::random_with_zero_region(width, height, mine_count, zero_point);
+        field_builder.expand_cells([zero_point]);
 
-        // open area
-        let mut open_cells: HashSet<Cell> =
-            HashSet::with_capacity(width as usize * height as usize);
-        fn open_cell(x: u32, y: u32, counts: &[Vec<i8>], cells: &mut HashSet<Cell>) {
-            let value = match counts[x as usize][y as usize] {
-                ..0 => CellValue::Mine,
-                n => CellValue::Count(n),
-            };
-            if cells.insert(Cell {
-                point: Point { x, y },
-                value,
-            }) && counts[x as usize][y as usize] == 0
-            {
-                for nx in x.saturating_sub(1)..min(x + 2, counts.len() as u32) {
-                    for ny in y.saturating_sub(1)..min(y + 2, counts[nx as usize].len() as u32) {
-                        open_cell(nx, ny, counts, cells);
-                    }
-                }
-            }
-        }
-        open_cell(open_x as u32, open_y as u32, &counts, &mut open_cells);
-        field.set_cells(open_cells)?;
-
-        Ok(field)
+        field_builder
     }
 
     #[test]
     fn test_print() {
-        let field = create_test_field(30, 16, 99, 10, 5).unwrap();
-        println!("{}", ColoredMineField(&field));
-        eprintln!("{field:#}");
-        eprintln!("{:#}", DetailMineField(&field));
-        
+        let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });
+        println!("{}", ColoredMineField(builder.mine_field()));
+        eprintln!("{:#}", builder.mine_field());
+        eprintln!("{:#}", DetailMineField(builder.mine_field()));
     }
 
     #[test]

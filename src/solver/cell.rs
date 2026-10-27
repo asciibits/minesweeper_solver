@@ -7,8 +7,8 @@ use crate::solver::grid::{Direction, DirectionSet, Point};
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the corollary to `cell_id`.
-pub fn coordinates(cell_idx: usize, width: usize) -> Point {
-    Point::from_index(cell_idx, width as u32)
+pub fn coordinates(cell_idx: usize, width: u32) -> Point {
+    Point::from_index(cell_idx, width)
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
@@ -399,7 +399,7 @@ mod tests {
     fn test_coordinates_and_cell_idx_round_trip() {
         let width = 7u32;
         for idx in 0..35usize {
-            let p = coordinates(idx, width as usize);
+            let p = coordinates(idx, width);
             assert_eq!(cell_idx(p, width), idx);
         }
     }

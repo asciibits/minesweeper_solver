@@ -1,24 +1,36 @@
-//! Test utilities for constructing and updating [`MineField`] instances from compact ASCII specs.
+//! Test utilities for constructing and updating [`MineField`] instances from compact ASCII specs
+//! or mine-placement builders.
 //!
 //! # Specification Format
 //!
-//! Both [`create_minefield`] and [`update_minefield`] accept an iterator of string slices
-//! representing rows of the board (top-to-bottom, with `y = 0` first and `x = 0` leftmost).
-//! Strings containing embedded newline (`\n`) characters are automatically split into separate rows.
+//! [`create_minefield`], [`update_minefield`], and [`FieldBuilder::from_spec`] accept an iterator
+//! of string slices representing rows of the board (top-to-bottom, with `y = 0` first and `x = 0`
+//! leftmost). Strings containing embedded newline (`\n`) characters are automatically split into
+//! separate rows.
 //!
 //! Each character in a row maps to a coordinate `(x, y)` as follows:
-//! - `'0'..='8'`: Sets the cell to [`CellValue::Count(n)`](CellValue::Count).
+//! - `'0'..='8'`: Sets the cell to [`CellValue::Count(n)`](CellValue::Count) (or, in
+//!   [`FieldBuilder::from_spec`], asserts that the computed adjacent mine count equals `n`).
 //! - `'*'`, `'X'`, or `'x'`: Sets the cell to [`CellValue::Mine`].
 //! - `'_'`: Explicitly sets the cell to [`CellValue::Unknown`] (useful with [`update_minefield`]
 //!   to revert a previously known cell back to unknown).
-//! - `'.'` or `' '`: Skips the cell ("do nothing"). During [`create_minefield`], the coordinate still
-//!   contributes to the board dimensions and defaults to [`CellValue::Unknown`]; during
-//!   [`update_minefield`], the existing cell value at `(x, y)` is left untouched.
+//! - `'.'` or `' '`: Skips the cell ("do nothing"). During [`create_minefield`] and
+//!   [`FieldBuilder::from_spec`], the coordinate still contributes to the board dimensions and
+//!   defaults to [`CellValue::Unknown`]; during [`update_minefield`], the existing cell value at
+//!   `(x, y)` is left untouched.
 //! - Any other character panics with `"Invalid field character"`.
 
-use crate::{Cell, CellValue, MineField, Point};
+use rand::{rng, seq::SliceRandom};
 
-use std::cmp::max;
+use crate::{
+    Cell, CellValue, MineField, Point,
+    solver::{
+        cell::{cell_idx, coordinates},
+        grid::{DirectionSet, Neighbor},
+    },
+};
+
+use std::{cmp::max, collections::HashSet};
 
 /// Creates a new [`MineField`] with dimensions inferred from `field_spec` and populates its initial cells.
 ///
@@ -52,15 +64,10 @@ pub(super) fn create_minefield<'a>(
     field_spec: impl IntoIterator<Item = &'a str>,
     mine_count: u32,
 ) -> MineField {
-    let cells: Vec<_> = spec_to_iter(field_spec).collect();
+    let (width, height, cell_iter) = cells_and_size_from_spec(field_spec);
 
-    let size = cells
-        .iter()
-        .map(|(x, y, _)| (x + 1, y + 1))
-        .fold((0, 0), |acc, r| (max(acc.0, r.0), max(acc.1, r.1)));
-
-    let mut field = MineField::new(size.0, size.1, mine_count).unwrap();
-    field.set_cells(to_cell_iter(cells)).unwrap();
+    let mut field = MineField::new(width, height, mine_count).unwrap();
+    field.set_cells(cell_iter).unwrap();
 
     field
 }
@@ -99,11 +106,289 @@ pub(super) fn update_minefield<'a>(
     field.set_cells(cells_from_spec(field_spec)).unwrap();
 }
 
+/// Helper for building a consistent [`MineField`] from known or randomly generated mine locations
+/// and selectively exposing or flood-filling cells during tests.
+///
+/// Unlike [`create_minefield`], which directly sets cell states on a [`MineField`] without
+/// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
+/// (`field_data`)—computing the exact adjacent mine count for every non-mine cell—while keeping
+/// the underlying [`MineField`] cells unexposed ([`CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
+/// or [`expand_cells`](Self::expand_cells) is called.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Build a 3x3 board with a single mine at the bottom-right corner (2, 2):
+/// let mut builder = FieldBuilder::from_points(3, 3, [Point { x: 2, y: 2 }]);
+///
+/// // Flood-fill from top-left (0, 0), which has Count(0), automatically exposing
+/// // the connected zero region and its clue boundary:
+/// builder.expand_cells([Point { x: 0, y: 0 }]);
+///
+/// let field = builder.into_mine_field();
+/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(0));
+/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Count(1));
+/// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, CellValue::Unknown);
+/// ```
+#[derive(Debug)]
+pub(super) struct FieldBuilder {
+    /// Ground-truth board values in row-major order: `0..=8` for clue counts, or [`Self::MINE`] for mines.
+    field_data: Box<[i8]>,
+    /// The solver's [`MineField`] instance whose cells are progressively revealed via [`Self::expose_cells`] or [`Self::expand_cells`].
+    mine_field: MineField,
+}
+
+impl FieldBuilder {
+    /// Sentinel value stored in `field_data` to represent a mine.
+    ///
+    /// Chosen as `-10` so that even if all 8 neighbors are mines (incrementing the cell 8 times
+    /// during neighbor-count accumulation), the value remains negative (`-10 + 8 = -2 < 0`).
+    const MINE: i8 = -10;
+
+    /// Encodes a [`CellValue`] from an ASCII spec into a temporary `i8` representation before
+    /// neighbor mine counts are accumulated.
+    fn value_to_i8(value: CellValue) -> i8 {
+        match value {
+            CellValue::Mine => Self::MINE,
+            CellValue::Unknown => 0,
+            // a little hacky, but store the user provided values in bits 4-7
+            // they will be compared to the final bits 0-3 in the last pass to
+            // verify the user values. Add one so this value is distinct from
+            // not being specified.
+            CellValue::Count(n) => (n + 1) << 4,
+        }
+    }
+
+    /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with mines placed at `mines`.
+    ///
+    /// All cells in the underlying [`MineField`] start as [`CellValue::Unknown`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if any point in `mines` lies outside `width` × `height`, or if [`MineField::new`]
+    /// fails validation (e.g., all cells are mines).
+    pub fn from_points(width: u32, height: u32, mines: impl IntoIterator<Item = Point>) -> Self {
+        let mut field = vec![0i8; width as usize * height as usize];
+        for pt in mines {
+            field[cell_idx(pt, width)] = Self::MINE;
+        }
+
+        Self::from_vec(width, height, field)
+    }
+
+    /// Creates a [`FieldBuilder`] from an ASCII `spec`, computing true neighbor counts from the
+    /// specified mines (`'*'`, `'X'`, `'x'`) and verifying any user-supplied clue digits (`'0'..='8'`).
+    ///
+    /// All cells in the underlying [`MineField`] start as [`CellValue::Unknown`] until revealed
+    /// with [`expose_cells`](Self::expose_cells) or [`expand_cells`](Self::expand_cells).
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `spec` contains an invalid character.
+    /// - Any digit `'0'..='8'` in `spec` does not match the actual number of mines adjacent to that coordinate.
+    /// - The inferred board dimensions and mine count fail [`MineField::new`] validation.
+    pub fn from_spec<'i>(spec: impl IntoIterator<Item = &'i str>) -> Self {
+        let (width, height, cell_iter) = cells_and_size_from_spec(spec);
+        let mut field = vec![0i8; width as usize * height as usize];
+        for Cell { point, value } in cell_iter {
+            field[cell_idx(point, width)] = Self::value_to_i8(value);
+        }
+
+        Self::from_vec(width, height, field)
+    }
+
+    /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines.
+    pub fn random(width: u32, height: u32, mine_count: u32) -> Self {
+        Self::random_helper(width, height, mine_count, [])
+    }
+
+    /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines,
+    /// guaranteeing that `zero_cell` and all of its neighbors are mine-free (so `zero_cell` has count `0`).
+    pub fn random_with_zero_region(
+        width: u32,
+        height: u32,
+        mine_count: u32,
+        zero_cell: Point,
+    ) -> Self {
+        Self::random_helper(
+            width,
+            height,
+            mine_count,
+            zero_cell
+                .neighbors(DirectionSet::all_neighbors(zero_cell, width, height))
+                .map(|n| n.neighbor)
+                .chain([zero_cell]),
+        )
+    }
+
+    /// Places `mine_count` mines randomly across a `width` × `height` board while keeping all
+    /// `reserved_points` free of mines.
+    fn random_helper(
+        width: u32,
+        height: u32,
+        mine_count: u32,
+        reserved_points: impl IntoIterator<Item = Point>,
+    ) -> Self {
+        let len = width as usize * height as usize;
+        let mut field = vec![0i8; len];
+        let mut reserved_indices: Vec<_> = reserved_points
+            .into_iter()
+            .map(|pt| cell_idx(pt, width))
+            .collect();
+        reserved_indices.sort_unstable();
+        reserved_indices.dedup();
+        let end_shuffle = len - reserved_indices.len();
+        assert!(
+            mine_count as usize <= end_shuffle,
+            "Too many mines for reserved region"
+        );
+        for i in 0..mine_count as usize {
+            field[i] = Self::MINE;
+        }
+
+        field[0..end_shuffle].shuffle(&mut rng());
+
+        let mut i = end_shuffle;
+        for reserve_idx in reserved_indices {
+            field.swap(i, reserve_idx);
+            i += 1;
+        }
+
+        Self::from_vec(width, height, field)
+    }
+
+    /// Accumulates neighbor mine counts across `field`, validates any user-specified counts packed
+    /// into the upper nibble, and initializes the [`MineField`].
+    fn from_vec(width: u32, height: u32, mut field: Vec<i8>) -> Self {
+        assert_eq!(width as usize * height as usize, field.len());
+
+        // apply mine counts to neighbors
+        let mut idx = 0;
+        for y in 0..height {
+            for x in 0..width {
+                if field[idx] < 0 && field[idx] >= Self::MINE {
+                    let pt = Point { x, y };
+                    for Neighbor { neighbor, .. } in
+                        pt.neighbors(DirectionSet::all_neighbors(pt, width, height))
+                    {
+                        field[cell_idx(neighbor, width)] += 1;
+                    }
+                }
+                idx += 1;
+            }
+        }
+
+        // second pass - validate user numbers and normalize mine values
+        let mut mine_count = 0;
+        for (idx, val) in field.iter_mut().enumerate() {
+            if *val < 0 && *val >= Self::MINE {
+                *val = Self::MINE;
+                mine_count += 1;
+            } else {
+                let user_val = (*val as u8 >> 4) as i8 - 1;
+                *val &= 0xf;
+                assert!(
+                    user_val == -1 || user_val == *val,
+                    "Invalid user provided value: {user_val} at coordinates {}. \
+                        It does not reflect the actual mine count {val}",
+                    coordinates(idx, width)
+                );
+            }
+        }
+
+        Self {
+            field_data: field.into_boxed_slice(),
+            mine_field: MineField::new(width, height, mine_count).unwrap(),
+        }
+    }
+
+    /// Returns a mutable reference to the underlying [`MineField`].
+    pub fn mine_field(&mut self) -> &mut MineField {
+        &mut self.mine_field
+    }
+
+    /// Consumes the builder and returns the underlying [`MineField`].
+    pub fn into_mine_field(self) -> MineField {
+        self.mine_field
+    }
+
+    /// Converts the ground-truth `field_data` entry at `p` into a [`CellValue`].
+    fn cell_value(field_data: &[i8], width: u32, p: Point) -> CellValue {
+        match field_data[cell_idx(p, width)] {
+            n @ 0..=8 => CellValue::Count(n),
+            Self::MINE => CellValue::Mine,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Reveals the ground-truth [`CellValue`]s for the specified `points` on the underlying [`MineField`].
+    pub fn expose_cells(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
+        let field_data = &self.field_data;
+        let width = self.mine_field.width();
+        self.mine_field
+            .set_cells(points.into_iter().map(|point| Cell {
+                point,
+                value: Self::cell_value(field_data, width, point),
+            }))
+            .unwrap();
+        self
+    }
+
+    /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
+    /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
+    pub fn expand_cells(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
+        let field_data = &self.field_data;
+        let width = self.mine_field.width;
+        let height = self.mine_field.height;
+        let mut all_points = HashSet::new();
+        let mut zero_queue = Vec::new();
+        for p in points.into_iter() {
+            all_points.insert(p);
+            let idx = cell_idx(p, width);
+            if field_data[idx] == 0 {
+                zero_queue.push(p);
+            }
+        }
+        while let Some(p) = zero_queue.pop() {
+            for Neighbor { neighbor, .. } in
+                p.neighbors(DirectionSet::all_neighbors(p, width, height))
+            {
+                if all_points.insert(neighbor) {
+                    let nidx = cell_idx(neighbor, width);
+                    if field_data[nidx] == 0 {
+                        zero_queue.push(neighbor);
+                    }
+                }
+            }
+        }
+
+        self.expose_cells(all_points)
+    }
+}
+
 /// Parses `field_spec` into an iterator of [`Cell`] updates, omitting skipped (`'.'` and `' '`) positions.
 fn cells_from_spec<'a>(
     field_spec: impl IntoIterator<Item = &'a str>,
 ) -> impl Iterator<Item = Cell> {
     to_cell_iter(spec_to_iter(field_spec))
+}
+
+/// Parses `field_spec` and returns the inferred `(width, height)` board dimensions along with an
+/// iterator of [`Cell`] updates for all non-skipped positions.
+fn cells_and_size_from_spec<'a>(
+    field_spec: impl IntoIterator<Item = &'a str>,
+) -> (u32, u32, impl Iterator<Item = Cell>) {
+    let cells: Vec<_> = spec_to_iter(field_spec).collect();
+
+    let size = cells
+        .iter()
+        .map(|(x, y, _)| (x + 1, y + 1))
+        .fold((0, 0), |acc, r| (max(acc.0, r.0), max(acc.1, r.1)));
+
+    let cells = to_cell_iter(cells);
+
+    (size.0, size.1, cells)
 }
 
 /// Converts `(x, y, Option<CellValue>)` tuples into [`Cell`]s, filtering out `None` entries.
@@ -315,5 +600,130 @@ mod tests {
     #[should_panic]
     fn test_create_minefield_empty_spec_panics() {
         create_minefield([""], 0);
+    }
+
+    #[test]
+    fn test_field_builder_from_points_and_expose_cells() {
+        // 3x2 board with mines at (0, 0) and (2, 1)
+        let mut builder =
+            FieldBuilder::from_points(3, 2, [Point { x: 0, y: 0 }, Point { x: 2, y: 1 }]);
+        assert_eq!(builder.mine_field().width(), 3);
+        assert_eq!(builder.mine_field().height(), 2);
+        assert_eq!(builder.mine_field().mine_count(), 2);
+
+        // Initially all cells on the MineField are Unknown
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(
+                    builder.mine_field().cell(Point { x, y }).value,
+                    CellValue::Unknown
+                );
+            }
+        }
+
+        // Expose (1, 0) (adjacent to both mines -> Count(2)) and (0, 0) (Mine)
+        builder.expose_cells([Point { x: 1, y: 0 }, Point { x: 0, y: 0 }]);
+        let field = builder.into_mine_field();
+        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Mine);
+        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Count(2));
+        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Unknown);
+    }
+
+    #[test]
+    fn test_field_builder_from_spec_and_high_counts() {
+        // 3x3 board with 8 mines surrounding center (1, 1), verifying '8' and mine specifiers '*', 'X', 'x'
+        let mut builder = FieldBuilder::from_spec(["*Xx", "*8*", "xX*"]);
+        assert_eq!(builder.mine_field().width(), 3);
+        assert_eq!(builder.mine_field().height(), 3);
+        assert_eq!(builder.mine_field().mine_count(), 8);
+
+        builder.expose_cells([Point { x: 1, y: 1 }]);
+        assert_eq!(
+            builder.mine_field().cell(Point { x: 1, y: 1 }).value,
+            CellValue::Count(8)
+        );
+
+        // Also test a valid spec with mixed counts (0, 1, 2, 7) and '_'
+        let mut builder7 = FieldBuilder::from_spec(["*X*", "*7*", "*_*", "121", "000"]);
+        builder7.expose_cells([
+            Point { x: 1, y: 1 },
+            Point { x: 1, y: 2 },
+            Point { x: 1, y: 3 },
+            Point { x: 1, y: 4 },
+        ]);
+        let field7 = builder7.into_mine_field();
+        assert_eq!(field7.cell(Point { x: 1, y: 1 }).value, CellValue::Count(7));
+        assert_eq!(field7.cell(Point { x: 1, y: 2 }).value, CellValue::Count(4));
+        assert_eq!(field7.cell(Point { x: 1, y: 3 }).value, CellValue::Count(2));
+        assert_eq!(field7.cell(Point { x: 1, y: 4 }).value, CellValue::Count(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid user provided value: 2 at coordinates (0, 0)")]
+    fn test_field_builder_from_spec_mismatched_count_panics() {
+        // (0, 0) only has 1 adjacent mine at (1, 0), so specifying '2' must panic
+        FieldBuilder::from_spec(["2*."]);
+    }
+
+    #[test]
+    fn test_field_builder_expand_cells_flood_fill() {
+        // 4x3 board with a single mine at bottom-right (3, 2):
+        // Ground-truth counts:
+        // (0,0)=0  (1,0)=0  (2,0)=0  (3,0)=0
+        // (0,1)=0  (1,1)=0  (2,1)=1  (3,1)=1
+        // (0,2)=0  (1,2)=0  (2,2)=1  (3,2)=*
+        let mut builder = FieldBuilder::from_spec(["....", "..11", "..1*"]);
+
+        // Expanding from a non-zero cell (2, 1) only exposes that single cell
+        builder.expand_cells([Point { x: 2, y: 1 }]);
+        assert_eq!(
+            builder.mine_field().cell(Point { x: 2, y: 1 }).value,
+            CellValue::Count(1)
+        );
+        assert_eq!(
+            builder.mine_field().cell(Point { x: 0, y: 0 }).value,
+            CellValue::Unknown
+        );
+
+        // Expanding from (0, 0) flood-fills all 0-cells and their adjacent clue boundary,
+        // leaving only (3, 2) unexposed (and inferred as Mine by the solver!)
+        builder.expand_cells([Point { x: 0, y: 0 }]);
+        let field = builder.into_mine_field();
+        for y in 0..3 {
+            for x in 0..4 {
+                let pt = Point { x, y };
+                if pt == (Point { x: 3, y: 2 }) {
+                    assert_eq!(field.cell(pt).value, CellValue::Unknown);
+                    assert_eq!(field.inferred_mines(), vec![pt]);
+                } else {
+                    assert!(matches!(field.cell(pt).value, CellValue::Count(_)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_field_builder_random_and_zero_region() {
+        let random_builder = FieldBuilder::random(6, 5, 7);
+        assert_eq!(random_builder.mine_field.width(), 6);
+        assert_eq!(random_builder.mine_field.height(), 5);
+        assert_eq!(random_builder.mine_field.mine_count(), 7);
+        let actual_mines = random_builder
+            .field_data
+            .iter()
+            .filter(|&&v| v == FieldBuilder::MINE)
+            .count();
+        assert_eq!(actual_mines, 7);
+
+        let zero_pt = Point { x: 2, y: 2 };
+        let mut zero_builder = FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt);
+        zero_builder.expand_cells([zero_pt]);
+        let field = zero_builder.into_mine_field();
+        assert_eq!(field.cell(zero_pt).value, CellValue::Count(0));
+        for Neighbor { neighbor, .. } in
+            zero_pt.neighbors(DirectionSet::all_neighbors(zero_pt, 6, 5))
+        {
+            assert!(matches!(field.cell(neighbor).value, CellValue::Count(_)));
+        }
     }
 }
