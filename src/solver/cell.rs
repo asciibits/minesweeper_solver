@@ -3,7 +3,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use crate::solver::grid::{Direction, DirectionSet, E, N, NE, NW, Point, S, SE, SW, W};
+use crate::solver::grid::{Direction, DirectionSet, Point};
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the corollary to `cell_id`.
@@ -141,21 +141,10 @@ impl ProcessedCell {
         let mut idx = 0;
         for y in 0..height {
             for x in 0..width {
-                let mut neighbors = DirectionSet::ALL;
-                if y == 0 {
-                    neighbors -= NW | N | NE;
-                }
-                if y == height - 1 {
-                    neighbors -= SW | S | SE;
-                }
-                if x == 0 {
-                    neighbors -= NW | W | SW;
-                }
-                if x == width - 1 {
-                    neighbors -= NE | E | SE;
-                }
+                let point = Point { x, y };
+                let neighbors = DirectionSet::all_neighbors(point, width, height);
                 grid.push(ProcessedCell {
-                    point: Point { x, y },
+                    point,
                     value: CellValue::Unknown,
                     idx,
                     neighbors,

@@ -17,6 +17,24 @@ pub struct Point {
 }
 
 impl Point {
+    const DIRECTION_OFFSETS: [(i8, i8); 8] = [
+        // NW
+        (-1, -1),
+        // N
+        (0, -1),
+        // NE
+        (1, -1),
+        // W
+        (-1, 0),
+        // E
+        (1, 0),
+        // SW
+        (-1, 1),
+        // S
+        (0, 1),
+        // SE
+        (1, 1),
+    ];
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
     pub const fn from_index(cell_idx: usize, width: u32) -> Point {
@@ -46,10 +64,11 @@ impl Point {
     /// pointing from that neighbor back to `self`.
     #[inline]
     pub fn neighbor(&self, to: Direction) -> Neighbor {
+        let (dx, dy) = Self::DIRECTION_OFFSETS[to.mask().trailing_zeros() as usize];
         Neighbor {
             neighbor: Point {
-                x: self.x.wrapping_add_signed(to.dx as i32),
-                y: self.y.wrapping_add_signed(to.dy as i32),
+                x: self.x.wrapping_add_signed(dx as i32),
+                y: self.y.wrapping_add_signed(dy as i32),
             },
             from: to.reverse(),
         }
@@ -101,53 +120,21 @@ const DIRECTION_NAMES: [&str; 8] = ["NW", "N", "NE", "W", "E", "SW", "S", "SE"];
 /// reversal via [`Direction::reverse`].
 pub const ALL_DIRECTIONS: [Direction; 8] = [
     // NW
-    Direction {
-        mask: 0b000_00_001,
-        dx: -1,
-        dy: -1,
-    },
+    Direction(0b000_00_001),
     // N
-    Direction {
-        mask: 0b000_00_010,
-        dx: 0,
-        dy: -1,
-    },
+    Direction(0b000_00_010),
     // NE
-    Direction {
-        mask: 0b000_00_100,
-        dx: 1,
-        dy: -1,
-    },
+    Direction(0b000_00_100),
     // W
-    Direction {
-        mask: 0b000_01_000,
-        dx: -1,
-        dy: 0,
-    },
+    Direction(0b000_01_000),
     // E
-    Direction {
-        mask: 0b000_10_000,
-        dx: 1,
-        dy: 0,
-    },
+    Direction(0b000_10_000),
     // SW
-    Direction {
-        mask: 0b001_00_000,
-        dx: -1,
-        dy: 1,
-    },
+    Direction(0b001_00_000),
     // S
-    Direction {
-        mask: 0b010_00_000,
-        dx: 0,
-        dy: 1,
-    },
+    Direction(0b010_00_000),
     // SE
-    Direction {
-        mask: 0b100_00_000,
-        dx: 1,
-        dy: 1,
-    },
+    Direction(0b100_00_000),
 ];
 
 /// North-West (`dx = -1, dy = -1`).
@@ -182,20 +169,20 @@ impl DirectionSet {
     /// Given a point in a fixed size field, return the set of neighbors, taking
     /// edges into consideration.
     pub fn all_neighbors(p: Point, width: u32, height: u32) -> DirectionSet {
-        let mut mask = 0b111_11_111;
+        let mut neighbors = Self::ALL;
         if p.x == 0 {
-            mask &= const { !(NW.mask | W.mask | SW.mask) };
+            neighbors.0 &= const { !(NW.0 | W.0 | SW.0) };
         }
         if p.x >= width - 1 {
-            mask &= const { !(NE.mask | E.mask | SE.mask) };
+            neighbors.0 &= const { !(NE.0 | E.0 | SE.0) };
         }
         if p.y == 0 {
-            mask &= const { !(NW.mask | N.mask | NE.mask) };
+            neighbors.0 &= const { !(NW.0 | N.0 | NE.0) };
         }
         if p.y >= height - 1 {
-            mask &= const { !(SW.mask | S.mask | SE.mask) };
+            neighbors.0 &= const { !(SW.0 | S.0 | SE.0) };
         }
-        DirectionSet(mask)
+        neighbors
     }
 
     /// Returns the number of directions currently in the set (`0..=8`).
@@ -211,7 +198,7 @@ impl DirectionSet {
     /// Returns `true` if the set contains direction `d`.
     #[inline]
     pub fn contains(&self, d: Direction) -> bool {
-        self.0 & d.mask != 0
+        self.0 & d.0 != 0
     }
 
     /// Inserts direction `d` into the set, returning `true` if it was not already present.
@@ -220,7 +207,7 @@ impl DirectionSet {
         if self.contains(d) {
             false
         } else {
-            self.0 |= d.mask;
+            self.0 |= d.0;
             true
         }
     }
@@ -229,7 +216,7 @@ impl DirectionSet {
     #[inline]
     pub fn remove(&mut self, d: Direction) -> bool {
         if self.contains(d) {
-            self.0 &= !d.mask;
+            self.0 &= !d.0;
             true
         } else {
             false
@@ -289,7 +276,7 @@ impl BitOr<Direction> for DirectionSet {
     type Output = DirectionSet;
 
     fn bitor(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.0 | rhs.mask)
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
@@ -301,7 +288,7 @@ impl BitOrAssign for DirectionSet {
 
 impl BitOrAssign<Direction> for DirectionSet {
     fn bitor_assign(&mut self, rhs: Direction) {
-        self.0 |= rhs.mask;
+        self.0 |= rhs.0;
     }
 }
 
@@ -317,7 +304,7 @@ impl BitAnd<Direction> for DirectionSet {
     type Output = DirectionSet;
 
     fn bitand(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.0 & rhs.mask)
+        DirectionSet(self.0 & rhs.0)
     }
 }
 
@@ -329,7 +316,7 @@ impl BitAndAssign for DirectionSet {
 
 impl BitAndAssign<Direction> for DirectionSet {
     fn bitand_assign(&mut self, rhs: Direction) {
-        self.0 &= rhs.mask;
+        self.0 &= rhs.0;
     }
 }
 
@@ -345,7 +332,7 @@ impl BitXor<Direction> for DirectionSet {
     type Output = DirectionSet;
 
     fn bitxor(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.0 ^ rhs.mask)
+        DirectionSet(self.0 ^ rhs.0)
     }
 }
 
@@ -357,7 +344,7 @@ impl BitXorAssign for DirectionSet {
 
 impl BitXorAssign<Direction> for DirectionSet {
     fn bitxor_assign(&mut self, rhs: Direction) {
-        self.0 ^= rhs.mask;
+        self.0 ^= rhs.0;
     }
 }
 
@@ -373,7 +360,7 @@ impl Sub<Direction> for DirectionSet {
     type Output = DirectionSet;
 
     fn sub(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.0 & !rhs.mask)
+        DirectionSet(self.0 & !rhs.0)
     }
 }
 
@@ -385,13 +372,13 @@ impl SubAssign for DirectionSet {
 
 impl SubAssign<Direction> for DirectionSet {
     fn sub_assign(&mut self, rhs: Direction) {
-        self.0 &= !rhs.mask;
+        self.0 &= !rhs.0;
     }
 }
 
 impl From<Direction> for DirectionSet {
     fn from(d: Direction) -> Self {
-        DirectionSet(d.mask)
+        DirectionSet(d.0)
     }
 }
 
@@ -425,51 +412,27 @@ impl Display for DirectionSet {
     }
 }
 
-/// A single compass direction represented by its bitmask and `(dx, dy)` coordinate offset.
+/// A single compass direction represented by a bitmask
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Direction {
-    mask: u8,
-    dx: i8,
-    dy: i8,
-}
+pub struct Direction(u8);
 
 impl Direction {
     /// Returns the single-bit mask (`1 << 0..8`) identifying this direction.
     #[inline]
     pub const fn mask(&self) -> u8 {
-        self.mask
-    }
-
-    /// Returns the horizontal column offset (`-1`, `0`, or `1`) of this direction.
-    #[inline]
-    pub const fn dx(&self) -> i8 {
-        self.dx
-    }
-
-    /// Returns the vertical row offset (`-1`, `0`, or `1`) of this direction.
-    #[inline]
-    pub const fn dy(&self) -> i8 {
-        self.dy
+        self.0
     }
 
     /// Returns the opposite [`Direction`] (e.g., [`NW`] $\leftrightarrow$ [`SE`]).
     #[inline]
     pub const fn reverse(&self) -> Direction {
-        Direction {
-            mask: self.mask.reverse_bits(),
-            dx: -self.dx,
-            dy: -self.dy,
-        }
+        Direction(self.0.reverse_bits())
     }
 }
 
 impl Display for Direction {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            DIRECTION_NAMES[self.mask.trailing_zeros() as usize]
-        )
+        write!(f, "{}", DIRECTION_NAMES[self.0.trailing_zeros() as usize])
     }
 }
 
@@ -477,7 +440,7 @@ impl Not for Direction {
     type Output = DirectionSet;
 
     fn not(self) -> Self::Output {
-        DirectionSet(!self.mask)
+        DirectionSet(!self.0)
     }
 }
 
@@ -485,7 +448,7 @@ impl BitOr for Direction {
     type Output = DirectionSet;
 
     fn bitor(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.mask | rhs.mask)
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
@@ -493,7 +456,7 @@ impl BitOr<DirectionSet> for Direction {
     type Output = DirectionSet;
 
     fn bitor(self, rhs: DirectionSet) -> Self::Output {
-        DirectionSet(self.mask | rhs.0)
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
@@ -501,7 +464,7 @@ impl BitAnd for Direction {
     type Output = DirectionSet;
 
     fn bitand(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.mask & rhs.mask)
+        DirectionSet(self.0 & rhs.0)
     }
 }
 
@@ -509,7 +472,7 @@ impl BitAnd<DirectionSet> for Direction {
     type Output = DirectionSet;
 
     fn bitand(self, rhs: DirectionSet) -> Self::Output {
-        DirectionSet(self.mask & rhs.0)
+        DirectionSet(self.0 & rhs.0)
     }
 }
 
@@ -517,7 +480,7 @@ impl BitXor for Direction {
     type Output = DirectionSet;
 
     fn bitxor(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.mask ^ rhs.mask)
+        DirectionSet(self.0 ^ rhs.0)
     }
 }
 
@@ -525,7 +488,7 @@ impl BitXor<DirectionSet> for Direction {
     type Output = DirectionSet;
 
     fn bitxor(self, rhs: DirectionSet) -> Self::Output {
-        DirectionSet(self.mask ^ rhs.0)
+        DirectionSet(self.0 ^ rhs.0)
     }
 }
 
@@ -533,7 +496,7 @@ impl Sub for Direction {
     type Output = DirectionSet;
 
     fn sub(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.mask & !rhs.mask)
+        DirectionSet(self.0 & !rhs.0)
     }
 }
 
@@ -541,7 +504,7 @@ impl Sub<DirectionSet> for Direction {
     type Output = DirectionSet;
 
     fn sub(self, rhs: DirectionSet) -> Self::Output {
-        DirectionSet(self.mask & !rhs.0)
+        DirectionSet(self.0 & !rhs.0)
     }
 }
 
