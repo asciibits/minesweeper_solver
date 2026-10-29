@@ -88,6 +88,44 @@ impl Display for Point {
     }
 }
 
+pub(super) fn indexed_neighbor_iter(
+    center: usize,
+    neighbors: DirectionSet,
+    offsets: &IndexedOffsets,
+) -> impl Iterator<Item = Neighbor<usize>> {
+    NeighborIterator {
+        offset_values: &offsets.0,
+        apply_offset: move |to: Direction, d_idx| Neighbor {
+            neighbor: center.wrapping_add_signed(d_idx as isize),
+            from: to.reverse(),
+        },
+        iter: neighbors.iter(),
+        _result: PhantomData,
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(super) struct IndexedOffsets([i32; 8]);
+
+impl IndexedOffsets {
+    pub(super) fn new(width: u32) -> IndexedOffsets {
+        // need the conversion too and from i32 to work without overflow, plus
+        // space for one extra value.
+        assert!(width < (1 << 31) - 1);
+        let width = width as i32;
+        IndexedOffsets([
+            -1 - width,
+            -width,
+            1 - width,
+            -1,
+            1,
+            -1 + width,
+            width,
+            1 + width,
+        ])
+    }
+}
+
 /// An iterator yielding the [`Neighbor<Point>`]s of a [`Point`] for each direction in a [`DirectionSet`].
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NeighborIterator<'a, O, R, F> {

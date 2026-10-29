@@ -25,8 +25,10 @@ use rand::{rng, seq::SliceRandom};
 use crate::{
     Cell, CellValue, MineField, Point,
     solver::{
+        IndexedOffsets,
         cell::{cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
+        indexed_neighbor_iter,
     },
 };
 
@@ -263,16 +265,20 @@ impl FieldBuilder {
     fn from_vec(width: u32, height: u32, mut field: Vec<i8>) -> Self {
         assert_eq!(width as usize * height as usize, field.len());
 
+        let offsets = IndexedOffsets::new(width);
+
         // apply mine counts to neighbors
         let mut idx = 0;
         for y in 0..height {
             for x in 0..width {
                 if field[idx] < 0 && field[idx] >= Self::MINE {
                     let pt = Point { x, y };
-                    for Neighbor { neighbor, .. } in
-                        pt.neighbors(DirectionSet::all_neighbors(pt, width, height))
-                    {
-                        field[cell_idx(neighbor, width)] += 1;
+                    for Neighbor { neighbor, .. } in indexed_neighbor_iter(
+                        idx,
+                        DirectionSet::all_neighbors(pt, width, height),
+                        &offsets,
+                    ) {
+                        field[neighbor] += 1;
                     }
                 }
                 idx += 1;

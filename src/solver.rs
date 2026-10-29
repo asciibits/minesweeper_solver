@@ -7,12 +7,11 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     error::Error,
     fmt::{self, Display},
-    marker::PhantomData,
 };
 
 use crate::solver::{
     cell::InferredValue,
-    grid::{Direction, DirectionSet, NeighborIterator},
+    grid::{IndexedOffsets, indexed_neighbor_iter},
 };
 
 pub mod cell;
@@ -238,7 +237,7 @@ impl MineField {
             inferred.remove(&cell_idx);
 
             for Neighbor { neighbor, from } in
-                neighbor_iter(cell_idx, cell.neighbors(), indexed_offsets)
+                indexed_neighbor_iter(cell_idx, cell.neighbors(), indexed_offsets)
             {
                 let neighbor_cell = &mut cells[neighbor];
                 neighbor_cell.add_inferred_unknown_neighbor(from);
@@ -295,7 +294,8 @@ impl MineField {
             for Neighbor {
                 neighbor: neighbor_idx,
                 from,
-            } in neighbor_iter(pending_idx, dirty_cell.neighbors(), &self.indexed_offsets)
+            } in
+                indexed_neighbor_iter(pending_idx, dirty_cell.neighbors(), &self.indexed_offsets)
             {
                 let neighbor_cell = &mut self.cells[neighbor_idx];
                 if !count_to_count {
@@ -379,6 +379,7 @@ impl MineField {
                     &mut self.cells,
                     self.width,
                     self.height,
+                    &self.indexed_offsets,
                     cell_idx,
                     partition_id,
                     reset_inferred,
@@ -461,7 +462,7 @@ impl MineField {
             for Neighbor {
                 neighbor: inferred_idx,
                 ..
-            } in neighbor_iter(
+            } in indexed_neighbor_iter(
                 solve_cell_ord.cell_idx(),
                 solve_cell.inferred_unknown_neighbors(),
                 &self.indexed_offsets,
@@ -477,7 +478,7 @@ impl MineField {
                 for Neighbor {
                     neighbor: neighbor_idx,
                     from,
-                } in neighbor_iter(
+                } in indexed_neighbor_iter(
                     inferred_idx,
                     inferred_cell.neighbors(),
                     &self.indexed_offsets,
@@ -575,44 +576,6 @@ impl Display for MineField {
             write!(f, "\",{spacer}")?;
         }
         write!(f, "]")
-    }
-}
-
-fn neighbor_iter(
-    center: usize,
-    neighbors: DirectionSet,
-    offsets: &IndexedOffsets,
-) -> impl Iterator<Item = Neighbor<usize>> {
-    NeighborIterator {
-        offset_values: &offsets.0,
-        apply_offset: move |to: Direction, d_idx| Neighbor {
-            neighbor: center.wrapping_add_signed(d_idx as isize),
-            from: to.reverse(),
-        },
-        iter: neighbors.iter(),
-        _result: PhantomData,
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub(super) struct IndexedOffsets([i32; 8]);
-
-impl IndexedOffsets {
-    pub(super) fn new(width: u32) -> IndexedOffsets {
-        // need the conversion too and from i32 to work without overflow, plus
-        // space for one extra value.
-        assert!(width < (1 << 31) - 1);
-        let width = width as i32;
-        IndexedOffsets([
-            -1 - width,
-            -width,
-            1 - width,
-            -1,
-            1,
-            -1 + width,
-            width,
-            1 + width,
-        ])
     }
 }
 

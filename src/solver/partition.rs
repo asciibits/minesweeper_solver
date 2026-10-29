@@ -3,9 +3,10 @@
 use std::{cmp::Ordering, collections::VecDeque};
 
 use crate::solver::{
+    IndexedOffsets,
     cell::{CellValue, ProcessedCell},
     grid::Neighbor,
-    stats,
+    indexed_neighbor_iter, stats,
 };
 
 /// A connected component of bipartite frontier cells (`known` clue cells adjacent to `unknown` cells).
@@ -37,6 +38,7 @@ impl Partition {
         cells: &mut [ProcessedCell],
         width: u32,
         height: u32,
+        indexed_offsets: &IndexedOffsets,
         start_idx: usize,
         partition_id: u32,
         ignore_inferred: bool,
@@ -63,10 +65,14 @@ impl Partition {
             }
             members.push(cell_idx);
 
-            for Neighbor { neighbor, .. } in
-                cell.point().neighbors(cell.alt_neighbors(ignore_inferred))
-            {
-                let neighbor_idx = neighbor.to_index(width);
+            for Neighbor {
+                neighbor: neighbor_idx,
+                ..
+            } in indexed_neighbor_iter(
+                cell_idx,
+                cell.alt_neighbors(ignore_inferred),
+                indexed_offsets,
+            ) {
                 let neighbor_cell = &mut cells[neighbor_idx];
                 if neighbor_cell.partition_id() != partition_id {
                     neighbor_cell.set_partition_id(partition_id);
@@ -172,7 +178,9 @@ mod tests {
         let mut cells = ProcessedCell::grid(2, 1);
         // Cell 0 is Unknown with no open_neighbors (isolated)
         cells[0].set_partition_id(99);
-        assert!(Partition::create(&mut cells, 2, 1, 0, 1, false).is_none());
+        assert!(
+            Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 0, 1, false).is_none()
+        );
         assert_eq!(cells[0].partition_id(), 0);
 
         // Cell 1 is a Mine even if open_neighbors is non-empty
@@ -180,7 +188,9 @@ mod tests {
         cells[1].add_open_neighbor(W);
         cells[1].remove_unknown_neighbor(W);
         cells[1].set_partition_id(99);
-        assert!(Partition::create(&mut cells, 2, 1, 1, 1, false).is_none());
+        assert!(
+            Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 1, 1, false).is_none()
+        );
         assert_eq!(cells[1].partition_id(), 0);
     }
 
@@ -198,8 +208,8 @@ mod tests {
 
         cells[2].set_value(CellValue::Count(2));
 
-        let partition =
-            Partition::create(&mut cells, 3, 1, 0, 7, false).expect("should create partition");
+        let partition = Partition::create(&mut cells, 3, 1, &IndexedOffsets::new(3), 0, 7, false)
+            .expect("should create partition");
         assert!(!partition.is_empty());
         assert_eq!(partition.len(), 3);
         assert_eq!(partition.members(), &[0, 1, 2]);
