@@ -240,12 +240,28 @@ impl MineField {
                 indexed_neighbor_iter(cell_idx, cell.neighbors(), indexed_offsets)
             {
                 let neighbor_cell = &mut cells[neighbor];
-                neighbor_cell.add_inferred_unknown_neighbor(from);
-                if inferred_state == InferredValue::Open {
-                    neighbor_cell.remove_inferred_open_neighbor(from);
-                } else {
-                    neighbor_cell.remove_inferred_mine_neighbor(from);
-                }
+                neighbor_cell.set_unknown(from, true);
+            }
+        }
+    }
+
+    fn change_value(
+        cells: &mut [ProcessedCell],
+        idx: usize,
+        value: CellValue,
+        inferred: bool,
+        indexed_offsets: &IndexedOffsets,
+    ) {
+        let cell = &mut cells[idx];
+
+        for Neighbor { neighbor: n_idx, from } in
+            indexed_neighbor_iter(idx, cell.neighbors(), indexed_offsets)
+        {
+            let mut n_cell = cells[n_idx];
+            match value {
+                CellValue::Unknown => n_cell.set_unknown(from, inferred),
+                CellValue::Count(_) => n_cell.set_open(from, inferred),
+                CellValue::Mine => n_cell.set_mine(from, inferred),
             }
         }
     }
@@ -299,15 +315,10 @@ impl MineField {
             {
                 let neighbor_cell = &mut self.cells[neighbor_idx];
                 if !count_to_count {
-                    match prev_value {
-                        CellValue::Unknown => neighbor_cell.remove_unknown_neighbor(from),
-                        CellValue::Count(_) => neighbor_cell.remove_open_neighbor(from),
-                        CellValue::Mine => neighbor_cell.remove_mine_neighbor(from),
-                    };
                     match new_value {
-                        CellValue::Unknown => neighbor_cell.add_unknown_neighbor(from),
-                        CellValue::Count(_) => neighbor_cell.add_open_neighbor(from),
-                        CellValue::Mine => neighbor_cell.add_mine_neighbor(from),
+                        CellValue::Unknown => neighbor_cell.set_unknown(from, false),
+                        CellValue::Count(_) => neighbor_cell.set_open(from, false),
+                        CellValue::Mine => neighbor_cell.set_mine(from, false),
                     };
                 }
                 if neighbor_cell.staged_value().is_none() {
@@ -489,11 +500,10 @@ impl MineField {
                         self.dirty_neighbors.push(neighbor_idx);
                     }
                     let prev_cell_ord = CellOrdering::from_cell(neighbor_cell);
-                    neighbor_cell.remove_inferred_unknown_neighbor(from);
                     if inferred_state == InferredValue::Mine {
-                        neighbor_cell.add_inferred_mine_neighbor(from);
+                        neighbor_cell.set_mine(from, true);
                     } else {
-                        neighbor_cell.add_inferred_open_neighbor(from);
+                        neighbor_cell.set_open(from, true);
                     }
                     if let Some(prev_ord_cell) = prev_cell_ord {
                         if sorted_knowns.remove(&prev_ord_cell) {

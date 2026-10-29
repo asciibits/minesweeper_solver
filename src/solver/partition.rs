@@ -185,8 +185,7 @@ mod tests {
 
         // Cell 1 is a Mine even if open_neighbors is non-empty
         cells[1].set_value(CellValue::Mine);
-        cells[1].add_open_neighbor(W);
-        cells[1].remove_unknown_neighbor(W);
+        cells[1].set_open(W, true);
         cells[1].set_partition_id(99);
         assert!(
             Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 1, 1, false).is_none()
@@ -201,10 +200,8 @@ mod tests {
         cells[0].set_value(CellValue::Count(1));
 
         cells[1].set_value(CellValue::Unknown);
-        cells[1].remove_unknown_neighbor(E);
-        cells[1].remove_unknown_neighbor(W);
-        cells[1].add_open_neighbor(W);
-        cells[1].add_open_neighbor(E);
+        cells[1].set_open(W, false);
+        cells[1].set_open(E, false);
 
         cells[2].set_value(CellValue::Count(2));
 
@@ -230,13 +227,12 @@ mod tests {
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
         cell_a.set_value(CellValue::Count(2));
-        cell_a.remove_unknown_neighbor(SE);
+        cell_a.set_open(SE, false);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = grid[1];
         cell_b.set_value(CellValue::Count(1));
-        cell_b.add_mine_neighbor(S);
-        cell_b.remove_unknown_neighbor(S);
+        cell_b.set_mine(S, true);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = grid[2];

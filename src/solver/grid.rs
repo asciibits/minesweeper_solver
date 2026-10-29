@@ -3,9 +3,7 @@
 //! 2D grid coordinates, compass directions, and bitset-backed neighbor iteration.
 
 use std::{
-    fmt::{self, Display, Formatter},
-    marker::PhantomData,
-    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
+    fmt::{self, Display, Formatter}, marker::PhantomData, ops::{Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
 /// A 2D coordinate (`x`, `y`) on the Minesweeper grid, with `(0, 0)` at the top-left corner.
@@ -439,6 +437,34 @@ impl SubAssign<Direction> for DirectionSet {
     }
 }
 
+impl Add for DirectionSet {
+    type Output = DirectionSet;
+
+    fn add(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.0 | !rhs.0)
+    }
+}
+
+impl Add<Direction> for DirectionSet {
+    type Output = DirectionSet;
+
+    fn add(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 | !rhs.0)
+    }
+}
+
+impl AddAssign for DirectionSet {
+    fn add_assign(&mut self, rhs: DirectionSet) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl AddAssign<Direction> for DirectionSet {
+    fn add_assign(&mut self, rhs: Direction) {
+        self.0 |= rhs.0;
+    }
+}
+
 impl From<Direction> for DirectionSet {
     fn from(d: Direction) -> Self {
         DirectionSet(d.0)
@@ -568,6 +594,22 @@ impl Sub<DirectionSet> for Direction {
 
     fn sub(self, rhs: DirectionSet) -> Self::Output {
         DirectionSet(self.0 & !rhs.0)
+    }
+}
+
+impl Add for Direction {
+    type Output = DirectionSet;
+
+    fn add(self, rhs: Direction) -> Self::Output {
+        DirectionSet(self.0 | rhs.0)
+    }
+}
+
+impl Add<DirectionSet> for Direction {
+    type Output = DirectionSet;
+
+    fn add(self, rhs: DirectionSet) -> Self::Output {
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
