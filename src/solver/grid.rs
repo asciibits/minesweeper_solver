@@ -3,7 +3,12 @@
 //! 2D grid coordinates, compass directions, and bitset-backed neighbor iteration.
 
 use std::{
-    fmt::{self, Display, Formatter}, marker::PhantomData, ops::{Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
+    fmt::{self, Display, Formatter},
+    marker::PhantomData,
+    ops::{
+        Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub,
+        SubAssign,
+    },
 };
 
 /// A 2D coordinate (`x`, `y`) on the Minesweeper grid, with `(0, 0)` at the top-left corner.
@@ -441,7 +446,7 @@ impl Add for DirectionSet {
     type Output = DirectionSet;
 
     fn add(self, rhs: DirectionSet) -> Self::Output {
-        DirectionSet(self.0 | !rhs.0)
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
@@ -449,7 +454,7 @@ impl Add<Direction> for DirectionSet {
     type Output = DirectionSet;
 
     fn add(self, rhs: Direction) -> Self::Output {
-        DirectionSet(self.0 | !rhs.0)
+        DirectionSet(self.0 | rhs.0)
     }
 }
 
@@ -668,6 +673,21 @@ mod tests {
             vec![0b1, 0b1000, 0b10000, 0b1000000]
         );
         assert_eq!(BinaryIterator(0).collect::<Vec<u8>>(), vec![]);
+    }
+
+    #[test]
+    fn test_neighbor_iter() {
+        // use a 3x3 grid, indices going from 0..=8, center 4
+        let neighbors: Vec<_> =
+            indexed_neighbor_iter(4, E | S | SE, &IndexedOffsets::new(3)).collect();
+        assert_eq!(
+            neighbors.iter().map(|n| n.neighbor).collect::<Vec<_>>(),
+            vec![5, 7, 8]
+        );
+        assert_eq!(
+            neighbors.iter().map(|n| n.from).collect::<DirectionSet>(),
+            W | N | NW
+        );
     }
 
     #[test]

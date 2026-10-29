@@ -240,7 +240,7 @@ impl MineField {
                 indexed_neighbor_iter(cell_idx, cell.neighbors(), indexed_offsets)
             {
                 let neighbor_cell = &mut cells[neighbor];
-                neighbor_cell.set_unknown(from, true);
+                neighbor_cell.set_unknown(from);
             }
         }
     }
@@ -259,7 +259,7 @@ impl MineField {
         {
             let mut n_cell = cells[n_idx];
             match value {
-                CellValue::Unknown => n_cell.set_unknown(from, inferred),
+                CellValue::Unknown => n_cell.set_unknown(from),
                 CellValue::Count(_) => n_cell.set_open(from, inferred),
                 CellValue::Mine => n_cell.set_mine(from, inferred),
             }
@@ -316,7 +316,7 @@ impl MineField {
                 let neighbor_cell = &mut self.cells[neighbor_idx];
                 if !count_to_count {
                     match new_value {
-                        CellValue::Unknown => neighbor_cell.set_unknown(from, false),
+                        CellValue::Unknown => neighbor_cell.set_unknown(from),
                         CellValue::Count(_) => neighbor_cell.set_open(from, false),
                         CellValue::Mine => neighbor_cell.set_mine(from, false),
                     };
