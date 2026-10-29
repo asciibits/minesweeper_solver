@@ -355,8 +355,8 @@ impl FieldBuilder {
                 p.neighbors(DirectionSet::all_neighbors(p, width, height))
             {
                 if all_points.insert(neighbor) {
-                    let nidx = cell_idx(neighbor, width);
-                    if field_data[nidx] == 0 {
+                    let n_idx = cell_idx(neighbor, width);
+                    if field_data[n_idx] == 0 {
                         zero_queue.push(neighbor);
                     }
                 }

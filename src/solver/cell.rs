@@ -3,7 +3,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use crate::solver::grid::{Direction, DirectionSet, Point};
+use crate::solver::grid::{Direction, DirectionSet, E, N, NE, NW, Point, S, SE, SW, W};
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the corollary to `cell_id`.
@@ -134,25 +134,47 @@ pub(super) enum InferredValue {
 }
 
 impl ProcessedCell {
-    /// Initializes a [`ProcessedCell`] at `p` for a board of dimensions `width` by `height`.
-    pub(super) fn new(point: Point, width: u32, height: u32) -> ProcessedCell {
-        let idx = point.to_index(width);
-        let neighbors = DirectionSet::all_neighbors(point, width, height);
-        ProcessedCell {
-            point,
-            value: CellValue::Unknown,
-            idx,
-            neighbors,
-            unknown_neighbors: neighbors,
-            open_neighbors: DirectionSet::new(),
-            mine_neighbors: DirectionSet::new(),
-            staged_value: None,
-            inferred_value: InferredValue::None,
-            inferred_unknown_neighbors: neighbors,
-            inferred_open_neighbors: DirectionSet::new(),
-            inferred_mine_neighbors: DirectionSet::new(),
-            partition_id: 0,
+    pub(super) fn grid(width: u32, height: u32) -> Box<[ProcessedCell]> {
+        let len = width as usize * height as usize;
+        let mut grid: Vec<ProcessedCell> = Vec::with_capacity(len);
+
+        let mut idx = 0;
+        for y in 0..height {
+            for x in 0..width {
+                let mut neighbors = DirectionSet::ALL;
+                if y == 0 {
+                    neighbors -= NW | N | NE;
+                }
+                if y == height - 1 {
+                    neighbors -= SW | S | SE;
+                }
+                if x == 0 {
+                    neighbors -= NW | W | SW;
+                }
+                if x == width - 1 {
+                    neighbors -= NE | E | SE;
+                }
+                grid.push(ProcessedCell {
+                    point: Point { x, y },
+                    value: CellValue::Unknown,
+                    idx,
+                    neighbors,
+                    unknown_neighbors: neighbors,
+                    open_neighbors: DirectionSet::new(),
+                    mine_neighbors: DirectionSet::new(),
+                    staged_value: None,
+                    inferred_value: InferredValue::None,
+                    inferred_unknown_neighbors: neighbors,
+                    inferred_open_neighbors: DirectionSet::new(),
+                    inferred_mine_neighbors: DirectionSet::new(),
+                    partition_id: 0,
+                });
+
+                idx += 1;
+            }
         }
+
+        grid.into_boxed_slice()
     }
 
     /// Returns the cell's grid coordinates.
@@ -393,7 +415,7 @@ impl Display for ProcessedCell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::grid::{E, S, SE};
+    use crate::solver::grid::{E, N, NE, NW, S, SE, W};
 
     #[test]
     fn test_coordinates_and_cell_idx_round_trip() {
@@ -414,7 +436,8 @@ mod tests {
 
     #[test]
     fn test_processed_cell_initialization_and_display() {
-        let mut pc = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        let grid = ProcessedCell::grid(3, 3);
+        let mut pc = grid[0];
         assert_eq!(pc.idx, 0);
         assert_eq!(pc.value, CellValue::Unknown);
         assert_eq!(pc.neighbors, E | S | SE);
@@ -438,7 +461,9 @@ mod tests {
 
     #[test]
     fn test_processed_cell_alt_neighbors_and_partition_state_reset() {
-        let mut pc = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        let grid = ProcessedCell::grid(3, 3);
+        let mut pc = grid[0];
+        pc.neighbors -= NW | N | NE | W;
         pc.add_open_neighbor(S);
         pc.remove_unknown_neighbor(S);
         pc.add_mine_neighbor(SE);

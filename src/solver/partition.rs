@@ -165,14 +165,11 @@ impl Ord for CellOrdering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::grid::{E, Point, S, SE, W};
+    use crate::solver::grid::{E, S, SE, W};
 
     #[test]
     fn test_partition_create_skips_mines_and_isolated_cells() {
-        let mut cells = vec![
-            ProcessedCell::new(Point { x: 0, y: 0 }, 2, 1),
-            ProcessedCell::new(Point { x: 1, y: 0 }, 2, 1),
-        ];
+        let mut cells = ProcessedCell::grid(2, 1);
         // Cell 0 is Unknown with no open_neighbors (isolated)
         cells[0].set_partition_id(99);
         assert!(Partition::create(&mut cells, 2, 1, 0, 1, false).is_none());
@@ -190,11 +187,7 @@ mod tests {
     #[test]
     fn test_partition_create_connected_bipartite_component() {
         // 3x1 board: [Count(1), Unknown, Count(2)]
-        let mut cells = vec![
-            ProcessedCell::new(Point { x: 0, y: 0 }, 3, 1),
-            ProcessedCell::new(Point { x: 1, y: 0 }, 3, 1),
-            ProcessedCell::new(Point { x: 2, y: 0 }, 3, 1),
-        ];
+        let mut cells = ProcessedCell::grid(3, 1);
         cells[0].set_value(CellValue::Count(1));
 
         cells[1].set_value(CellValue::Unknown);
@@ -217,25 +210,26 @@ mod tests {
 
     #[test]
     fn test_ordered_cell_from_cell_and_ordering() {
-        let mut unknown_cell = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        let grid = ProcessedCell::grid(3, 3);
+        let mut unknown_cell = grid[0];
         assert!(CellOrdering::from_cell(&unknown_cell).is_none());
 
         unknown_cell.set_value(CellValue::Mine);
         assert!(CellOrdering::from_cell(&unknown_cell).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
-        let mut cell_a = ProcessedCell::new(Point { x: 0, y: 0 }, 3, 3);
+        let mut cell_a = grid[0];
         cell_a.set_value(CellValue::Count(2));
         cell_a.remove_unknown_neighbor(SE);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
-        let mut cell_b = ProcessedCell::new(Point { x: 1, y: 0 }, 3, 3);
+        let mut cell_b = grid[1];
         cell_b.set_value(CellValue::Count(1));
         cell_b.add_mine_neighbor(S);
         cell_b.remove_unknown_neighbor(S);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
-        let mut cell_c = ProcessedCell::new(Point { x: 2, y: 0 }, 3, 3);
+        let mut cell_c = grid[3];
         cell_c.set_value(CellValue::Count(1));
 
         let ord_a = CellOrdering::from_cell(&cell_a).unwrap();

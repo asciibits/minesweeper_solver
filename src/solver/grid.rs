@@ -172,14 +172,11 @@ pub const SE: Direction = ALL_DIRECTIONS[7];
 pub struct DirectionSet(u8);
 
 impl DirectionSet {
-    /// Creates an empty [`DirectionSet`].
-    pub fn new() -> DirectionSet {
-        DirectionSet::default()
-    }
+    pub const ALL: DirectionSet = DirectionSet(0xff);
 
     /// Creates an empty [`DirectionSet`].
-    pub fn all() -> DirectionSet {
-        DirectionSet(0b111_11_111)
+    pub fn new() -> DirectionSet {
+        DirectionSet(0)
     }
 
     /// Given a point in a fixed size field, return the set of neighbors, taking
@@ -717,10 +714,10 @@ mod tests {
         let b: DirectionSet = N | E | SE;
 
         // Not (!) on DirectionSet and Direction
-        assert_eq!(!DirectionSet::new(), DirectionSet::all());
-        assert_eq!(!DirectionSet::all(), DirectionSet::new());
+        assert_eq!(!DirectionSet::new(), DirectionSet::ALL);
+        assert_eq!(!DirectionSet::ALL, DirectionSet::new());
         assert_eq!(!a, NE | W | SW | S | SE);
-        assert_eq!(!NW, DirectionSet::all() - NW);
+        assert_eq!(!NW, DirectionSet::ALL - NW);
 
         // BitOr (|) across (DirectionSet, DirectionSet), (DirectionSet, Direction),
         // (Direction, DirectionSet), and (Direction, Direction)

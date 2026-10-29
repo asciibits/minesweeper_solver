@@ -69,18 +69,12 @@ impl MineField {
                 height,
             });
         }
-        let mut cells = Vec::with_capacity(area);
-        for y in 0..height {
-            for x in 0..width {
-                cells.push(ProcessedCell::new(Point { x, y }, width, height));
-            }
-        }
 
         let field = MineField {
             width,
             height,
             mine_count,
-            cells: cells.into_boxed_slice(),
+            cells: ProcessedCell::grid(width, height),
             pending: Vec::with_capacity(area / 4),
             partitions: HashMap::with_capacity(20),
             dirty_neighbors: Vec::with_capacity(perimeter * 2),
@@ -529,7 +523,8 @@ impl<'a> Display for DetailMineField<'a> {
         write!(
             f,
             "pending: [{}],{spacer}",
-            self.0.pending
+            self.0
+                .pending
                 .iter()
                 .map(|p| p.to_string())
                 .collect::<Vec<String>>()
@@ -538,13 +533,18 @@ impl<'a> Display for DetailMineField<'a> {
         write!(
             f,
             "dirty_neighbors: [{}],{spacer}",
-            self.0.dirty_neighbors
+            self.0
+                .dirty_neighbors
                 .iter()
                 .map(|p| p.to_string())
                 .collect::<Vec<String>>()
                 .join(", ")
         )?;
-        write!(f, "next_partition_id: {}{spacer}}}", self.0.next_partition_id)
+        write!(
+            f,
+            "next_partition_id: {}{spacer}}}",
+            self.0.next_partition_id
+        )
     }
 }
 
