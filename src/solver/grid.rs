@@ -4,6 +4,7 @@
 
 use std::{
     fmt::{self, Display, Formatter},
+    marker::PhantomData,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
@@ -53,18 +54,24 @@ impl Point {
     }
 
     /// Returns an iterator over the neighboring [`Point`]s specified by `directions`.
-    pub fn neighbors(&self, directions: DirectionSet) -> NeighborIterator {
+    pub fn neighbors(&self, directions: DirectionSet) -> impl Iterator<Item = Neighbor<Point>> {
         NeighborIterator {
-            p: *self,
+            offset_values: &Self::DIRECTION_OFFSETS,
+            apply_offset: |d, (dx, dy)| self.to_neighbor(d, dx, dy),
             iter: directions.iter(),
+            _result: PhantomData,
         }
     }
 
     /// Returns the adjacent [`Point`] in direction `to`, paired with the reverse [`Direction`]
     /// pointing from that neighbor back to `self`.
     #[inline]
-    pub fn neighbor(&self, to: Direction) -> Neighbor {
+    pub fn neighbor(&self, to: Direction) -> Neighbor<Point> {
         let (dx, dy) = Self::DIRECTION_OFFSETS[to.mask().trailing_zeros() as usize];
+        self.to_neighbor(to, dx, dy)
+    }
+
+    fn to_neighbor(&self, to: Direction, dx: i8, dy: i8) -> Neighbor<Point> {
         Neighbor {
             neighbor: Point {
                 x: self.x.wrapping_add_signed(dx as i32),
@@ -83,33 +90,46 @@ impl Display for Point {
 
 /// An iterator yielding the [`Neighbor<Point>`]s of a [`Point`] for each direction in a [`DirectionSet`].
 #[derive(Debug, Clone, Copy)]
-pub struct NeighborIterator {
-    p: Point,
-    iter: DirectionSetIterator,
+pub(super) struct NeighborIterator<'a, O, R, F> {
+    pub(super) offset_values: &'a [O],
+    pub(super) apply_offset: F,
+    pub(super) iter: DirectionSetIterator,
+    pub(super) _result: PhantomData<R>,
 }
 
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
 /// [`Direction`] pointing from that neighbor back to the origin cell.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Neighbor {
+pub struct Neighbor<T: Copy> {
     /// The neighboring value or coordinate.
-    pub neighbor: Point,
+    pub neighbor: T,
     /// The direction from `neighbor` back to the origin cell.
     pub from: Direction,
 }
 
-impl Iterator for NeighborIterator {
-    type Item = Neighbor;
+impl<'a, O, R, F> Iterator for NeighborIterator<'a, O, R, F>
+where
+    O: Copy,
+    R: Copy,
+    F: FnMut(Direction, O) -> R,
+{
+    type Item = R;
 
     fn next(&mut self) -> Option<Self::Item> {
         let d = self.iter.next()?;
-        Some(self.p.neighbor(d))
+        Some((self.apply_offset)(
+            d,
+            self.offset_values[d.mask().trailing_zeros() as usize],
+        ))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
     }
 }
-impl ExactSizeIterator for NeighborIterator {}
+impl<'a, O: Copy, R: Copy, F: FnMut(Direction, O) -> R> ExactSizeIterator
+    for NeighborIterator<'a, O, R, F>
+{
+}
 
 /// Human-readable compass abbreviations ordered by bit position (`0..8`).
 const DIRECTION_NAMES: [&str; 8] = ["NW", "N", "NE", "W", "E", "SW", "S", "SE"];
@@ -253,6 +273,11 @@ impl DirectionSet {
     /// Returns an iterator over all [`Direction`]s in `self`.
     pub fn iter(&self) -> DirectionSetIterator {
         DirectionSetIterator(BinaryIterator(self.0))
+    }
+
+    pub fn iter_over<T: Copy>(&self, values: &[T]) -> impl Iterator<Item = T> {
+        self.iter()
+            .map(|d| values[d.mask().trailing_zeros() as usize])
     }
 }
 

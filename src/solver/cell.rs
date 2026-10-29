@@ -67,7 +67,7 @@ impl Display for CellValue {
 /// Internal solver representation of a board cell, caching neighbor masks and partition membership.
 // Note: Try to keep this under 32 bytes to fit in a single cache line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProcessedCell {
+pub(super) struct ProcessedCell {
     /// Inline the contents of Cell - this removes some internal padding and
     /// keeps ProcessedCell within the 32 byte boundary
     point: Point,
