@@ -229,7 +229,7 @@ mod tests {
         cell_b.remove_unknown_neighbor(S);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
-        let mut cell_c = grid[3];
+        let mut cell_c = grid[2];
         cell_c.set_value(CellValue::Count(1));
 
         let ord_a = CellOrdering::from_cell(&cell_a).unwrap();
