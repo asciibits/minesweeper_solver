@@ -23,10 +23,10 @@
 use rand::{rng, seq::SliceRandom};
 
 use crate::{
-    Cell, CellValue, MineField, Point,
+    MineField, Point,
     solver::{
         IndexedOffsets,
-        cell::{cell_idx, coordinates},
+        cell::{UserCell, UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
         indexed_neighbor_iter,
     },
@@ -149,15 +149,15 @@ impl FieldBuilder {
 
     /// Encodes a [`CellValue`] from an ASCII spec into a temporary `i8` representation before
     /// neighbor mine counts are accumulated.
-    fn value_to_i8(value: CellValue) -> i8 {
+    fn value_to_i8(value: UserCellValue) -> i8 {
         match value {
-            CellValue::Mine => Self::MINE,
-            CellValue::Unknown => 0,
+            UserCellValue::Mine => Self::MINE,
+            UserCellValue::Unknown => 0,
             // a little hacky, but store the user provided values in bits 4-7
             // they will be compared to the final bits 0-3 in the last pass to
             // verify the user values. Add one so this value is distinct from
             // not being specified.
-            CellValue::Count(n) => (n + 1) << 4,
+            UserCellValue::Safe(n) => (n + 1) << 4,
         }
     }
 
@@ -193,7 +193,7 @@ impl FieldBuilder {
     pub fn from_spec<'i>(spec: impl IntoIterator<Item = &'i str>) -> Self {
         let (width, height, cell_iter) = cells_and_size_from_spec(spec);
         let mut field = vec![0i8; width as usize * height as usize];
-        for Cell { point, value } in cell_iter {
+        for UserCell { point, value } in cell_iter {
             field[cell_idx(point, width)] = Self::value_to_i8(value);
         }
 
@@ -320,10 +320,10 @@ impl FieldBuilder {
     }
 
     /// Converts the ground-truth `field_data` entry at `p` into a [`CellValue`].
-    fn cell_value(field_data: &[i8], width: u32, p: Point) -> CellValue {
+    fn cell_value(field_data: &[i8], width: u32, p: Point) -> UserCellValue {
         match field_data[cell_idx(p, width)] {
-            n @ 0..=8 => CellValue::Count(n),
-            Self::MINE => CellValue::Mine,
+            n @ 0..=8 => UserCellValue::Safe(n),
+            Self::MINE => UserCellValue::Mine,
             _ => unreachable!(),
         }
     }
@@ -333,7 +333,7 @@ impl FieldBuilder {
         let field_data = &self.field_data;
         let width = self.mine_field.width();
         self.mine_field
-            .set_cells(points.into_iter().map(|point| Cell {
+            .set_cells(points.into_iter().map(|point| UserCell {
                 point,
                 value: Self::cell_value(field_data, width, point),
             }))
@@ -376,7 +376,7 @@ impl FieldBuilder {
 /// Parses `field_spec` into an iterator of [`Cell`] updates, omitting skipped (`'.'` and `' '`) positions.
 fn cells_from_spec<'a>(
     field_spec: impl IntoIterator<Item = &'a str>,
-) -> impl Iterator<Item = Cell> {
+) -> impl Iterator<Item = UserCell> {
     to_cell_iter(spec_to_iter(field_spec))
 }
 
@@ -384,7 +384,7 @@ fn cells_from_spec<'a>(
 /// iterator of [`Cell`] updates for all non-skipped positions.
 fn cells_and_size_from_spec<'a>(
     field_spec: impl IntoIterator<Item = &'a str>,
-) -> (u32, u32, impl Iterator<Item = Cell>) {
+) -> (u32, u32, impl Iterator<Item = UserCell>) {
     let cells: Vec<_> = spec_to_iter(field_spec).collect();
 
     let size = cells
@@ -399,10 +399,10 @@ fn cells_and_size_from_spec<'a>(
 
 /// Converts `(x, y, Option<CellValue>)` tuples into [`Cell`]s, filtering out `None` entries.
 fn to_cell_iter(
-    iter: impl IntoIterator<Item = (u32, u32, Option<CellValue>)>,
-) -> impl Iterator<Item = Cell> {
+    iter: impl IntoIterator<Item = (u32, u32, Option<UserCellValue>)>,
+) -> impl Iterator<Item = UserCell> {
     iter.into_iter().filter_map(|(x, y, v)| {
-        v.map(|value| Cell {
+        v.map(|value| UserCell {
             point: Point { x, y },
             value,
         })
@@ -412,12 +412,12 @@ fn to_cell_iter(
 /// Parses `field_spec` into `(x, y, Option<CellValue>)` tuples for every character position in the spec.
 fn spec_to_iter<'a>(
     field_spec: impl IntoIterator<Item = &'a str>,
-) -> impl Iterator<Item = (u32, u32, Option<CellValue>)> {
-    fn char_to_value(c: char) -> Option<CellValue> {
+) -> impl Iterator<Item = (u32, u32, Option<UserCellValue>)> {
+    fn char_to_value(c: char) -> Option<UserCellValue> {
         match c {
-            '*' | 'X' | 'x' => Some(CellValue::Mine),
-            n @ '0'..='8' => Some(CellValue::Count(n as i8 - b'0' as i8)),
-            '_' => Some(CellValue::Unknown),
+            '*' | 'X' | 'x' => Some(UserCellValue::Mine),
+            n @ '0'..='8' => Some(UserCellValue::Safe(n as i8 - b'0' as i8)),
+            '_' => Some(UserCellValue::Unknown),
             ' ' | '.' => None,
             _ => panic!("Invalid field character: {c:?}"),
         }
@@ -451,15 +451,36 @@ mod tests {
         assert_eq!(field.height(), 2);
         assert_eq!(field.mine_count(), 1);
 
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Unknown);
-        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Count(1));
-        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Mine);
-        assert_eq!(field.cell(Point { x: 3, y: 0 }).value, CellValue::Unknown);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 3, y: 0 }).value,
+            UserCellValue::Unknown
+        );
 
-        assert_eq!(field.cell(Point { x: 0, y: 1 }).value, CellValue::Unknown);
-        assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Unknown);
-        assert_eq!(field.cell(Point { x: 2, y: 1 }).value, CellValue::Unknown);
-        assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Count(1));
+        assert_eq!(
+            field.cell(Point { x: 0, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 3, y: 1 }).value,
+            UserCellValue::Safe(1)
+        );
 
         // Verify the solver ran on the populated cells:
         // Both (1, 0)=Count(1) and (3, 1)=Count(1) are satisfied by the Mine at (2, 0),
@@ -472,7 +493,7 @@ mod tests {
             Point { x: 2, y: 1 },
         ] {
             let idx = pt.to_index(field.width());
-            assert_eq!(field.cells()[idx].inferred_value(), InferredValue::Open);
+            assert_eq!(field.cells()[idx].inferred_value(), InferredValue::Safe);
         }
     }
 
@@ -487,76 +508,100 @@ mod tests {
         for x in 0..5u32 {
             assert_eq!(
                 field.cell(Point { x, y: 0 }).value,
-                CellValue::Count(x as i8)
+                UserCellValue::Safe(x as i8)
             );
         }
         for x in 0..4u32 {
             assert_eq!(
                 field.cell(Point { x, y: 1 }).value,
-                CellValue::Count((x + 5) as i8)
+                UserCellValue::Safe((x + 5) as i8)
             );
         }
-        assert_eq!(field.cell(Point { x: 4, y: 1 }).value, CellValue::Mine);
+        assert_eq!(field.cell(Point { x: 4, y: 1 }).value, UserCellValue::Mine);
 
         // 'X' and 'x' both produce CellValue::Mine
-        assert_eq!(field.cell(Point { x: 0, y: 2 }).value, CellValue::Mine);
-        assert_eq!(field.cell(Point { x: 1, y: 2 }).value, CellValue::Mine);
+        assert_eq!(field.cell(Point { x: 0, y: 2 }).value, UserCellValue::Mine);
+        assert_eq!(field.cell(Point { x: 1, y: 2 }).value, UserCellValue::Mine);
         // '.' and ' ' (filtered out) and '_' (explicit Unknown) all result in Unknown on a new board
         for x in 2..5u32 {
-            assert_eq!(field.cell(Point { x, y: 2 }).value, CellValue::Unknown);
+            assert_eq!(field.cell(Point { x, y: 2 }).value, UserCellValue::Unknown);
         }
     }
 
     #[test]
     fn test_cells_from_spec_and_update_minefield() {
         // Verify ' ' and '.' are filtered out while '_', '*', 'X', 'x', and digits emit Cells
-        let cells: Vec<Cell> = cells_from_spec([" .1_Xx*"]).collect();
+        let cells: Vec<UserCell> = cells_from_spec([" .1_Xx*"]).collect();
         assert_eq!(
             cells,
             vec![
-                Cell {
+                UserCell {
                     point: Point { x: 2, y: 0 },
-                    value: CellValue::Count(1),
+                    value: UserCellValue::Safe(1),
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 3, y: 0 },
-                    value: CellValue::Unknown,
+                    value: UserCellValue::Unknown,
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 4, y: 0 },
-                    value: CellValue::Mine,
+                    value: UserCellValue::Mine,
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 5, y: 0 },
-                    value: CellValue::Mine,
+                    value: UserCellValue::Mine,
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 6, y: 0 },
-                    value: CellValue::Mine,
+                    value: UserCellValue::Mine,
                 },
             ]
         );
 
         // Start with a 4x2 field where (0, 0)=Count(1) and (2, 0)=Count(2)
         let mut field = create_minefield(["1.2.", "...."], 2);
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(1));
-        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Count(2));
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Safe(2)
+        );
 
         // Update with '.' at (0, 0) and (2, 0) (preserving their values),
         // 'X' at (1, 0), 'x' at (3, 1), and '1' at (0, 1)
         update_minefield(&mut field, [".X..", "1..x"]);
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(1));
-        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Mine);
-        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Count(2));
-        assert_eq!(field.cell(Point { x: 0, y: 1 }).value, CellValue::Count(1));
-        assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Safe(2)
+        );
+        assert_eq!(
+            field.cell(Point { x: 0, y: 1 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 3, y: 1 }).value, UserCellValue::Mine);
 
         // Use '_' in update_minefield to explicitly revert (1, 0) and (2, 0) back to Unknown,
         // while '.' at (0, 0) preserves Count(1)
         update_minefield(&mut field, [".__."]);
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(1));
-        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Unknown);
-        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Unknown);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Unknown
+        );
     }
 
     #[test]
@@ -566,10 +611,19 @@ mod tests {
         let ragged = create_minefield(["1*", "....2"], 1);
         assert_eq!(ragged.width(), 5);
         assert_eq!(ragged.height(), 2);
-        assert_eq!(ragged.cell(Point { x: 0, y: 0 }).value, CellValue::Count(1));
-        assert_eq!(ragged.cell(Point { x: 1, y: 0 }).value, CellValue::Mine);
-        assert_eq!(ragged.cell(Point { x: 4, y: 0 }).value, CellValue::Unknown);
-        assert_eq!(ragged.cell(Point { x: 4, y: 1 }).value, CellValue::Count(2));
+        assert_eq!(
+            ragged.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(ragged.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            ragged.cell(Point { x: 4, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            ragged.cell(Point { x: 4, y: 1 }).value,
+            UserCellValue::Safe(2)
+        );
 
         // 1x4 vertical strip
         let vertical = create_minefield(["1", ".", "*", "1"], 1);
@@ -577,16 +631,19 @@ mod tests {
         assert_eq!(vertical.height(), 4);
         assert_eq!(
             vertical.cell(Point { x: 0, y: 0 }).value,
-            CellValue::Count(1)
+            UserCellValue::Safe(1)
         );
         assert_eq!(
             vertical.cell(Point { x: 0, y: 1 }).value,
-            CellValue::Unknown
+            UserCellValue::Unknown
         );
-        assert_eq!(vertical.cell(Point { x: 0, y: 2 }).value, CellValue::Mine);
+        assert_eq!(
+            vertical.cell(Point { x: 0, y: 2 }).value,
+            UserCellValue::Mine
+        );
         assert_eq!(
             vertical.cell(Point { x: 0, y: 3 }).value,
-            CellValue::Count(1)
+            UserCellValue::Safe(1)
         );
     }
 
@@ -622,7 +679,7 @@ mod tests {
             for x in 0..3 {
                 assert_eq!(
                     builder.mine_field().cell(Point { x, y }).value,
-                    CellValue::Unknown
+                    UserCellValue::Unknown
                 );
             }
         }
@@ -630,9 +687,15 @@ mod tests {
         // Expose (1, 0) (adjacent to both mines -> Count(2)) and (0, 0) (Mine)
         builder.expose_cells([Point { x: 1, y: 0 }, Point { x: 0, y: 0 }]);
         let field = builder.into_mine_field();
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Mine);
-        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Count(2));
-        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Unknown);
+        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Safe(2)
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Unknown
+        );
     }
 
     #[test]
@@ -646,7 +709,7 @@ mod tests {
         builder.expose_cells([Point { x: 1, y: 1 }]);
         assert_eq!(
             builder.mine_field().cell(Point { x: 1, y: 1 }).value,
-            CellValue::Count(8)
+            UserCellValue::Safe(8)
         );
 
         // Also test a valid spec with mixed counts (0, 1, 2, 7) and '_'
@@ -658,10 +721,22 @@ mod tests {
             Point { x: 1, y: 4 },
         ]);
         let field7 = builder7.into_mine_field();
-        assert_eq!(field7.cell(Point { x: 1, y: 1 }).value, CellValue::Count(7));
-        assert_eq!(field7.cell(Point { x: 1, y: 2 }).value, CellValue::Count(4));
-        assert_eq!(field7.cell(Point { x: 1, y: 3 }).value, CellValue::Count(2));
-        assert_eq!(field7.cell(Point { x: 1, y: 4 }).value, CellValue::Count(0));
+        assert_eq!(
+            field7.cell(Point { x: 1, y: 1 }).value,
+            UserCellValue::Safe(7)
+        );
+        assert_eq!(
+            field7.cell(Point { x: 1, y: 2 }).value,
+            UserCellValue::Safe(4)
+        );
+        assert_eq!(
+            field7.cell(Point { x: 1, y: 3 }).value,
+            UserCellValue::Safe(2)
+        );
+        assert_eq!(
+            field7.cell(Point { x: 1, y: 4 }).value,
+            UserCellValue::Safe(0)
+        );
     }
 
     #[test]
@@ -684,11 +759,11 @@ mod tests {
         builder.expand_cells([Point { x: 2, y: 1 }]);
         assert_eq!(
             builder.mine_field().cell(Point { x: 2, y: 1 }).value,
-            CellValue::Count(1)
+            UserCellValue::Safe(1)
         );
         assert_eq!(
             builder.mine_field().cell(Point { x: 0, y: 0 }).value,
-            CellValue::Unknown
+            UserCellValue::Unknown
         );
 
         // Expanding from (0, 0) flood-fills all 0-cells and their adjacent clue boundary,
@@ -699,10 +774,10 @@ mod tests {
             for x in 0..4 {
                 let pt = Point { x, y };
                 if pt == (Point { x: 3, y: 2 }) {
-                    assert_eq!(field.cell(pt).value, CellValue::Unknown);
+                    assert_eq!(field.cell(pt).value, UserCellValue::Unknown);
                     assert_eq!(field.inferred_mines(), vec![pt]);
                 } else {
-                    assert!(matches!(field.cell(pt).value, CellValue::Count(_)));
+                    assert!(matches!(field.cell(pt).value, UserCellValue::Safe(_)));
                 }
             }
         }
@@ -725,11 +800,11 @@ mod tests {
         let mut zero_builder = FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt);
         zero_builder.expand_cells([zero_pt]);
         let field = zero_builder.into_mine_field();
-        assert_eq!(field.cell(zero_pt).value, CellValue::Count(0));
+        assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));
         for Neighbor { neighbor, .. } in
             zero_pt.neighbors(DirectionSet::all_neighbors(zero_pt, 6, 5))
         {
-            assert!(matches!(field.cell(neighbor).value, CellValue::Count(_)));
+            assert!(matches!(field.cell(neighbor).value, UserCellValue::Safe(_)));
         }
     }
 }

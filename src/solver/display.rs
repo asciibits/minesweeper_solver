@@ -58,13 +58,13 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
         write!(f, "{}", "│ ".bold())?;
         let cell = field.cells()[col as usize + row as usize * field.width as usize];
         let printable = match cell.value() {
-            CellValue::Unknown => match cell.inferred_value() {
+            CellValue::UNKNOWN => match cell.inferred_value() {
                 InferredValue::None => " ".on_bright_black(),
                 InferredValue::Mine => " ".on_bright_red(),
-                InferredValue::Open => " ".on_green(),
+                InferredValue::Safe => " ".on_green(),
             },
-            CellValue::Mine => " ".on_bright_red(),
-            CellValue::Count(count) => match count {
+            CellValue::MINE => " ".on_bright_red(),
+            c => match c.mine_count().unwrap() {
                 1 => "1".bright_blue(),
                 2 => "2".green(),
                 3 => "3".red(),

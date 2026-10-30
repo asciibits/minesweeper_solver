@@ -1,6 +1,5 @@
 //! Core Minesweeper solver state and partition orchestration.
-
-use cell::{Cell, CellValue, ProcessedCell};
+use cell::{Cell, UserCell, UserCellValue};
 use grid::{Neighbor, Point};
 use partition::{CellOrdering, Partition};
 use std::{
@@ -10,7 +9,7 @@ use std::{
 };
 
 use crate::solver::{
-    cell::InferredValue,
+    cell::{CellValue, InferredValue},
     grid::{IndexedOffsets, indexed_neighbor_iter},
 };
 
@@ -33,7 +32,7 @@ pub struct MineField {
     /// Total number of mines on the board.
     mine_count: u32,
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
-    cells: Box<[ProcessedCell]>,
+    cells: Box<[Cell]>,
     /// Map of cell indices pending modification.
     pending: Vec<usize>,
     /// Set of non-dirty neighbor cell indices whose adjacency state changed.
@@ -79,7 +78,7 @@ impl MineField {
             width,
             height,
             mine_count,
-            cells: ProcessedCell::grid(width, height),
+            cells: Cell::grid(width, height),
             pending: Vec::with_capacity(area / 4),
             partitions: HashMap::with_capacity(20),
             dirty_neighbors: Vec::with_capacity(perimeter * 2),
@@ -115,12 +114,12 @@ impl MineField {
     /// # Panics
     ///
     /// Panics if `p` is outside the bounds of the field.
-    pub fn cell(&self, p: Point) -> Cell {
-        self.cells[self.cell_idx(p)].cell()
+    pub fn cell(&self, p: Point) -> UserCell {
+        self.cells[self.cell_idx(p)].cell(self.width)
     }
 
     #[cfg(test)]
-    fn cells(&self) -> &[ProcessedCell] {
+    fn cells(&self) -> &[Cell] {
         &self.cells
     }
 
@@ -129,7 +128,7 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `p.x >= self.width` or `p.y >= self.height`.
-    fn set_cell_helper(&mut self, p: Point, value: CellValue) -> Result<(), SolverError> {
+    fn set_cell_helper(&mut self, p: Point, value: UserCellValue) -> Result<(), SolverError> {
         if p.x >= self.width || p.y >= self.height {
             return Err(SolverError::CoordinatesOutOfBounds {
                 p,
@@ -138,7 +137,7 @@ impl MineField {
             });
         }
         let cell = &mut self.cells[self.cell_idx(p)];
-        if cell.value() != value {
+        if cell.value().to_user_value() != value {
             // Prepare the value to be set in the next solver pass.
             if cell.staged_value().is_none() {
                 self.pending.push(cell.idx());
@@ -155,7 +154,7 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `p` is outside the board dimensions.
-    pub fn set_cell_value(&mut self, p: Point, value: CellValue) -> Result<(), SolverError> {
+    pub fn set_cell_value(&mut self, p: Point, value: UserCellValue) -> Result<(), SolverError> {
         self.set_cell_helper(p, value)?;
         self.solve();
         Ok(())
@@ -166,7 +165,7 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `cell.point` is outside the board dimensions.
-    pub fn set_cell(&mut self, cell: &Cell) -> Result<(), SolverError> {
+    pub fn set_cell(&mut self, cell: &UserCell) -> Result<(), SolverError> {
         self.set_cell_value(cell.point, cell.value)
     }
 
@@ -175,7 +174,10 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if any cell in `cells` lies outside the board.
-    pub fn set_cells(&mut self, cells: impl IntoIterator<Item = Cell>) -> Result<(), SolverError> {
+    pub fn set_cells(
+        &mut self,
+        cells: impl IntoIterator<Item = UserCell>,
+    ) -> Result<(), SolverError> {
         for cell in cells.into_iter() {
             self.set_cell_helper(cell.point, cell.value)?;
         }
@@ -187,8 +189,8 @@ impl MineField {
         self.inferred
             .iter()
             .map(|&idx| self.cells[idx])
-            .filter(|c| c.inferred_value() == InferredValue::Open)
-            .map(|c| c.point())
+            .filter(|c| c.inferred_value() == InferredValue::Safe)
+            .map(|c| c.point(self.width))
             .collect()
     }
 
@@ -197,14 +199,14 @@ impl MineField {
             .iter()
             .map(|&idx| self.cells[idx])
             .filter(|c| c.inferred_value() == InferredValue::Mine)
-            .map(|c| c.point())
+            .map(|c| c.point(self.width))
             .collect()
     }
 
     pub fn invalid(&self) -> Vec<Point> {
         self.invalid
             .iter()
-            .map(|&idx| self.cells[idx].point())
+            .map(|&idx| self.cells[idx].point(self.width))
             .collect()
     }
 
@@ -225,7 +227,7 @@ impl MineField {
 
     /// Clears any solver inference on `cell_idx` and restores its neighbors' `inferred_*_neighbors` masks.
     fn clear_cell_inference(
-        cells: &mut [ProcessedCell],
+        cells: &mut [Cell],
         inferred: &mut HashSet<usize>,
         indexed_offsets: &IndexedOffsets,
         cell_idx: usize,
@@ -246,22 +248,24 @@ impl MineField {
     }
 
     fn change_value(
-        cells: &mut [ProcessedCell],
+        cells: &mut [Cell],
         idx: usize,
-        value: CellValue,
+        value: UserCellValue,
         inferred: bool,
         indexed_offsets: &IndexedOffsets,
     ) {
         let cell = &mut cells[idx];
 
-        for Neighbor { neighbor: n_idx, from } in
-            indexed_neighbor_iter(idx, cell.neighbors(), indexed_offsets)
+        for Neighbor {
+            neighbor: n_idx,
+            from,
+        } in indexed_neighbor_iter(idx, cell.neighbors(), indexed_offsets)
         {
             let mut n_cell = cells[n_idx];
             match value {
-                CellValue::Unknown => n_cell.set_unknown(from),
-                CellValue::Count(_) => n_cell.set_open(from, inferred),
-                CellValue::Mine => n_cell.set_mine(from, inferred),
+                UserCellValue::Unknown => n_cell.set_unknown(from),
+                UserCellValue::Safe(_) => n_cell.set_open(from, inferred),
+                UserCellValue::Mine => n_cell.set_mine(from, inferred),
             }
         }
     }
@@ -277,6 +281,7 @@ impl MineField {
             let Some(new_value) = dirty_cell.staged_value() else {
                 continue;
             };
+            let new_value = new_value.into();
 
             let prev_value = dirty_cell.value();
             if prev_value == new_value {
@@ -286,10 +291,10 @@ impl MineField {
             // Transitioning from Open or Mine breaks previous inference passes,
             // as does a direct violation of existing inferences.
             inference_breaking = inference_breaking
-                || !matches!(prev_value, CellValue::Unknown)
+                || prev_value != CellValue::UNKNOWN
                 || match dirty_cell.inferred_value() {
-                    InferredValue::Mine => new_value != CellValue::Mine,
-                    InferredValue::Open => !matches!(new_value, CellValue::Count(_)),
+                    InferredValue::Mine => !new_value.is_mine(),
+                    InferredValue::Safe => !new_value.is_safe(),
                     InferredValue::None => false,
                 };
 
@@ -303,8 +308,8 @@ impl MineField {
             );
 
             let count_to_count = matches!(
-                (prev_value, new_value),
-                (CellValue::Count(_), CellValue::Count(_))
+                (prev_value.mine_count(), new_value.mine_count()),
+                (Some(_), Some(_))
             );
 
             for Neighbor {
@@ -316,9 +321,9 @@ impl MineField {
                 let neighbor_cell = &mut self.cells[neighbor_idx];
                 if !count_to_count {
                     match new_value {
-                        CellValue::Unknown => neighbor_cell.set_unknown(from),
-                        CellValue::Count(_) => neighbor_cell.set_open(from, false),
-                        CellValue::Mine => neighbor_cell.set_mine(from, false),
+                        CellValue::UNKNOWN => neighbor_cell.set_unknown(from),
+                        CellValue::MINE => neighbor_cell.set_mine(from, false),
+                        _ => neighbor_cell.set_open(from, false),
                     };
                 }
                 if neighbor_cell.staged_value().is_none() {
@@ -467,7 +472,7 @@ impl MineField {
             let inferred_state = if solve_cell_ord.remaining_mines() > 0 {
                 InferredValue::Mine
             } else {
-                InferredValue::Open
+                InferredValue::Safe
             };
 
             for Neighbor {
@@ -481,7 +486,6 @@ impl MineField {
                 let inferred_cell = &mut self.cells[inferred_idx];
                 #[cfg(debug_assertions)]
                 let inferred_partition = inferred_cell.partition_id();
-                debug_assert_eq!(inferred_cell.value(), CellValue::Unknown);
                 inferred_cell.set_inferred_value(inferred_state);
                 self.inferred.insert(inferred_idx);
                 self.pending.push(inferred_idx);
@@ -577,9 +581,9 @@ impl Display for MineField {
             for x in 0..self.width {
                 let cell = self.cell(Point { x, y });
                 let char = match cell.value {
-                    CellValue::Mine => '*',
-                    CellValue::Unknown => '.',
-                    CellValue::Count(n) => n.to_string().chars().next().unwrap(),
+                    UserCellValue::Mine => '*',
+                    UserCellValue::Unknown => '.',
+                    UserCellValue::Safe(n) => n.to_string().chars().next().unwrap(),
                 };
                 write!(f, "{char}")?;
             }
@@ -644,7 +648,7 @@ mod tests {
     /// Helper asserting that a cell's `unknown_neighbors`, `open_neighbors`, and `mine_neighbors`
     /// form a pairwise-disjoint partition of `cell.neighbors`, and that its `inferred_*` sets
     /// are synced with its base neighbor sets after partition construction/clearing.
-    fn assert_neighbor_invariants(cell: &ProcessedCell) {
+    fn assert_neighbor_invariants(cell: &Cell) {
         assert_eq!(
             cell.unknown_neighbors() | cell.open_neighbors() | cell.mine_neighbors(),
             cell.neighbors()
@@ -691,7 +695,10 @@ mod tests {
         assert_eq!(field.width(), 10);
         assert_eq!(field.height(), 10);
         assert_eq!(field.mine_count(), 15);
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Unknown);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Unknown
+        );
         for cell in &field.cells {
             assert_eq!(cell.unknown_neighbors(), cell.neighbors());
             assert!(cell.open_neighbors().is_empty());
@@ -727,7 +734,7 @@ mod tests {
     fn test_set_cell_out_of_bounds() {
         let mut field = MineField::new(3, 3, 1).unwrap();
         let err = field
-            .set_cell_value(Point { x: 3, y: 0 }, CellValue::Count(1))
+            .set_cell_value(Point { x: 3, y: 0 }, UserCellValue::Safe(1))
             .unwrap_err();
         assert!(matches!(
             err,
@@ -740,9 +747,9 @@ mod tests {
         assert!(err.to_string().contains("outside the mine field"));
 
         let err_y = field
-            .set_cell(&Cell {
+            .set_cell(&UserCell {
                 point: Point { x: 0, y: 3 },
-                value: CellValue::Count(1),
+                value: UserCellValue::Safe(1),
             })
             .unwrap_err();
         assert!(matches!(err_y, SolverError::CoordinatesOutOfBounds { .. }));
@@ -910,7 +917,7 @@ mod tests {
         assert_eq!(field.cells[0].partition_id(), 0);
         assert_eq!(field.cells[1].partition_id(), 0);
         assert_eq!(field.cells[2].partition_id(), 0);
-        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Safe);
         assert_eq!(
             CellOrdering::from_cell(&field.cells[1])
                 .unwrap()
@@ -981,22 +988,22 @@ mod tests {
         // Neighbor (1, 0)'s mine_neighbors and unknown_neighbors must update cleanly.
         field
             .set_cells([
-                Cell {
+                UserCell {
                     point: Point { x: 0, y: 0 },
-                    value: CellValue::Mine,
+                    value: UserCellValue::Mine,
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 0, y: 0 },
-                    value: CellValue::Unknown,
+                    value: UserCellValue::Unknown,
                 },
-                Cell {
+                UserCell {
                     point: Point { x: 0, y: 0 },
-                    value: CellValue::Mine,
+                    value: UserCellValue::Mine,
                 },
             ])
             .unwrap();
 
-        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Mine);
+        assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Mine);
         assert_eq!(field.cells[1].mine_neighbors(), !!W);
         assert_eq!(field.cells[1].unknown_neighbors(), !!E);
         assert!(field.cells[1].open_neighbors().is_empty());
@@ -1019,7 +1026,7 @@ mod tests {
         let field = create_minefield(["1.1."], 1);
 
         assert_eq!(field.cells[1].inferred_value(), InferredValue::Mine);
-        assert_eq!(field.cells[3].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[3].inferred_value(), InferredValue::Safe);
 
         // Verify inferred neighbor sets reflect the deductions
         assert_eq!(field.cells[0].inferred_mine_neighbors(), !!E);
@@ -1040,7 +1047,7 @@ mod tests {
         // and 1 remaining mine (solution_count == 0 -> recorded in partition.invalid).
         let field = create_minefield(["0.1"], 1);
 
-        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Safe);
         assert_eq!(field.invalid.len(), 1);
         assert!(field.invalid.contains(&2));
         // assert_eq!(field.invalid, &[2]);
@@ -1063,7 +1070,7 @@ mod tests {
         // and infers (3,0) is Open!
         update_minefield(&mut field, ["..1"]);
         assert_eq!(field.cells[1].inferred_value(), InferredValue::Mine);
-        assert_eq!(field.cells[3].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[3].inferred_value(), InferredValue::Safe);
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }
@@ -1090,15 +1097,15 @@ mod tests {
 
         // Round 3: Change (1,0) to Count(0) -> both (0,0) and (2,0) are inferred as Open.
         update_minefield(&mut field, [".0"]);
-        assert_eq!(field.cells[0].inferred_value(), InferredValue::Open);
-        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[0].inferred_value(), InferredValue::Safe);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Safe);
 
         // Round 4 (Inference-breaking Case B): Directly violate inference on (0,0) by setting it to Mine,
         // and simultaneously change (1,0) to Count(1).
         // (2,0) must remain/be recomputed as Open, and all neighbor invariants must hold.
         update_minefield(&mut field, ["*1"]);
         assert_eq!(field.cells[0].inferred_value(), InferredValue::None);
-        assert_eq!(field.cells[2].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[2].inferred_value(), InferredValue::Safe);
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }
@@ -1131,7 +1138,7 @@ mod tests {
         // Left cell (1,0) must change from InferredValue::Mine to InferredValue::Open,
         // while the untouched RIGHT partition (and cell (3,0)'s Mine inference) remains intact!
         update_minefield(&mut field, ["0"]);
-        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Safe);
         assert_eq!(field.cells[3].inferred_value(), InferredValue::Mine);
         assert_eq!(field.cells[4].partition_id(), right_pid);
         assert_eq!(field.inferred_safe(), vec![Point { x: 1, y: 0 }]);
@@ -1164,13 +1171,13 @@ mod tests {
         // Index 2 (highest mine_count) is again recorded in `field.invalid`.
         update_minefield(&mut field, ["0"]);
         assert_eq!(field.invalid, HashSet::from([2]));
-        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Safe);
 
         // Case B: Resolve the inconsistency by editing (2,0) (index 2 itself)
         // from Count(1) to Count(0).
         update_minefield(&mut field, ["..0"]);
         assert!(field.invalid.is_empty());
-        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Safe);
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
         }
@@ -1192,7 +1199,7 @@ mod tests {
         // with (1,0)'s prior Mine inference, triggering a reset of the left partition so
         // (0,0) (mine_count = 0) is visited first and (2,0) (mine_count = 1, index 2) is added to `invalid`.
         update_minefield(&mut field, ["0"]);
-        assert_eq!(field.cells[1].inferred_value(), InferredValue::Open);
+        assert_eq!(field.cells[1].inferred_value(), InferredValue::Safe);
         assert_eq!(field.invalid, HashSet::from([2, 6]));
 
         // Step 3: Resolve ONLY the left partition by setting (1,0) = Mine and (0,0) = Count(1)

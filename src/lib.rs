@@ -8,7 +8,7 @@ pub mod solver;
 
 pub use solver::{
     MineField, SolverError,
-    cell::{Cell, CellValue},
+    cell::{UserCell as Cell, UserCellValue as CellValue},
     grid::Point,
     partition::Partition,
 };

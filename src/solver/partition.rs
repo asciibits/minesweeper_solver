@@ -2,12 +2,7 @@
 
 use std::{cmp::Ordering, collections::VecDeque};
 
-use crate::solver::{
-    IndexedOffsets,
-    cell::{CellValue, ProcessedCell},
-    grid::Neighbor,
-    indexed_neighbor_iter, stats,
-};
+use crate::solver::{IndexedOffsets, cell::Cell, grid::Neighbor, indexed_neighbor_iter, stats};
 
 /// A connected component of bipartite frontier cells (`known` clue cells adjacent to `unknown` cells).
 ///
@@ -35,7 +30,7 @@ impl Partition {
     /// Returns `None` if `start_idx` is a mine or has no `alt_neighbors` (i.e., an interior
     /// known cell or an isolated unknown cell).
     pub(super) fn create(
-        cells: &mut [ProcessedCell],
+        cells: &mut [Cell],
         width: u32,
         height: u32,
         indexed_offsets: &IndexedOffsets,
@@ -113,8 +108,8 @@ pub(super) struct CellOrdering {
 
 impl CellOrdering {
     /// Constructs an [`OrderedCell`] if `cell` holds a [`CellValue::Count`], or `None` otherwise.
-    pub(super) fn from_cell(cell: &ProcessedCell) -> Option<CellOrdering> {
-        if let CellValue::Count(mine_count) = cell.value() {
+    pub(super) fn from_cell(cell: &Cell) -> Option<CellOrdering> {
+        if let Some(mine_count) = cell.value().mine_count() {
             let available_cells = cell.inferred_unknown_neighbors().len() as i8;
             let remaining_mines = mine_count - cell.inferred_mine_neighbors().len() as i8;
             let solution_count = stats::choose(available_cells, remaining_mines) as u8;
@@ -171,11 +166,14 @@ impl Ord for CellOrdering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::grid::{E, S, SE, W};
+    use crate::solver::{
+        cell::CellValue,
+        grid::{E, S, SE, W},
+    };
 
     #[test]
     fn test_partition_create_skips_mines_and_isolated_cells() {
-        let mut cells = ProcessedCell::grid(2, 1);
+        let mut cells = Cell::grid(2, 1);
         // Cell 0 is Unknown with no open_neighbors (isolated)
         cells[0].set_partition_id(99);
         assert!(
@@ -184,7 +182,7 @@ mod tests {
         assert_eq!(cells[0].partition_id(), 0);
 
         // Cell 1 is a Mine even if open_neighbors is non-empty
-        cells[1].set_value(CellValue::Mine);
+        cells[1].set_value(CellValue::MINE);
         cells[1].set_open(W, true);
         cells[1].set_partition_id(99);
         assert!(
@@ -196,14 +194,14 @@ mod tests {
     #[test]
     fn test_partition_create_connected_bipartite_component() {
         // 3x1 board: [Count(1), Unknown, Count(2)]
-        let mut cells = ProcessedCell::grid(3, 1);
-        cells[0].set_value(CellValue::Count(1));
+        let mut cells = Cell::grid(3, 1);
+        cells[0].set_value(CellValue::for_mine_count(1));
 
-        cells[1].set_value(CellValue::Unknown);
+        cells[1].set_value(CellValue::UNKNOWN);
         cells[1].set_open(W, false);
         cells[1].set_open(E, false);
 
-        cells[2].set_value(CellValue::Count(2));
+        cells[2].set_value(CellValue::for_mine_count(2));
 
         let partition = Partition::create(&mut cells, 3, 1, &IndexedOffsets::new(3), 0, 7, false)
             .expect("should create partition");
@@ -217,26 +215,26 @@ mod tests {
 
     #[test]
     fn test_ordered_cell_from_cell_and_ordering() {
-        let grid = ProcessedCell::grid(3, 3);
+        let grid = Cell::grid(3, 3);
         let mut unknown_cell = grid[0];
         assert!(CellOrdering::from_cell(&unknown_cell).is_none());
 
-        unknown_cell.set_value(CellValue::Mine);
+        unknown_cell.set_value(CellValue::MINE);
         assert!(CellOrdering::from_cell(&unknown_cell).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
-        cell_a.set_value(CellValue::Count(2));
+        cell_a.set_value(CellValue::for_mine_count(2));
         cell_a.set_open(SE, false);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = grid[1];
-        cell_b.set_value(CellValue::Count(1));
+        cell_b.set_value(CellValue::for_mine_count(1));
         cell_b.set_mine(S, true);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = grid[2];
-        cell_c.set_value(CellValue::Count(1));
+        cell_c.set_value(CellValue::for_mine_count(1));
 
         let ord_a = CellOrdering::from_cell(&cell_a).unwrap();
         let ord_b = CellOrdering::from_cell(&cell_b).unwrap();
