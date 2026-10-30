@@ -83,6 +83,18 @@ impl CellValue {
         CellValue(Self::SAFE_MASK | mine_count as u8)
     }
 
+    pub(super) fn set_value(&mut self, other: CellValue) -> CellValueChangeType {
+        if *self == other {
+            return CellValueChangeType::NoChange;
+        }
+        *self = other;
+        if self.is_unknown() || (self.0 ^ other.0) & Self::KNOWN_MASK == 0 {
+            CellValueChangeType::NonBreaking
+        } else {
+            CellValueChangeType::Breaking
+        }
+    }
+
     #[inline]
     pub(super) fn is_safe(&self) -> bool {
         self.0 & Self::SAFE_MASK != 0
@@ -171,6 +183,20 @@ impl Display for CellValue {
             Self::INFERRED_SAFE => write!(f, ":#"),
             CellValue(c) => write!(f, "{}#", c & 0xf),
         }
+    }
+}
+
+#[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CellValueChangeType {
+    #[default]
+    NoChange,
+    NonBreaking,
+    Breaking,
+}
+
+impl CellValueChangeType {
+    pub(super) fn is_change(&self) -> bool {
+        !matches!(self, Self::NoChange)
     }
 }
 

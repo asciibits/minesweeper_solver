@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::solver::{
-    cell::{CellValue, InferredValue},
+    cell::{CellValue, CellValueChangeType, InferredValue, cell_idx},
     grid::{IndexedOffsets, indexed_neighbor_iter},
 };
 
@@ -34,11 +34,12 @@ pub struct MineField {
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
     cells: Box<[Cell]>,
     /// Map of cell indices pending modification.
-    pending: Vec<usize>,
+    pending: Vec<UserCell>,
     /// Set of non-dirty neighbor cell indices whose adjacency state changed.
     /// Note: Users of this vector must be prepared for duplicates, as the same
     /// neighbor may be adjacent to multiple dirty cells.
-    dirty_neighbors: Vec<usize>,
+    change_log: Vec<usize>,
+    breaking_change_log: Vec<usize>,
     /// Active connected components of frontier cells, keyed by partition ID.
     partitions: HashMap<u32, Partition>,
     /// TODO
@@ -81,7 +82,8 @@ impl MineField {
             cells: Cell::grid(width, height),
             pending: Vec::with_capacity(area / 4),
             partitions: HashMap::with_capacity(20),
-            dirty_neighbors: Vec::with_capacity(perimeter * 2),
+            change_log: Vec::with_capacity(perimeter * 2),
+            breaking_change_log: Vec::new(),
             inferred: HashSet::with_capacity(perimeter),
             invalid: HashSet::new(),
             next_partition_id: 1,
@@ -128,35 +130,15 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `p.x >= self.width` or `p.y >= self.height`.
-    fn set_cell_helper(&mut self, p: Point, value: UserCellValue) -> Result<(), SolverError> {
-        if p.x >= self.width || p.y >= self.height {
+    fn set_cell_helper(&mut self, cell: UserCell) -> Result<(), SolverError> {
+        if cell.point.x >= self.width || cell.point.y >= self.height {
             return Err(SolverError::CoordinatesOutOfBounds {
-                p,
+                p: cell.point,
                 width: self.width,
                 height: self.height,
             });
         }
-        let cell = &mut self.cells[self.cell_idx(p)];
-        if cell.value().to_user_value() != value {
-            // Prepare the value to be set in the next solver pass.
-            if cell.staged_value().is_none() {
-                self.pending.push(cell.idx());
-            }
-            cell.set_staged_value(Some(value));
-        } else {
-            cell.set_staged_value(None);
-        }
-        Ok(())
-    }
-
-    /// Sets the [`CellValue`] at coordinate `p` and triggers a solver pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SolverError::CoordinatesOutOfBounds`] if `p` is outside the board dimensions.
-    pub fn set_cell_value(&mut self, p: Point, value: UserCellValue) -> Result<(), SolverError> {
-        self.set_cell_helper(p, value)?;
-        self.solve();
+        self.pending.push(cell);
         Ok(())
     }
 
@@ -165,8 +147,10 @@ impl MineField {
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `cell.point` is outside the board dimensions.
-    pub fn set_cell(&mut self, cell: &UserCell) -> Result<(), SolverError> {
-        self.set_cell_value(cell.point, cell.value)
+    pub fn set_cell(&mut self, cell: UserCell) -> Result<(), SolverError> {
+        self.set_cell_helper(cell)?;
+        self.solve();
+        Ok(())
     }
 
     /// Updates a batch of [`Cell`]s and runs a single solver pass after all updates are applied.
@@ -179,7 +163,7 @@ impl MineField {
         cells: impl IntoIterator<Item = UserCell>,
     ) -> Result<(), SolverError> {
         for cell in cells.into_iter() {
-            self.set_cell_helper(cell.point, cell.value)?;
+            self.set_cell_helper(cell)?;
         }
         self.solve();
         Ok(())
@@ -212,16 +196,16 @@ impl MineField {
 
     /// Re-indexes modified cells, rebuilds affected frontier partitions, and runs deduction passes.
     fn solve(&mut self) {
-        let inference_broken = self.index_pending();
+        self.index_pending();
 
         // Clear existing dirty partitions and repartition
         let start_id = self.next_partition_id;
-        self.partition_dirty(inference_broken);
+        self.partition_dirty();
 
         // Do another partitioning round if any new inferences were found in the
         // basic_solve phase
         if self.basic_solve(start_id) {
-            self.partition_dirty(false);
+            self.partition_dirty();
         }
     }
 
@@ -229,7 +213,7 @@ impl MineField {
     fn clear_cell_inference(
         cells: &mut [Cell],
         inferred: &mut HashSet<usize>,
-        indexed_offsets: &IndexedOffsets,
+        indexed_offsets: IndexedOffsets,
         cell_idx: usize,
     ) {
         let cell = &mut cells[cell_idx];
@@ -250,22 +234,34 @@ impl MineField {
     fn change_value(
         cells: &mut [Cell],
         idx: usize,
-        value: UserCellValue,
-        inferred: bool,
-        indexed_offsets: &IndexedOffsets,
+        value: CellValue,
+        indexed_offsets: IndexedOffsets,
+        change_log: &mut Vec<usize>,
+        breaking_change_log: &mut Vec<usize>,
     ) {
         let cell = &mut cells[idx];
+
+        let change_type = cell.value_mut().set_value(value);
+        let log = match change_type {
+            CellValueChangeType::NoChange => return,
+            CellValueChangeType::NonBreaking => change_log,
+            CellValueChangeType::Breaking => breaking_change_log,
+        };
+        log.push(idx);
 
         for Neighbor {
             neighbor: n_idx,
             from,
         } in indexed_neighbor_iter(idx, cell.neighbors(), indexed_offsets)
         {
-            let mut n_cell = cells[n_idx];
-            match value {
-                UserCellValue::Unknown => n_cell.set_unknown(from),
-                UserCellValue::Safe(_) => n_cell.set_safe(from, inferred),
-                UserCellValue::Mine => n_cell.set_mine(from, inferred),
+            log.push(n_idx);
+            let n_cell = &mut cells[n_idx];
+            if value.is_unknown() {
+                n_cell.set_unknown(from);
+            } else if value.is_safe() {
+                n_cell.set_safe(from, value.is_inferred());
+            } else {
+                n_cell.set_mine(from, value.is_inferred());
             }
         }
     }
@@ -274,128 +270,76 @@ impl MineField {
     /// for all cells in `pending` and their immediate neighbors.
     ///
     /// Returns `true` if any inference was broken, `false` otherwise.
-    fn index_pending(&mut self) -> bool {
-        let mut inference_breaking = false;
-        for &pending_idx in &self.pending {
-            let dirty_cell = self.cells[pending_idx];
-            let Some(new_value) = dirty_cell.staged_value() else {
-                continue;
-            };
-            let new_value = new_value.into();
-
-            let prev_value = dirty_cell.value();
-            if prev_value == new_value {
-                continue;
-            }
-
-            // Transitioning from Safe or Mine breaks previous inference passes,
-            // as does a direct violation of existing inferences.
-            inference_breaking = inference_breaking
-                || prev_value != CellValue::UNKNOWN
-                || match dirty_cell.inferred_value() {
-                    InferredValue::Mine => !new_value.is_mine(),
-                    InferredValue::Safe => !new_value.is_safe(),
-                    InferredValue::None => false,
-                };
-
-            // If this cell previously held an inference, revert its inferred contribution
-            // on all neighbors before applying its new real value.
-            Self::clear_cell_inference(
-                &mut self.cells,
-                &mut self.inferred,
-                &self.indexed_offsets,
+    fn index_pending(&mut self) {
+        for &UserCell {
+            point,
+            value: new_value,
+        } in &self.pending
+        {
+            // TODO: move this out
+            let pending_idx = cell_idx(point, self.width);
+            Self::change_value(
+                self.cells.as_mut(),
                 pending_idx,
+                new_value.into(),
+                self.indexed_offsets,
+                &mut self.change_log,
+                &mut self.breaking_change_log,
             );
-
-            let count_to_count = matches!(
-                (prev_value.mine_count(), new_value.mine_count()),
-                (Some(_), Some(_))
-            );
-
-            for Neighbor {
-                neighbor: neighbor_idx,
-                from,
-            } in
-                indexed_neighbor_iter(pending_idx, dirty_cell.neighbors(), &self.indexed_offsets)
-            {
-                let neighbor_cell = &mut self.cells[neighbor_idx];
-                if !count_to_count {
-                    match new_value {
-                        CellValue::UNKNOWN => neighbor_cell.set_unknown(from),
-                        CellValue::MINE => neighbor_cell.set_mine(from, false),
-                        _ => neighbor_cell.set_safe(from, false),
-                    };
-                }
-                if neighbor_cell.staged_value().is_none() {
-                    // Note: The same neighbor may be adjacent to multiple dirty
-                    // cells, so we may index it multiple times. Future users of
-                    // the dirty_neighbors must be prepared for duplicates.
-                    self.dirty_neighbors.push(neighbor_cell.idx());
-                }
-            }
-
-            let dirty_cell = &mut self.cells[pending_idx];
-            dirty_cell.set_value(new_value);
         }
 
-        // clear all staged values now that they have been applied
-        for &pending_idx in &self.pending {
-            self.cells[pending_idx].set_staged_value(None);
-        }
+        // // If any newly updated cell or its immediate neighbor is now impossible to satisfy
+        // // under existing inferences, treat this update as inference-breaking so the affected
+        // // partition is reset and re-evaluated from lowest to highest mine_count.
+        // if !_KILLME_inference_breaking {
+        //     _KILLME_inference_breaking = self
+        //         .pending
+        //         .iter()
+        //         .chain(self.dirty_neighbors.iter())
+        //         .any(|&idx| {
+        //             CellOrdering::from_cell(&self.cells[idx])
+        //                 .is_some_and(|ord| ord.solution_count() == 0)
+        //         });
+        // }
 
-        // If any newly updated cell or its immediate neighbor is now impossible to satisfy
-        // under existing inferences, treat this update as inference-breaking so the affected
-        // partition is reset and re-evaluated from lowest to highest mine_count.
-        if !inference_breaking {
-            inference_breaking =
-                self.pending
-                    .iter()
-                    .chain(self.dirty_neighbors.iter())
-                    .any(|&idx| {
-                        CellOrdering::from_cell(&self.cells[idx])
-                            .is_some_and(|ord| ord.solution_count() == 0)
-                    });
-        }
-
-        inference_breaking
+        self.pending.clear();
     }
 
     /// Invalidates partitions touched by `dirty` or `dirty_neighbors` and constructs
     /// new connected [`Partition`]s from the updated frontier.
-    fn partition_dirty(&mut self, reset_inferred: bool) {
-        for &cell_idx in self.pending.iter().chain(self.dirty_neighbors.iter()) {
-            let pid = self.cells[cell_idx].partition_id();
+    fn partition_dirty(&mut self) {
+        // clear out the old partitions
+        for cell_idx in self
+            .breaking_change_log
+            .iter()
+            .copied()
+            .chain(self.change_log.iter().copied())
+        {
+            let cell = &mut self.cells[cell_idx];
+            let pid = cell.partition_id();
             if pid != 0 {
                 self.partitions.remove(&pid);
-                self.cells[cell_idx].set_partition_id(0);
-            }
-            if reset_inferred {
-                Self::clear_cell_inference(
-                    &mut self.cells,
-                    &mut self.inferred,
-                    &self.indexed_offsets,
-                    cell_idx,
-                );
-                self.invalid.remove(&cell_idx);
+                cell.set_partition_id(0);
             }
         }
 
-        // Re-partition the new cells
-        // clone the keys to allow for mutating self.cells[xx].partition_id
-        for cell_idx in self
-            .pending
+        let start_partition_id = self.next_partition_id;
+
+        // Re-partition the new cells.
+        for (reset_inferred, cell_idx) in self
+            .breaking_change_log
             .iter()
-            .chain(self.dirty_neighbors.iter())
-            .copied()
+            .map(|i| (true, *i))
+            .chain(self.change_log.iter().map(|i| (false, *i)))
         {
             let cell = &self.cells[cell_idx];
-            if cell.partition_id() == 0 {
+            if cell.partition_id() < start_partition_id {
                 let partition_id = self.next_partition_id;
                 if let Some(partition) = Partition::create(
                     &mut self.cells,
                     self.width,
                     self.height,
-                    &self.indexed_offsets,
+                    self.indexed_offsets,
                     cell_idx,
                     partition_id,
                     reset_inferred,
@@ -407,7 +351,7 @@ impl MineField {
                             Self::clear_cell_inference(
                                 &mut self.cells,
                                 &mut self.inferred,
-                                &self.indexed_offsets,
+                                self.indexed_offsets,
                                 member_idx,
                             );
                             self.invalid.remove(&member_idx);
@@ -423,8 +367,8 @@ impl MineField {
             }
         }
 
-        self.pending.clear();
-        self.dirty_neighbors.clear();
+        self.change_log.clear();
+        self.breaking_change_log.clear();
     }
 
     /// Performs local constraint deductions on the newly created partitions.
@@ -481,14 +425,14 @@ impl MineField {
             } in indexed_neighbor_iter(
                 solve_cell_ord.cell_idx(),
                 solve_cell.inferred_unknown_neighbors(),
-                &self.indexed_offsets,
+                self.indexed_offsets,
             ) {
                 let inferred_cell = &mut self.cells[inferred_idx];
                 #[cfg(debug_assertions)]
                 let inferred_partition = inferred_cell.partition_id();
                 inferred_cell.set_inferred_value(inferred_state);
                 self.inferred.insert(inferred_idx);
-                self.pending.push(inferred_idx);
+                self.change_log.push(inferred_idx);
 
                 for Neighbor {
                     neighbor: neighbor_idx,
@@ -496,12 +440,12 @@ impl MineField {
                 } in indexed_neighbor_iter(
                     inferred_idx,
                     inferred_cell.neighbors(),
-                    &self.indexed_offsets,
+                    self.indexed_offsets,
                 ) {
                     let neighbor_cell = &mut self.cells[neighbor_idx];
                     if neighbor_cell.partition_id() != 0 && neighbor_cell.is_safe(false) {
                         debug_assert_eq!(neighbor_cell.partition_id(), inferred_partition);
-                        self.dirty_neighbors.push(neighbor_idx);
+                        self.change_log.push(neighbor_idx);
                     }
                     let prev_cell_ord = CellOrdering::from_cell(neighbor_cell);
                     if inferred_state == InferredValue::Mine {
@@ -559,7 +503,7 @@ impl<'a> Display for DetailMineField<'a> {
             f,
             "dirty_neighbors: [{}],{spacer}",
             self.0
-                .dirty_neighbors
+                .change_log
                 .iter()
                 .map(|p| p.to_string())
                 .collect::<Vec<String>>()
@@ -734,7 +678,10 @@ mod tests {
     fn test_set_cell_out_of_bounds() {
         let mut field = MineField::new(3, 3, 1).unwrap();
         let err = field
-            .set_cell_value(Point { x: 3, y: 0 }, UserCellValue::Safe(1))
+            .set_cell(UserCell {
+                point: Point { x: 3, y: 0 },
+                value: UserCellValue::Safe(1),
+            })
             .unwrap_err();
         assert!(matches!(
             err,
@@ -747,7 +694,7 @@ mod tests {
         assert!(err.to_string().contains("outside the mine field"));
 
         let err_y = field
-            .set_cell(&UserCell {
+            .set_cell(UserCell {
                 point: Point { x: 0, y: 3 },
                 value: UserCellValue::Safe(1),
             })

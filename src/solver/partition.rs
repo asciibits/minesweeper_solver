@@ -33,7 +33,7 @@ impl Partition {
         cells: &mut [Cell],
         width: u32,
         height: u32,
-        indexed_offsets: &IndexedOffsets,
+        indexed_offsets: IndexedOffsets,
         start_idx: usize,
         partition_id: u32,
         ignore_inferred: bool,
@@ -176,18 +176,14 @@ mod tests {
         let mut cells = Cell::grid(2, 1);
         // Cell 0 is Unknown with no safe_neighbors (isolated)
         cells[0].set_partition_id(99);
-        assert!(
-            Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 0, 1, false).is_none()
-        );
+        assert!(Partition::create(&mut cells, 2, 1, IndexedOffsets::new(2), 0, 1, false).is_none());
         assert_eq!(cells[0].partition_id(), 0);
 
         // Cell 1 is a Mine even if safe_neighbors is non-empty
         cells[1].set_value(CellValue::MINE);
         cells[1].set_safe(W, true);
         cells[1].set_partition_id(99);
-        assert!(
-            Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 1, 1, false).is_none()
-        );
+        assert!(Partition::create(&mut cells, 2, 1, IndexedOffsets::new(2), 1, 1, false).is_none());
         assert_eq!(cells[1].partition_id(), 0);
     }
 
@@ -203,7 +199,7 @@ mod tests {
 
         cells[2].set_value(CellValue::for_mine_count(2));
 
-        let partition = Partition::create(&mut cells, 3, 1, &IndexedOffsets::new(3), 0, 7, false)
+        let partition = Partition::create(&mut cells, 3, 1, IndexedOffsets::new(3), 0, 7, false)
             .expect("should create partition");
         assert!(!partition.is_empty());
         assert_eq!(partition.len(), 3);

@@ -59,7 +59,7 @@ impl Point {
     /// Returns an iterator over the neighboring [`Point`]s specified by `directions`.
     pub fn neighbors(&self, directions: DirectionSet) -> impl Iterator<Item = Neighbor<Point>> {
         NeighborIterator {
-            offset_values: &Self::DIRECTION_OFFSETS,
+            offset_values: Self::DIRECTION_OFFSETS,
             apply_offset: |d, (dx, dy)| self.to_neighbor(d, dx, dy),
             iter: directions.iter(),
             _result: PhantomData,
@@ -94,10 +94,10 @@ impl Display for Point {
 pub(super) fn indexed_neighbor_iter(
     center: usize,
     neighbors: DirectionSet,
-    offsets: &IndexedOffsets,
+    offsets: IndexedOffsets,
 ) -> impl Iterator<Item = Neighbor<usize>> {
     NeighborIterator {
-        offset_values: &offsets.0,
+        offset_values: offsets.0,
         apply_offset: move |to: Direction, d_idx| Neighbor {
             neighbor: center.wrapping_add_signed(d_idx as isize),
             from: to.reverse(),
@@ -131,8 +131,8 @@ impl IndexedOffsets {
 
 /// An iterator yielding the [`Neighbor<Point>`]s of a [`Point`] for each direction in a [`DirectionSet`].
 #[derive(Debug, Clone, Copy)]
-pub(super) struct NeighborIterator<'a, O, R, F> {
-    pub(super) offset_values: &'a [O],
+pub(super) struct NeighborIterator<O, R, F> {
+    pub(super) offset_values: [O; 8],
     pub(super) apply_offset: F,
     pub(super) iter: DirectionSetIterator,
     pub(super) _result: PhantomData<R>,
@@ -148,7 +148,7 @@ pub struct Neighbor<T: Copy> {
     pub from: Direction,
 }
 
-impl<'a, O, R, F> Iterator for NeighborIterator<'a, O, R, F>
+impl<O, R, F> Iterator for NeighborIterator<O, R, F>
 where
     O: Copy,
     R: Copy,
@@ -167,8 +167,8 @@ where
         self.iter.size_hint()
     }
 }
-impl<'a, O: Copy, R: Copy, F: FnMut(Direction, O) -> R> ExactSizeIterator
-    for NeighborIterator<'a, O, R, F>
+impl<O: Copy, R: Copy, F: FnMut(Direction, O) -> R> ExactSizeIterator
+    for NeighborIterator<O, R, F>
 {
 }
 
@@ -679,7 +679,7 @@ mod tests {
     fn test_neighbor_iter() {
         // use a 3x3 grid, indices going from 0..=8, center 4
         let neighbors: Vec<_> =
-            indexed_neighbor_iter(4, E | S | SE, &IndexedOffsets::new(3)).collect();
+            indexed_neighbor_iter(4, E | S | SE, IndexedOffsets::new(3)).collect();
         assert_eq!(
             neighbors.iter().map(|n| n.neighbor).collect::<Vec<_>>(),
             vec![5, 7, 8]

@@ -276,7 +276,7 @@ impl FieldBuilder {
                     for Neighbor { neighbor, .. } in indexed_neighbor_iter(
                         idx,
                         DirectionSet::all_neighbors(pt, width, height),
-                        &offsets,
+                        offsets,
                     ) {
                         field[neighbor] += 1;
                     }
