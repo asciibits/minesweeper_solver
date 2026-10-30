@@ -210,13 +210,13 @@ pub(super) struct Cell {
     /// The inferred state of the cell.
     inferred_value: InferredValue,
 
-    /// The remaining neighbors left after [`inferred_open_neighbors`] and
-    /// [`inferred_mine_neighbors`].
+    /// The remaining neighbors left after [`safe_neighbors`] and
+    /// [`mine_neighbors`].
     unknown_neighbors: DirectionSet,
 
-    /// [`open_neighbors`] unioned with unknown neighbors that have their
-    /// inferred_state set to Open.
-    open_neighbors: DirectionSet,
+    /// [`safe_neighbors`] unioned with unknown neighbors that have their
+    /// inferred_state set to Safe.
+    safe_neighbors: DirectionSet,
 
     /// [`mine_neighbors`] unioned with unknown neighbors that have their
     /// inferred_state set to Mine.
@@ -246,7 +246,7 @@ impl Cell {
                     staged_value: None,
                     neighbors,
                     unknown_neighbors: neighbors,
-                    open_neighbors: DirectionSet::new(),
+                    safe_neighbors: DirectionSet::new(),
                     mine_neighbors: DirectionSet::new(),
                     inferred_neighbors: DirectionSet::new(),
                     partition_id: 0,
@@ -314,8 +314,8 @@ impl Cell {
     /// Returns the mask of neighbors currently holding [`CellValue::Count`].
     #[inline]
     #[allow(dead_code)]
-    pub(super) fn open_neighbors(&self) -> DirectionSet {
-        self.open_neighbors - self.inferred_neighbors
+    pub(super) fn safe_neighbors(&self) -> DirectionSet {
+        self.safe_neighbors - self.inferred_neighbors
     }
 
     /// Returns the mask of neighbors currently holding [`CellValue::Mine`].
@@ -355,11 +355,11 @@ impl Cell {
         self.unknown_neighbors
     }
 
-    /// Returns the mask of neighbors known or inferred to be open.
+    /// Returns the mask of neighbors known or inferred to be safe.
     #[inline]
     #[allow(dead_code)]
-    pub(super) fn inferred_open_neighbors(&self) -> DirectionSet {
-        self.open_neighbors
+    pub(super) fn inferred_safe_neighbors(&self) -> DirectionSet {
+        self.safe_neighbors
     }
 
     /// Returns the mask of neighbors known or inferred to be mines.
@@ -384,7 +384,7 @@ impl Cell {
         match self.value.0 >> 6 {
             0 => {
                 // if ignore_inferred || self.inferred_value == InferredValue::None {
-                //     self.open_neighbors
+                //     self.safe_neighbors
                 // } else {
                 //     DirectionSet::new()
                 // }
@@ -392,13 +392,13 @@ impl Cell {
                 // TODO : Why does the  above work? And the below fail?
 
                 if ignore_inferred {
-                    self.open_neighbors()
+                    self.safe_neighbors()
                 } else {
                     match self.inferred_value {
-                        // InferredValue::Open => self.inferred_unknown_neighbors,
+                        // InferredValue::Safe => self.inferred_unknown_neighbors,
                         InferredValue::Safe => DirectionSet::new(),
                         InferredValue::Mine => DirectionSet::new(),
-                        InferredValue::None => self.open_neighbors(),
+                        InferredValue::None => self.safe_neighbors(),
                     }
                 }
             }
@@ -418,20 +418,20 @@ impl Cell {
         self.value.is_mine() && !(ignore_inferred && self.value.is_inferred())
     }
 
-    pub(super) fn is_open(&self, ignore_inferred: bool) -> bool {
+    pub(super) fn is_safe(&self, ignore_inferred: bool) -> bool {
         self.value.is_safe() && !(ignore_inferred && self.value.is_inferred())
     }
 
     pub(super) fn set_unknown(&mut self, direction: Direction) {
         self.unknown_neighbors += direction;
-        self.open_neighbors -= direction;
+        self.safe_neighbors -= direction;
         self.mine_neighbors -= direction;
         // unknowns don't use the inferred flag
     }
 
-    pub(super) fn set_open(&mut self, direction: Direction, inferred: bool) {
+    pub(super) fn set_safe(&mut self, direction: Direction, inferred: bool) {
         self.unknown_neighbors -= direction;
-        self.open_neighbors += direction;
+        self.safe_neighbors += direction;
         self.mine_neighbors -= direction;
         if inferred {
             self.inferred_neighbors += direction;
@@ -442,7 +442,7 @@ impl Cell {
 
     pub(super) fn set_mine(&mut self, direction: Direction, inferred: bool) {
         self.unknown_neighbors -= direction;
-        self.open_neighbors -= direction;
+        self.safe_neighbors -= direction;
         self.mine_neighbors += direction;
         if inferred {
             self.inferred_neighbors += direction;
@@ -457,12 +457,12 @@ impl Display for Cell {
         let spacer = if f.alternate() { "\n  " } else { " " };
         write!(
             f,
-            "Cell{{{spacer}idx:{},{spacer}value:{},{spacer}neighbors:{},{spacer}unknown_neighbors:{},{spacer}open_neighbors:{},{spacer}mine_neighbors:{},{spacer}inferred:{},{spacer}staged_value:{:?},{spacer}inferred_state:{:?},{spacer}partition_id:{}{spacer}}}",
+            "Cell{{{spacer}idx:{},{spacer}value:{},{spacer}neighbors:{},{spacer}unknown_neighbors:{},{spacer}safe_neighbors:{},{spacer}mine_neighbors:{},{spacer}inferred:{},{spacer}staged_value:{:?},{spacer}inferred_state:{:?},{spacer}partition_id:{}{spacer}}}",
             self.idx,
             self.value,
             self.neighbors,
             self.unknown_neighbors,
-            self.open_neighbors,
+            self.safe_neighbors,
             self.mine_neighbors,
             self.inferred_neighbors,
             self.staged_value,
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(pc.idx, 0);
         assert_eq!(pc.value, CellValue::UNKNOWN);
         assert_eq!(pc.neighbors, E | S | SE);
-        assert_eq!(pc.open_neighbors, DirectionSet::new());
+        assert_eq!(pc.safe_neighbors, DirectionSet::new());
         assert_eq!(pc.mine_neighbors, DirectionSet::new());
         assert_eq!(pc.unknown_neighbors, E | S | SE);
         assert_eq!(pc.staged_value, None);
@@ -529,10 +529,10 @@ mod tests {
         let grid = Cell::grid(3, 3);
         let mut pc = grid[0];
         pc.neighbors -= NW | N | NE | W;
-        pc.set_open(S, false);
+        pc.set_safe(S, false);
         pc.set_mine(SE, false);
 
-        // Unknown cells return open_neighbors from alt_neighbors()
+        // Unknown cells return safe_neighbors from alt_neighbors()
         pc.value = CellValue::UNKNOWN;
         assert_eq!(pc.alt_neighbors(false), !!S);
 

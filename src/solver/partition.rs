@@ -174,16 +174,16 @@ mod tests {
     #[test]
     fn test_partition_create_skips_mines_and_isolated_cells() {
         let mut cells = Cell::grid(2, 1);
-        // Cell 0 is Unknown with no open_neighbors (isolated)
+        // Cell 0 is Unknown with no safe_neighbors (isolated)
         cells[0].set_partition_id(99);
         assert!(
             Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 0, 1, false).is_none()
         );
         assert_eq!(cells[0].partition_id(), 0);
 
-        // Cell 1 is a Mine even if open_neighbors is non-empty
+        // Cell 1 is a Mine even if safe_neighbors is non-empty
         cells[1].set_value(CellValue::MINE);
-        cells[1].set_open(W, true);
+        cells[1].set_safe(W, true);
         cells[1].set_partition_id(99);
         assert!(
             Partition::create(&mut cells, 2, 1, &IndexedOffsets::new(2), 1, 1, false).is_none()
@@ -198,8 +198,8 @@ mod tests {
         cells[0].set_value(CellValue::for_mine_count(1));
 
         cells[1].set_value(CellValue::UNKNOWN);
-        cells[1].set_open(W, false);
-        cells[1].set_open(E, false);
+        cells[1].set_safe(W, false);
+        cells[1].set_safe(E, false);
 
         cells[2].set_value(CellValue::for_mine_count(2));
 
@@ -225,7 +225,7 @@ mod tests {
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
         cell_a.set_value(CellValue::for_mine_count(2));
-        cell_a.set_open(SE, false);
+        cell_a.set_safe(SE, false);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = grid[1];

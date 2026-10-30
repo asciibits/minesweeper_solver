@@ -484,7 +484,7 @@ mod tests {
 
         // Verify the solver ran on the populated cells:
         // Both (1, 0)=Count(1) and (3, 1)=Count(1) are satisfied by the Mine at (2, 0),
-        // so all remaining unknown cells are inferred Open!
+        // so all remaining unknown cells are inferred Safe!
         for pt in [
             Point { x: 0, y: 0 },
             Point { x: 3, y: 0 },
