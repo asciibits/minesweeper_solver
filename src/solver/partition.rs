@@ -1,8 +1,8 @@
-//! Connected components ([`Partition`]) of frontier cells and priority ordering ([`OrderedCell`]).
+//! Connected components ([`Partition`]) of frontier cells and priority ordering ([`CellOrdering`]).
 
 use std::{cmp::Ordering, collections::VecDeque};
 
-use crate::solver::{IndexedOffsets, cell::Cell, grid::Neighbor, indexed_neighbor_iter, stats};
+use crate::solver::{CellValue, IndexedOffsets, cell::Cell, stats};
 
 /// A connected component of bipartite frontier cells (`known` clue cells adjacent to `unknown` cells).
 ///
@@ -29,51 +29,110 @@ impl Partition {
     ///
     /// Returns `None` if `start_idx` is a mine or has no `alt_neighbors` (i.e., an interior
     /// known cell or an isolated unknown cell).
+    ///
+    /// Every visited cell is stamped with `partition_id`; cells already carrying that id are
+    /// not revisited. When `reset_inferred` is `true`, every inferred cell reached by the
+    /// traversal is first reset to [`CellValue::UNKNOWN`] (updating its neighbors' masks) so the
+    /// partition is rebuilt from user-supplied information only.
     pub(super) fn create(
         cells: &mut [Cell],
-        width: u32,
-        height: u32,
-        indexed_offsets: IndexedOffsets,
+        offsets: IndexedOffsets,
         start_idx: usize,
         partition_id: u32,
-        ignore_inferred: bool,
     ) -> Option<Partition> {
         let start_cell = &mut cells[start_idx];
-        if start_cell.is_mine(ignore_inferred)
-            || start_cell.alt_neighbors(ignore_inferred).is_empty()
-        {
-            start_cell.set_partition_id(0);
+        let value = start_cell.value();
+
+        if value == CellValue::INFERRED_SAFE || start_cell.alt_neighbors().is_empty() {
             return None;
         }
 
-        let perimeter = (width as usize + height as usize) * 2;
+        let perimeter = offsets.width() as usize * 4;
         let mut members = Vec::with_capacity(perimeter);
         let mut to_process = VecDeque::with_capacity(perimeter);
-
         start_cell.set_partition_id(partition_id);
+
         to_process.push_back(start_idx);
 
         while let Some(cell_idx) = to_process.pop_front() {
-            let cell = &cells[cell_idx];
-            if cell.is_mine(ignore_inferred) {
+            let cell = cells[cell_idx];
+            if cell.value().is_mine() {
                 continue;
             }
+            let cell = &mut cells[cell_idx];
             members.push(cell_idx);
 
-            for Neighbor {
-                neighbor: neighbor_idx,
-                ..
-            } in indexed_neighbor_iter(
-                cell_idx,
-                cell.alt_neighbors(ignore_inferred),
-                indexed_offsets,
-            ) {
-                let neighbor_cell = &mut cells[neighbor_idx];
-                if neighbor_cell.partition_id() != partition_id {
-                    neighbor_cell.set_partition_id(partition_id);
-                    to_process.push_back(neighbor_idx);
+            cell.mut_visit_neighbors(cell.alt_neighbors(), cells, offsets, |neighbor, _| {
+                if neighbor.value() != CellValue::INFERRED_SAFE {
+                    if neighbor.set_partition_id(partition_id) {
+                        to_process.push_back(neighbor.idx());
+                    }
+                }
+            });
+        }
+
+        // clear out single partitions
+        if members.len() == 1 {
+            cells[members[0]].set_partition_id(0);
+            members.clear();
+        }
+
+        (!members.is_empty()).then_some(Partition::new(members))
+    }
+
+    pub(super) fn create_reset_inferred(
+        cells: &mut [Cell],
+        offsets: IndexedOffsets,
+        start_idx: usize,
+        partition_id: u32,
+    ) -> Option<Partition> {
+        // Note: don't exit early on INFERRED_MINE - it will be reset
+        if cells[start_idx].value() == CellValue::MINE {
+            return None;
+        }
+
+        let perimeter = offsets.width() as usize * 4;
+        let mut members = Vec::with_capacity(perimeter);
+        let mut to_process: VecDeque<(usize, Option<CellValue>)> =
+            VecDeque::with_capacity(perimeter);
+
+        to_process.push_back((start_idx, None));
+
+        while let Some((cell_idx, ref_val)) = to_process.pop_front() {
+            // local copy of start_cell for resetting inferred state
+            let cell = cells[cell_idx];
+            if cell.value().is_inferred() {
+                cell.change_value(cells, CellValue::UNKNOWN, offsets, |_, _| {});
+            }
+            if cell.partition_id() == partition_id {
+                continue;
+            }
+            let cell = &mut cells[cell_idx];
+            if let Some(ref_val) = ref_val {
+                if !ref_val.is_alt(cell.value()) {
+                    dbg!("alt skipping:", cell_idx, cell.value().to_string(), ref_val.to_string());
+                    continue;
                 }
             }
+
+            cell.set_partition_id(partition_id);
+            members.push(cell_idx);
+
+            let ref_val = cell.value();
+
+            // Use all neighbors rather than alt_neighbors, since their
+            // inference may be reset
+            cell.visit_neighbors(cell.neighbors(), cells, offsets, |neighbor, _| {
+                if neighbor.partition_id() != partition_id {
+                    to_process.push_back((neighbor.idx(), Some(ref_val)));
+                }
+            });
+        }
+
+        // clear out single partitions
+        if members.len() == 1 {
+            cells[members[0]].set_partition_id(0);
+            members.clear();
         }
 
         (!members.is_empty()).then_some(Partition::new(members))
@@ -97,11 +156,11 @@ pub(super) struct CellOrdering {
     /// Linear index of the cell on the board.
     cell_idx: usize,
     /// Original clue count on the cell.
-    mine_count: i8,
+    mine_count: u8,
     /// Number of mines still unaccounted for among the cell's unknown neighbors.
     remaining_mines: i8,
     /// Number of adjacent unknown cells available to hold `remaining_mines`.
-    available_cells: i8,
+    available_cells: u8,
     /// Number of ways to choose `remaining_mines` from `available_cells` ($\binom{\text{available}}{\text{remaining}}$).
     solution_count: u8,
 }
@@ -109,9 +168,9 @@ pub(super) struct CellOrdering {
 impl CellOrdering {
     /// Constructs an [`OrderedCell`] if `cell` holds a [`CellValue::Count`], or `None` otherwise.
     pub(super) fn from_cell(cell: &Cell) -> Option<CellOrdering> {
-        if let Some(mine_count) = cell.value().mine_count() {
-            let available_cells = cell.inferred_unknown_neighbors().len() as i8;
-            let remaining_mines = mine_count - cell.inferred_mine_neighbors().len() as i8;
+        if let Some(mine_count) = cell.value().safe_mine_count() {
+            let available_cells = cell.unknown_neighbors().len();
+            let remaining_mines = cell.remaining_mines();
             let solution_count = stats::choose(available_cells, remaining_mines) as u8;
             Some(CellOrdering {
                 cell_idx: cell.idx(),
@@ -159,6 +218,7 @@ impl Ord for CellOrdering {
             .cmp(&other.solution_count.max(1))
             .then(self.mine_count.cmp(&other.mine_count))
             .then(self.remaining_mines.cmp(&other.remaining_mines))
+            .then(self.available_cells.cmp(&other.available_cells))
             .then(self.cell_idx.cmp(&other.cell_idx))
     }
 }
@@ -176,15 +236,13 @@ mod tests {
         let mut cells = Cell::grid(2, 1);
         // Cell 0 is Unknown with no safe_neighbors (isolated)
         cells[0].set_partition_id(99);
-        assert!(Partition::create(&mut cells, 2, 1, IndexedOffsets::new(2), 0, 1, false).is_none());
-        assert_eq!(cells[0].partition_id(), 0);
+        assert!(Partition::create(&mut cells, IndexedOffsets::new(2), 0, 100).is_none());
 
         // Cell 1 is a Mine even if safe_neighbors is non-empty
         cells[1].set_value(CellValue::MINE);
-        cells[1].set_safe(W, true);
+        cells[1].set_safe(W);
         cells[1].set_partition_id(99);
-        assert!(Partition::create(&mut cells, 2, 1, IndexedOffsets::new(2), 1, 1, false).is_none());
-        assert_eq!(cells[1].partition_id(), 0);
+        assert!(Partition::create(&mut cells, IndexedOffsets::new(2), 1, 100).is_none());
     }
 
     #[test]
@@ -194,12 +252,12 @@ mod tests {
         cells[0].set_value(CellValue::for_mine_count(1));
 
         cells[1].set_value(CellValue::UNKNOWN);
-        cells[1].set_safe(W, false);
-        cells[1].set_safe(E, false);
+        cells[1].set_safe(W);
+        cells[1].set_safe(E);
 
         cells[2].set_value(CellValue::for_mine_count(2));
 
-        let partition = Partition::create(&mut cells, 3, 1, IndexedOffsets::new(3), 0, 7, false)
+        let partition = Partition::create(&mut cells, IndexedOffsets::new(3), 0, 7)
             .expect("should create partition");
         assert!(!partition.is_empty());
         assert_eq!(partition.len(), 3);
@@ -221,12 +279,12 @@ mod tests {
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
         cell_a.set_value(CellValue::for_mine_count(2));
-        cell_a.set_safe(SE, false);
+        cell_a.set_safe(SE);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = grid[1];
         cell_b.set_value(CellValue::for_mine_count(1));
-        cell_b.set_mine(S, true);
+        cell_b.set_mine(S);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = grid[2];

@@ -32,8 +32,8 @@ const fn pascal_triangle() -> [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] {
 ///
 /// Panics if `n >= 9` or `k >= 9`.
 #[inline]
-pub fn choose(n: i8, k: i8) -> u64 {
-    if n < 0 || k < 0 {
+pub fn choose(n: u8, k: i8) -> u64 {
+    if k < 0 {
         return 0;
     }
     PASCAL_TRIANGLE[n as usize][k as usize]
@@ -55,18 +55,18 @@ mod tests {
     fn test_choose_symmetry_and_identities() {
         for n in 0..=8 {
             assert_eq!(choose(n, 0), 1);
-            assert_eq!(choose(n, n), 1);
-            for k in 0..=n {
-                assert_eq!(choose(n, k), choose(n, n - k));
+            assert_eq!(choose(n, n as i8), 1);
+            for k in 0..=n as i8 {
+                assert_eq!(choose(n, k), choose(n, n as i8 - k));
             }
         }
     }
 
     #[test]
     fn test_choose_negative_and_k_gt_n() {
-        assert_eq!(choose(-1, 2), 0);
+        assert_eq!(choose(0, 2), 0);
         assert_eq!(choose(4, -1), 0);
-        assert_eq!(choose(-5, -5), 0);
+        assert_eq!(choose(0, -5), 0);
         assert_eq!(choose(3, 5), 0);
         assert_eq!(choose(0, 8), 0);
     }

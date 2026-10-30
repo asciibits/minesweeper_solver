@@ -127,6 +127,10 @@ impl IndexedOffsets {
             1 + width,
         ])
     }
+
+    pub(super) fn width(&self) -> u32 {
+        self.0[6] as u32
+    }
 }
 
 /// An iterator yielding the [`Neighbor<Point>`]s of a [`Point`] for each direction in a [`DirectionSet`].
@@ -220,6 +224,7 @@ pub const SE: Direction = ALL_DIRECTIONS[7];
 pub struct DirectionSet(u8);
 
 impl DirectionSet {
+    pub const EMPTY: DirectionSet = DirectionSet(0);
     pub const ALL: DirectionSet = DirectionSet(0xff);
 
     /// Creates an empty [`DirectionSet`].
