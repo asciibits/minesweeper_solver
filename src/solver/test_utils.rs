@@ -80,8 +80,8 @@ impl FieldBuilder {
             UserCellValue::Unknown => 0,
             // a little hacky, but store the user provided values in bits 4-7
             // they will be compared to the final bits 0-3 in the last pass to
-            // verify the user values. Add one so this value is distinct from
-            // not being specified.
+            // verify the user values. Add one first to avoid an overlap between
+            // a Safe(0) and Unknown
             UserCellValue::Safe(n) => ((n + 1) << 4) as i8,
         }
     }
@@ -111,6 +111,12 @@ impl FieldBuilder {
 
     /// Creates a [`FieldBuilder`] from an ASCII `spec`, computing true neighbor counts from the
     /// specified mines (`'*'`, `'X'`, `'x'`) and verifying any user-supplied clue digits (`'0'..='8'`).
+    ///
+    /// See [`MineField::create`] for more details.
+    ///
+    /// Note: Numbered clue cells should generally not be provided to this function as they are 
+    /// calculated directly from the placed mines. If they are specified, they must match the
+    /// calculated values.
     ///
     /// All cells in the underlying [`MineField`] start as [`crate::CellValue::Unknown`] until revealed
     /// with [`expose_cells`](Self::expose_cells) or [`expand_cells`](Self::expand_cells).
