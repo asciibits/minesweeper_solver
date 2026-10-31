@@ -77,7 +77,10 @@ pub(super) fn create_minefield<'a>(
 /// Applies a batch of cell updates to an existing [`MineField`] using the ASCII `field_spec` format.
 ///
 /// Coordinates with `'.'` or `' '` are filtered out and left unmodified on `field`. Coordinates
-/// with `'_'` are explicitly set to [`UserCellValue::Unknown`].
+/// with `'_'`, `'!`', or `'#'` are explicitly set to
+/// [`UserCellValue::Unknown`]. (Typically the `'_'` would be used, but the
+/// others are output from a [`MineField.to_string()`] call indicating "inferred
+/// mine", and "inferred safe" respectively)
 ///
 /// # Examples
 ///
@@ -413,7 +416,7 @@ fn spec_to_iter<'a>(
         match c {
             '*' | 'X' | 'x' => Some(UserCellValue::Mine),
             n @ '0'..='8' => Some(UserCellValue::Safe(n as u8 - b'0')),
-            '_' => Some(UserCellValue::Unknown),
+            '_' | '!' | '#' => Some(UserCellValue::Unknown),
             ' ' | '.' => None,
             _ => panic!("Invalid field character: {c:?}"),
         }

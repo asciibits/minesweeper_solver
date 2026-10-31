@@ -187,7 +187,7 @@ mod tests {
     fn test_print() {
         let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });
         println!("{}", ColoredMineField(builder.mine_field()));
-        eprintln!("{:#}", builder.mine_field());
+        println!("{:#}", builder.mine_field());
         eprintln!("{:#}", DetailMineField(builder.mine_field()));
     }
 

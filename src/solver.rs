@@ -8,9 +8,12 @@ use std::{
     fmt::{self, Display},
 };
 
-use crate::solver::{
-    cell::{CellValue, CellValueChangeType, UserCellWithInference, cell_idx, coordinates},
-    grid::{IndexedOffsets, Neighbor, indexed_neighbor_iter},
+use crate::{
+    InferredValue,
+    solver::{
+        cell::{CellValue, CellValueChangeType, UserCellWithInference, cell_idx, coordinates},
+        grid::{IndexedOffsets, Neighbor, indexed_neighbor_iter},
+    },
 };
 
 pub mod cell;
@@ -410,6 +413,32 @@ impl MineField {
     }
 }
 
+impl Display for MineField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let spacer = if f.alternate() { "\n  " } else { " " };
+        write!(f, "MineField: [")?;
+        for y in 0..self.height {
+            write!(f, "{spacer}\"")?;
+            for x in 0..self.width {
+                let UserCellWithInference { value, inferred } = self.cell(Point { x, y });
+                let char = match (value, inferred) {
+                    (UserCellValue::Mine, _) => '*',
+                    (UserCellValue::Safe(n), _) => n.to_string().chars().next().unwrap(),
+                    (UserCellValue::Unknown, InferredValue::None) => '.',
+                    (UserCellValue::Unknown, InferredValue::Safe) => '#',
+                    (UserCellValue::Unknown, InferredValue::Mine) => '!',
+                };
+                write!(f, "{char}")?;
+            }
+            write!(f, "\",")?;
+        }
+        if f.alternate() {
+            writeln!(f)?;
+        }
+        write!(f, "]")
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct DetailMineField<'a>(&'a MineField);
 
@@ -442,30 +471,6 @@ impl<'a> Display for DetailMineField<'a> {
             "next_partition_id: {}{spacer}}}",
             self.0.next_partition_id
         )
-    }
-}
-
-impl Display for MineField {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let spacer = if f.alternate() { "\n  " } else { " " };
-        write!(f, "MineField: [")?;
-        for y in 0..self.height {
-            write!(f, "{spacer}\"")?;
-            for x in 0..self.width {
-                let cell = self.cell(Point { x, y });
-                let char = match cell.value {
-                    UserCellValue::Mine => '*',
-                    UserCellValue::Unknown => '.',
-                    UserCellValue::Safe(n) => n.to_string().chars().next().unwrap(),
-                };
-                write!(f, "{char}")?;
-            }
-            write!(f, "\",")?;
-        }
-        if f.alternate() {
-            writeln!(f)?;
-        }
-        write!(f, "]")
     }
 }
 
