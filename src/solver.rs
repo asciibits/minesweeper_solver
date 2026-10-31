@@ -114,10 +114,6 @@ impl MineField {
     }
 
     /// Returns the [`UserCellWithInference`] at the given coordinate `p`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `p` is outside the bounds of the field.
     pub fn cell(&self, p: Point) -> UserCellWithInference {
         self.cells[self.cell_idx(p)].value().into()
     }
@@ -361,8 +357,6 @@ impl MineField {
                 continue;
             }
 
-            dbg!(solve_cell_ord);
-            dbg!(&unresolved);
             let partition_id = solve_cell.partition_id();
 
             // two options here: either the remaining_mines are all in
@@ -389,14 +383,13 @@ impl MineField {
                     |neighbor| {
                         if neighbor.partition_id() == partition_id
                             && !neighbor.value().is_inferred()
+                            && let Some(cell_ord) = CellOrdering::from_cell(neighbor)
                         {
-                            if let Some(cell_ord) = CellOrdering::from_cell(neighbor) {
-                                if !neighbor.unknown_neighbors().is_empty() {
-                                    unresolved.push(cell_ord);
-                                }
-                                self.pending_partition.push(neighbor.idx());
-                            };
-                        }
+                            if cell_ord.solution_count() <= 1 {
+                                unresolved.push(cell_ord);
+                            }
+                            self.pending_partition.push(neighbor.idx());
+                        };
                     },
                 );
 

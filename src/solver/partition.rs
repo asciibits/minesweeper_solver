@@ -212,14 +212,17 @@ impl Ord for CellOrdering {
     fn cmp(&self, other: &Self) -> Ordering {
         // Cells with 0 or 1 possible configurations are equally trivial (immediately solvable),
         // so clamp solution_count to at least 1 before tie-breaking.
-        self.solution_count
+        //
+        // Order "easier" solves as greater-than "harder" - this makes use with
+        // the BinaryHeap natural without needing to reverse it.
+        other
+            .solution_count
             .max(1)
-            .cmp(&other.solution_count.max(1))
-            .then(self.mine_count.cmp(&other.mine_count))
-            .then(self.remaining_mines.cmp(&other.remaining_mines))
-            .then(self.available_cells.cmp(&other.available_cells))
-            .then(self.cell_idx.cmp(&other.cell_idx))
-            .reverse()
+            .cmp(&self.solution_count.max(1))
+            .then(other.mine_count.cmp(&self.mine_count))
+            .then(other.remaining_mines.cmp(&self.remaining_mines))
+            .then(other.available_cells.cmp(&self.available_cells))
+            .then(other.cell_idx.cmp(&self.cell_idx))
     }
 }
 
