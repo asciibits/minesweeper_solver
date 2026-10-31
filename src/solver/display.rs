@@ -9,7 +9,13 @@ use std::{
     ops::Deref,
 };
 
-struct ColoredMineField<'a>(&'a MineField);
+pub(super) struct ColoredMineField<'a>(&'a MineField);
+
+impl<'a> ColoredMineField<'a> {
+    pub(super) fn new(field: &'a MineField) -> ColoredMineField<'a> {
+        ColoredMineField(field)
+    }
+}
 
 impl Deref for ColoredMineField<'_> {
     type Target = MineField;
@@ -25,12 +31,16 @@ impl Display for ColoredMineField<'_> {
             return Ok(());
         }
 
+        // get the current partitions
+        let mut partition_ids: Vec<_> = self.partitions.keys().copied().collect();
+        partition_ids.sort();
+
         print_pre_header(self, f)?;
         print_header(self, f)?;
-        print_row(self, 0, f)?;
+        print_row(self, 0, f, &partition_ids)?;
         for row in 1..self.height {
             print_separator(self, f)?;
-            print_row(self, row, f)?;
+            print_row(self, row, f, &partition_ids)?;
         }
         print_footer(self, f)?;
 
@@ -38,17 +48,13 @@ impl Display for ColoredMineField<'_> {
     }
 }
 
-/// Formats `field` as an ANSI-colored Unicode box-drawing grid.
-///
-/// # Errors
-///
-/// Returns [`fmt::Error`] only if formatting into the underlying buffer fails.
-pub fn print_field(field: &MineField) -> Result<String, fmt::Error> {
-    Ok(ColoredMineField(field).to_string())
-}
-
 /// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
-fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
+fn print_row(
+    field: &MineField,
+    row: u32,
+    f: &mut Formatter<'_>,
+    partition_ids: &[u32],
+) -> fmt::Result {
     if field.width == 0 {
         return Ok(());
     }
@@ -91,11 +97,15 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             },
         };
 
-        let printable = match cell.partition_id() {
-            2 => printable.bold().on_yellow(),
-            3 => printable.bold().on_magenta(),
-            4 => printable.bold().on_white(),
-            _ => printable,
+        let printable = if let Ok(pid) = partition_ids.binary_search(&cell.partition_id()) {
+            match pid % 3 {
+                0 => printable.bold().on_yellow(),
+                1 => printable.bold().on_magenta(),
+                2 => printable.bold().on_white(),
+                _ => unreachable!(),
+            }
+        } else {
+            printable
         };
 
         write!(f, "{printable}")?;
@@ -192,15 +202,5 @@ mod tests {
         println!("{}", ColoredMineField(builder.mine_field()));
         println!("{:#}", builder.mine_field());
         eprintln!("{:#}", DetailMineField(builder.mine_field()));
-    }
-
-    #[test]
-    fn test_display_all_cell_states() {
-        let field = MineField::create(["*0123", "45678"], 1);
-        let rendered = print_field(&field).unwrap();
-        assert_eq!(rendered, ColoredMineField(&field).to_string());
-        assert!(rendered.contains("┌───"));
-        assert!(rendered.contains("├───"));
-        assert!(rendered.contains("└───"));
     }
 }
