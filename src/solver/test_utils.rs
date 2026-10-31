@@ -35,7 +35,7 @@ use std::collections::HashSet;
 /// Helper for building a consistent [`MineField`] from known or randomly generated mine locations
 /// and selectively exposing or flood-filling cells during tests.
 ///
-/// Unlike [`MineField::create_minefield`], which directly sets cell states on a [`MineField`] without
+/// Unlike [`MineField::create`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
 /// (`field_data`)—computing the exact adjacent mine count for every non-mine cell—while keeping
 /// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
