@@ -8,7 +8,10 @@ pub mod solver;
 
 pub use solver::{
     MineField, SolverError,
-    cell::{UserCell as Cell, UserCellValue as CellValue},
+    cell::{
+        InferredValue, UserCell as Cell, UserCellValue as CellValue,
+        UserCellWithInference as CellWithReference,
+    },
     grid::Point,
     partition::Partition,
 };

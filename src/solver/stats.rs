@@ -26,7 +26,7 @@ const fn pascal_triangle() -> [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] {
 
 /// Returns the binomial coefficient $\binom{n}{k}$ ("`n` choose `k`") for up to $n, k = 8$.
 ///
-/// Returns `0` if `n < 0` or `k < 0` (or if `k > n` within bounds).
+/// Returns `0` if `k < 0` (or if `k > n` within bounds).
 ///
 /// # Panics
 ///

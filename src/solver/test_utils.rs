@@ -9,14 +9,14 @@
 //! separate rows.
 //!
 //! Each character in a row maps to a coordinate `(x, y)` as follows:
-//! - `'0'..='8'`: Sets the cell to [`CellValue::Count(n)`](CellValue::Count) (or, in
+//! - `'0'..='8'`: Sets the cell to [`UserCellValue::Safe(n)`](UserCellValue::Safe) (or, in
 //!   [`FieldBuilder::from_spec`], asserts that the computed adjacent mine count equals `n`).
-//! - `'*'`, `'X'`, or `'x'`: Sets the cell to [`CellValue::Mine`].
-//! - `'_'`: Explicitly sets the cell to [`CellValue::Unknown`] (useful with [`update_minefield`]
+//! - `'*'`, `'X'`, or `'x'`: Sets the cell to [`UserCellValue::Mine`].
+//! - `'_'`: Explicitly sets the cell to [`UserCellValue::Unknown`] (useful with [`update_minefield`]
 //!   to revert a previously known cell back to unknown).
 //! - `'.'` or `' '`: Skips the cell ("do nothing"). During [`create_minefield`] and
 //!   [`FieldBuilder::from_spec`], the coordinate still contributes to the board dimensions and
-//!   defaults to [`CellValue::Unknown`]; during [`update_minefield`], the existing cell value at
+//!   defaults to [`UserCellValue::Unknown`]; during [`update_minefield`], the existing cell value at
 //!   `(x, y)` is left untouched.
 //! - Any other character panics with `"Invalid field character"`.
 
@@ -43,16 +43,16 @@ use std::{cmp::max, collections::HashSet};
 ///
 /// ```ignore
 /// // Creates a 4x2 MineField with 1 total mine:
-/// // - Count(1) at (1, 0)
+/// // - Safe(1) at (1, 0)
 /// // - Mine at (2, 0)
-/// // - Count(1) at (3, 1)
+/// // - Safe(1) at (3, 1)
 /// // - Unknown everywhere else
 /// let field = create_minefield([".1*.", "...1"], 1);
 /// assert_eq!(field.width(), 4);
 /// assert_eq!(field.height(), 2);
-/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Count(1));
-/// assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Mine);
-/// assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Count(1));
+/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Safe(1));
+/// assert_eq!(field.cell(Point { x: 2, y: 0 }).value, UserCellValue::Mine);
+/// assert_eq!(field.cell(Point { x: 3, y: 1 }).value, UserCellValue::Safe(1));
 /// ```
 ///
 /// # Panics
@@ -77,22 +77,22 @@ pub(super) fn create_minefield<'a>(
 /// Applies a batch of cell updates to an existing [`MineField`] using the ASCII `field_spec` format.
 ///
 /// Coordinates with `'.'` or `' '` are filtered out and left unmodified on `field`. Coordinates
-/// with `'_'` are explicitly set to [`CellValue::Unknown`].
+/// with `'_'` are explicitly set to [`UserCellValue::Unknown`].
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let mut field = create_minefield(["1..1", "...."], 2);
 ///
-/// // Reveal (1, 0) as Count(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
+/// // Reveal (1, 0) as Safe(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
 /// update_minefield(&mut field, [".2", "..*"]);
-/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(1));
-/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Count(2));
-/// assert_eq!(field.cell(Point { x: 2, y: 1 }).value, CellValue::Mine);
+/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Safe(1));
+/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Safe(2));
+/// assert_eq!(field.cell(Point { x: 2, y: 1 }).value, UserCellValue::Mine);
 ///
-/// // Revert (1, 0) back to CellValue::Unknown using '_':
+/// // Revert (1, 0) back to UserCellValue::Unknown using '_':
 /// update_minefield(&mut field, ["._"]);
-/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Unknown);
+/// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Unknown);
 /// ```
 ///
 /// # Panics
@@ -114,7 +114,7 @@ pub(super) fn update_minefield<'a>(
 /// Unlike [`create_minefield`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
 /// (`field_data`)—computing the exact adjacent mine count for every non-mine cell—while keeping
-/// the underlying [`MineField`] cells unexposed ([`CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
+/// the underlying [`MineField`] cells unexposed ([`UserCellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
 /// or [`expand_cells`](Self::expand_cells) is called.
 ///
 /// # Examples
@@ -123,14 +123,14 @@ pub(super) fn update_minefield<'a>(
 /// // Build a 3x3 board with a single mine at the bottom-right corner (2, 2):
 /// let mut builder = FieldBuilder::from_points(3, 3, [Point { x: 2, y: 2 }]);
 ///
-/// // Flood-fill from top-left (0, 0), which has Count(0), automatically exposing
+/// // Flood-fill from top-left (0, 0), which has Safe(0), automatically exposing
 /// // the connected zero region and its clue boundary:
 /// builder.expand_cells([Point { x: 0, y: 0 }]);
 ///
 /// let field = builder.into_mine_field();
-/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Count(0));
-/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Count(1));
-/// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, CellValue::Unknown);
+/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Safe(0));
+/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, UserCellValue::Safe(1));
+/// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, UserCellValue::Unknown);
 /// ```
 #[derive(Debug)]
 pub(super) struct FieldBuilder {
@@ -147,7 +147,7 @@ impl FieldBuilder {
     /// during neighbor-count accumulation), the value remains negative (`-10 + 8 = -2 < 0`).
     const MINE: i8 = -10;
 
-    /// Encodes a [`CellValue`] from an ASCII spec into a temporary `i8` representation before
+    /// Encodes a [`UserCellValue`] from an ASCII spec into a temporary `i8` representation before
     /// neighbor mine counts are accumulated.
     fn value_to_i8(value: UserCellValue) -> i8 {
         match value {
@@ -163,7 +163,7 @@ impl FieldBuilder {
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with mines placed at `mines`.
     ///
-    /// All cells in the underlying [`MineField`] start as [`CellValue::Unknown`].
+    /// All cells in the underlying [`MineField`] start as [`UserCellValue::Unknown`].
     ///
     /// # Panics
     ///
@@ -181,7 +181,7 @@ impl FieldBuilder {
     /// Creates a [`FieldBuilder`] from an ASCII `spec`, computing true neighbor counts from the
     /// specified mines (`'*'`, `'X'`, `'x'`) and verifying any user-supplied clue digits (`'0'..='8'`).
     ///
-    /// All cells in the underlying [`MineField`] start as [`CellValue::Unknown`] until revealed
+    /// All cells in the underlying [`MineField`] start as [`UserCellValue::Unknown`] until revealed
     /// with [`expose_cells`](Self::expose_cells) or [`expand_cells`](Self::expand_cells).
     ///
     /// # Panics
@@ -245,16 +245,12 @@ impl FieldBuilder {
             mine_count as usize <= end_shuffle,
             "Too many mines for reserved region"
         );
-        for i in 0..mine_count as usize {
-            field[i] = Self::MINE;
-        }
+        field[..mine_count as usize].fill(Self::MINE);
 
         field[0..end_shuffle].shuffle(&mut rng());
 
-        let mut i = end_shuffle;
-        for reserve_idx in reserved_indices {
+        for (i, reserve_idx) in (end_shuffle..).zip(reserved_indices) {
             field.swap(i, reserve_idx);
-            i += 1;
         }
 
         Self::from_vec(width, height, field)
@@ -440,7 +436,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_create_minefield_basic_example() {
         // " 1* \n   1" -> 4x2 field with:
         // - Count(1) at (1, 0)
@@ -747,7 +742,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_field_builder_expand_cells_flood_fill() {
         // 4x3 board with a single mine at bottom-right (3, 2):
         // Ground-truth counts:

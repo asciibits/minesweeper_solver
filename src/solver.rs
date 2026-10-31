@@ -3,7 +3,7 @@ use cell::{Cell, UserCell, UserCellValue};
 use grid::Point;
 use partition::{CellOrdering, Partition};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BinaryHeap, HashMap, VecDeque},
     error::Error,
     fmt::{self, Display},
 };
@@ -43,6 +43,9 @@ pub struct MineField {
     /// Like `pending_partition`, but for changes that may invalidate existing inferences. Seeds
     /// from this list cause the partitions they touch to be rebuilt with inferences reset.
     breaking_pending_partition: Vec<usize>,
+    partition_work_queue: VecDeque<usize>,
+    global_solve_queue: BinaryHeap<CellOrdering>,
+
     /// Active connected components of frontier cells, keyed by partition ID.
     partitions: HashMap<u32, Partition>,
     /// Monotonically increasing counter used to assign unique partition IDs.
@@ -54,7 +57,7 @@ pub struct MineField {
 impl MineField {
     /// Creates a new [`MineField`] with the given dimensions and total `mine_count`.
     ///
-    /// All cells are initialized to [`CellValue::Unknown`].
+    /// All cells are initialized to [`UserCellValue::Unknown`].
     ///
     /// # Errors
     ///
@@ -83,6 +86,8 @@ impl MineField {
             partitions: HashMap::with_capacity(20),
             pending_partition: Vec::with_capacity(perimeter * 2),
             breaking_pending_partition: Vec::new(),
+            partition_work_queue: VecDeque::with_capacity(perimeter * 2),
+            global_solve_queue: BinaryHeap::with_capacity(perimeter),
             next_partition_id: 1,
             indexed_offsets: IndexedOffsets::new(width),
         };
@@ -108,7 +113,7 @@ impl MineField {
         self.mine_count
     }
 
-    /// Returns the [`Cell`] at the given coordinate `p`.
+    /// Returns the [`UserCellWithInference`] at the given coordinate `p`.
     ///
     /// # Panics
     ///
@@ -139,7 +144,7 @@ impl MineField {
         Ok(())
     }
 
-    /// Updates the board with the given [`Cell`] and triggers a solver pass.
+    /// Updates the board with the given [`UserCell`] and triggers a solver pass.
     ///
     /// # Errors
     ///
@@ -150,7 +155,7 @@ impl MineField {
         Ok(())
     }
 
-    /// Updates a batch of [`Cell`]s and runs a single solver pass after all updates are applied.
+    /// Updates a batch of [`UserCell`]s and runs a single solver pass after all updates are applied.
     ///
     /// # Errors
     ///
@@ -227,7 +232,7 @@ impl MineField {
                 cells,
                 new_value.into(),
                 self.indexed_offsets,
-                |neighbor, _| {
+                |neighbor| {
                     self.pending_partition.push(neighbor.idx());
                 },
             );
@@ -278,7 +283,6 @@ impl MineField {
 
     fn partition_pending(&mut self, start_partition_id: u32) {
         // Re-partition the new cells.
-        // Unswitch the loop
         for &cell_idx in self.pending_partition.iter() {
             let cell = &self.cells[cell_idx];
             if cell.partition_id() < start_partition_id {
@@ -288,6 +292,7 @@ impl MineField {
                     self.indexed_offsets,
                     cell_idx,
                     partition_id,
+                    &mut self.partition_work_queue,
                 ) {
                     self.partitions.insert(partition_id, partition);
                     self.next_partition_id += 1;
@@ -300,7 +305,6 @@ impl MineField {
 
     fn partition_reset_inferred(&mut self, start_partition_id: u32) {
         // Re-partition the new cells.
-        // Unswitch the loop
         for &cell_idx in self.breaking_pending_partition.iter() {
             let cell = &self.cells[cell_idx];
             if cell.partition_id() < start_partition_id {
@@ -326,7 +330,7 @@ impl MineField {
     /// with their neighbors, returning `true` if at least one cell was inferred.
     fn basic_solve(&mut self, start_partition_id: u32) {
         // Find all basic logic solutions
-        let mut unresolved = BTreeSet::new();
+        let unresolved = &mut self.global_solve_queue;
 
         // work on all partitions simultaneously - load all knowns into the
         // ordered set. As long as the minimum has 1 or 0 solutions, keep
@@ -338,20 +342,27 @@ impl MineField {
 
             for &cell_idx in partition.members() {
                 let cell = &self.cells[cell_idx];
-                if let Some(ordered_cell) = CellOrdering::from_cell(cell) {
-                    unresolved.insert(ordered_cell);
+                if let Some(ordered_cell) = CellOrdering::from_cell(cell)
+                    && ordered_cell.solution_count() <= 1
+                {
+                    unresolved.push(ordered_cell);
                 }
             }
         }
 
-        while let Some(solve_cell_ord) = unresolved.pop_first() {
-            if solve_cell_ord.solution_count() > 1 {
-                // We have exhausted the easy deductions for this partition
-                unresolved.insert(solve_cell_ord);
-                break;
+        while let Some(solve_cell_ord) = unresolved.pop() {
+            let solve_cell = self.cells[solve_cell_ord.cell_idx()];
+
+            if solve_cell.unknown_neighbors().is_empty() {
+                // short-circuit cases where the there are no unknown neighbors.
+                // The `unresolved` queue can get cluttered with lots of
+                // already-resolved cells, and this exists before creating the
+                // direction-set iterator below.
+                continue;
             }
 
-            let solve_cell = self.cells[solve_cell_ord.cell_idx()];
+            dbg!(solve_cell_ord);
+            dbg!(&unresolved);
             let partition_id = solve_cell.partition_id();
 
             // two options here: either the remaining_mines are all in
@@ -375,16 +386,16 @@ impl MineField {
                     &mut self.cells,
                     inferred_value,
                     self.indexed_offsets,
-                    |neighbor, prev| {
-                        if neighbor.partition_id() == partition_id && neighbor.value().has_count() {
-                            self.pending_partition.push(neighbor.idx());
-                        }
-                        if let Some(prev_ord_cell) = CellOrdering::from_cell(&prev) {
-                            if unresolved.remove(&prev_ord_cell) {
-                                if let Some(new_cell_ord) = CellOrdering::from_cell(neighbor) {
-                                    unresolved.insert(new_cell_ord);
+                    |neighbor| {
+                        if neighbor.partition_id() == partition_id
+                            && !neighbor.value().is_inferred()
+                        {
+                            if let Some(cell_ord) = CellOrdering::from_cell(neighbor) {
+                                if !neighbor.unknown_neighbors().is_empty() {
+                                    unresolved.push(cell_ord);
                                 }
-                            }
+                                self.pending_partition.push(neighbor.idx());
+                            };
                         }
                     },
                 );
@@ -459,7 +470,7 @@ impl Display for MineField {
             write!(f, "\",")?;
         }
         if f.alternate() {
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
         write!(f, "]")
     }
@@ -899,6 +910,23 @@ mod tests {
     }
 
     #[test]
+    fn test_basic_solve_cascade_multi_step_chain() {
+        // 6x1 strip: [(0,0)=1, (1,0)=., (2,0)=2, (3,0)=., (4,0)=1, (5,0)=.]
+        // Hop 1: (0,0)=1 has 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
+        // Hop 2: (2,0)=2 now has 1 mine at (1,0), so 1 remaining mine for (3,0) -> infers (3,0) is Mine.
+        // Hop 3: (4,0)=1 now has 1 mine at (3,0), so 0 remaining mines for (5,0) -> infers (5,0) is Safe.
+        let field = create_minefield(["1.2.1."], 2);
+
+        assert!(field.cells[1].value().is_mine() && field.cells[1].value().is_inferred());
+        assert!(field.cells[3].value().is_mine() && field.cells[3].value().is_inferred());
+        assert!(field.cells[5].value().is_safe() && field.cells[5].value().is_inferred());
+
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
     fn test_basic_solve_detects_impossible_contradictory_clues() {
         // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
         // (0,0)=Count(0) infers (1,0) is Safe, leaving (2,0)=Count(1) with 0 available cells
@@ -1244,5 +1272,12 @@ mod tests {
         update_minefield(&mut field, ["1...1"]);
         let after: Vec<u32> = field.cells.iter().map(|c| c.partition_id()).collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_solve_queue_with_duplicates() {
+        let field = create_minefield(["2.13", "2.1."], 3);
+        assert!(field.cells[1].value().is_mine());
+        assert!(field.cells[1].value().is_mine());
     }
 }

@@ -1,6 +1,5 @@
 //! Cell data structures representing both the external, user-facing board state
-//! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and the compact internal
-//! solver state ([`Cell`], [`CellValue`]).
+//! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and internal cell representations.
 
 use std::fmt::{self, Display, Formatter};
 
@@ -22,7 +21,7 @@ pub fn cell_idx(p: Point, width: u32) -> usize {
     p.to_index(width)
 }
 
-/// A single cell on the Minesweeper board, pairing its [`Point`] coordinates with its [`CellValue`].
+/// A single cell on the Minesweeper board, pairing its [`Point`] coordinates with its [`UserCellValue`].
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UserCell {
     /// Grid coordinates of the cell.
@@ -32,7 +31,7 @@ pub struct UserCell {
 }
 
 impl UserCell {
-    /// Creates a new [`Cell`] at `point` initialized to [`CellValue::Unknown`].
+    /// Creates a new [`UserCell`] at `point` initialized to [`UserCellValue::Unknown`].
     pub fn new(point: Point) -> UserCell {
         UserCell {
             point,
@@ -125,7 +124,7 @@ impl CellValue {
     /// Creates the value of a revealed, user-supplied clue cell.
     pub(super) fn for_mine_count(mine_count: u8) -> CellValue {
         debug_assert!(mine_count <= 8);
-        CellValue(Self::SAFE_MASK | mine_count as u8)
+        CellValue(Self::SAFE_MASK | mine_count)
     }
 
     /// Overwrites `self` with `value`, classifying the transition so callers know how much of
@@ -205,7 +204,7 @@ impl From<UserCellValue> for CellValue {
         match value {
             UserCellValue::Unknown => Self::UNKNOWN,
             UserCellValue::Mine => Self::MINE,
-            UserCellValue::Safe(c) => Self(Self::SAFE_MASK | c as u8),
+            UserCellValue::Safe(c) => Self(Self::SAFE_MASK | c),
         }
     }
 }
@@ -376,7 +375,7 @@ impl Cell {
     /// Returns the mask of neighbors known or inferred to be safe.
     #[inline]
     pub(super) fn safe_neighbors(&self) -> DirectionSet {
-        self.neighbors - (self.mine_neighbors + self.unknown_neighbors)
+        self.neighbors - (self.mine_neighbors | self.unknown_neighbors)
     }
 
     /// Returns the mask of neighbors known or inferred to be mines.
@@ -430,7 +429,7 @@ impl Cell {
     }
 
     pub(super) fn set_unknown(&mut self, direction: Direction) {
-        self.unknown_neighbors += direction;
+        self.unknown_neighbors |= direction;
         self.mine_neighbors -= direction;
     }
 
@@ -441,7 +440,7 @@ impl Cell {
 
     pub(super) fn set_mine(&mut self, direction: Direction) {
         self.unknown_neighbors -= direction;
-        self.mine_neighbors += direction;
+        self.mine_neighbors |= direction;
     }
 
     /// Calls `f` on a mutable reference to every neighbor of this cell selected by `neighbors`,
@@ -497,7 +496,7 @@ impl Cell {
         mut visit_function: F,
     ) -> CellValueChangeType
     where
-        F: FnMut(&mut Cell, Cell),
+        F: FnMut(&mut Cell),
     {
         let change_type = cells[self.idx].value_mut().set_value(value);
         if !matches!(change_type, CellValueChangeType::NoChange) {
@@ -514,9 +513,8 @@ impl Cell {
             } in indexed_neighbor_iter(self.idx, self.neighbors, offsets)
             {
                 let neighbor = &mut cells[neighbor_idx];
-                let prev = *neighbor;
                 updater(neighbor, from);
-                visit_function(neighbor, prev);
+                visit_function(neighbor);
             }
         }
 
@@ -724,7 +722,7 @@ mod tests {
         let middle = cells[1];
 
         let mut visited = Vec::new();
-        let change = middle.change_value(&mut cells, CellValue::MINE, offsets, |c, _| {
+        let change = middle.change_value(&mut cells, CellValue::MINE, offsets, |c| {
             visited.push(c.idx())
         });
         assert_ne!(change, CellValueChangeType::NoChange);
@@ -738,14 +736,14 @@ mod tests {
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
         let middle = cells[1];
-        middle.change_value(&mut cells, CellValue::for_mine_count(1), offsets, |_, _| {});
+        middle.change_value(&mut cells, CellValue::for_mine_count(1), offsets, |_| {});
         assert!(cells[0].mine_neighbors().is_empty());
         assert!(cells[0].unknown_neighbors().is_empty());
         assert_eq!(cells[0].safe_neighbors(), !!E);
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
         let middle = cells[1];
-        middle.change_value(&mut cells, CellValue::UNKNOWN, offsets, |_, _| {});
+        middle.change_value(&mut cells, CellValue::UNKNOWN, offsets, |_| {});
         assert_eq!(cells[0].unknown_neighbors(), !!E);
         assert_eq!(cells[2].unknown_neighbors(), !!W);
         assert!(cells[0].mine_neighbors().is_empty());
