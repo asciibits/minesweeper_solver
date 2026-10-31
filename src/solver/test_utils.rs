@@ -20,8 +20,6 @@
 //!   `(x, y)` is left untouched.
 //! - Any other character panics with `"Invalid field character"`.
 
-use rand::{rng, seq::SliceRandom};
-
 use crate::{
     MineField, Point,
     solver::{
@@ -45,7 +43,8 @@ use std::collections::HashSet;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
+/// # use minesweeper_solver::{CellValue, FieldBuilder, Point};
 /// // Build a 3x3 board with a single mine at the bottom-right corner (2, 2):
 /// let mut builder = FieldBuilder::from_points(3, 3, [Point { x: 2, y: 2 }]);
 ///
@@ -54,12 +53,12 @@ use std::collections::HashSet;
 /// builder.expand_cells([Point { x: 0, y: 0 }]);
 ///
 /// let field = builder.into_mine_field();
-/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Safe(0));
-/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, UserCellValue::Safe(1));
-/// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, UserCellValue::Unknown);
+/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Safe(0));
+/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Safe(1));
+/// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, CellValue::Unknown);
 /// ```
 #[derive(Debug)]
-pub(super) struct FieldBuilder {
+pub struct FieldBuilder {
     /// Ground-truth board values in row-major order: `0..=8` for clue counts, or [`Self::MINE`] for mines.
     field_data: Box<[i8]>,
     /// The solver's [`MineField`] instance whose cells are progressively revealed via [`Self::expose_cells`] or [`Self::expand_cells`].
@@ -127,8 +126,13 @@ impl FieldBuilder {
     }
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines.
-    pub fn random(width: u32, height: u32, mine_count: u32) -> Self {
-        Self::random_helper(width, height, mine_count, [])
+    pub fn random(
+        width: u32,
+        height: u32,
+        mine_count: u32,
+        shuffle: impl FnMut(&mut [i8]),
+    ) -> Self {
+        Self::random_helper(width, height, mine_count, [], shuffle)
     }
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines,
@@ -138,6 +142,7 @@ impl FieldBuilder {
         height: u32,
         mine_count: u32,
         zero_cell: Point,
+        shuffle: impl FnMut(&mut [i8]),
     ) -> Self {
         Self::random_helper(
             width,
@@ -147,6 +152,7 @@ impl FieldBuilder {
                 .neighbors(DirectionSet::all_neighbors(zero_cell, width, height))
                 .map(|n| n.neighbor)
                 .chain([zero_cell]),
+            shuffle,
         )
     }
 
@@ -157,6 +163,7 @@ impl FieldBuilder {
         height: u32,
         mine_count: u32,
         reserved_points: impl IntoIterator<Item = Point>,
+        mut shuffle: impl FnMut(&mut [i8]),
     ) -> Self {
         let len = width as usize * height as usize;
         let mut field = vec![0i8; len];
@@ -173,7 +180,7 @@ impl FieldBuilder {
         );
         field[..mine_count as usize].fill(Self::MINE);
 
-        field[0..end_shuffle].shuffle(&mut rng());
+        shuffle(&mut field[0..end_shuffle]);
 
         for (i, reserve_idx) in (end_shuffle..).zip(reserved_indices) {
             field.swap(i, reserve_idx);
@@ -298,6 +305,7 @@ impl FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rng, seq::SliceRandom};
 
     #[test]
     fn test_field_builder_from_points_and_expose_cells() {
@@ -419,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_field_builder_random_and_zero_region() {
-        let random_builder = FieldBuilder::random(6, 5, 7);
+        let random_builder = FieldBuilder::random(6, 5, 7, |cells| cells.shuffle(&mut rng()));
         assert_eq!(random_builder.mine_field.width(), 6);
         assert_eq!(random_builder.mine_field.height(), 5);
         assert_eq!(random_builder.mine_field.mine_count(), 7);
@@ -431,7 +439,9 @@ mod tests {
         assert_eq!(actual_mines, 7);
 
         let zero_pt = Point { x: 2, y: 2 };
-        let mut zero_builder = FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt);
+        let mut zero_builder = FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt, |cells| {
+            cells.shuffle(&mut rng())
+        });
         zero_builder.expand_cells([zero_pt]);
         let field = zero_builder.into_mine_field();
         assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));

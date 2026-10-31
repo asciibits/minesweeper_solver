@@ -14,4 +14,5 @@ pub use solver::{
     },
     grid::Point,
     partition::Partition,
+    test_utils::FieldBuilder,
 };

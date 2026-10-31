@@ -23,8 +23,7 @@ mod display;
 pub mod grid;
 pub mod partition;
 mod stats;
-#[cfg(test)]
-mod test_utils;
+pub mod test_utils;
 
 /// Represents the state of a Minesweeper board and its active solving partitions.
 #[derive(Debug, Clone)]

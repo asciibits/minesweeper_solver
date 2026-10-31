@@ -169,6 +169,7 @@ mod tests {
 
     use super::super::*;
     use super::*;
+    use rand::{rng, seq::SliceRandom};
 
     fn create_test_field(
         width: u32,
@@ -177,7 +178,9 @@ mod tests {
         zero_point: Point,
     ) -> FieldBuilder {
         let mut field_builder =
-            FieldBuilder::random_with_zero_region(width, height, mine_count, zero_point);
+            FieldBuilder::random_with_zero_region(width, height, mine_count, zero_point, |cells| {
+                cells.shuffle(&mut rng())
+            });
         field_builder.expand_cells([zero_point]);
 
         field_builder
