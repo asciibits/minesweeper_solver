@@ -17,13 +17,13 @@ use crate::{
     },
 };
 
-pub mod cell;
+pub(crate) mod cell;
 #[cfg(test)]
 mod display;
-pub mod grid;
-pub mod partition;
+pub(crate) mod grid;
+pub(crate) mod partition;
 mod stats;
-pub mod test_utils;
+pub(crate) mod test_utils;
 
 /// Represents the state of a Minesweeper board and its active solving partitions.
 #[derive(Debug, Clone)]

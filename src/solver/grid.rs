@@ -38,7 +38,7 @@ impl Point {
     ];
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
-    pub const fn from_index(cell_idx: usize, width: u32) -> Point {
+    pub(super) const fn from_index(cell_idx: usize, width: u32) -> Point {
         let width = width as usize;
         let y = cell_idx / width;
         let x = (cell_idx - y * width) as u32;
@@ -49,26 +49,21 @@ impl Point {
     /// Get a unique ID for the point in a given-width field. Useful for indexing in
     /// a Vector or Array. This is the corollary to [`Point::from_index`].
     #[inline]
-    pub const fn to_index(self, width: u32) -> usize {
+    pub(super) const fn to_index(self, width: u32) -> usize {
         self.x as usize + self.y as usize * width as usize
     }
 
     /// Returns an iterator over the neighboring [`Point`]s specified by `directions`.
-    pub fn neighbors(&self, directions: DirectionSet) -> impl Iterator<Item = Neighbor<Point>> {
+    pub(super) fn neighbors(
+        &self,
+        directions: DirectionSet,
+    ) -> impl Iterator<Item = Neighbor<Point>> {
         NeighborIterator {
             offset_values: Self::DIRECTION_OFFSETS,
             apply_offset: |d, (dx, dy)| self.to_neighbor(d, dx, dy),
             iter: directions.iter(),
             _result: PhantomData,
         }
-    }
-
-    /// Returns the adjacent [`Point`] in direction `to`, paired with the reverse [`Direction`]
-    /// pointing from that neighbor back to `self`.
-    #[inline]
-    pub fn neighbor(&self, to: Direction) -> Neighbor<Point> {
-        let (dx, dy) = Self::DIRECTION_OFFSETS[to.mask().trailing_zeros() as usize];
-        self.to_neighbor(to, dx, dy)
     }
 
     fn to_neighbor(self, to: Direction, dx: i8, dy: i8) -> Neighbor<Point> {
@@ -258,69 +253,9 @@ impl DirectionSet {
         self.0 == 0
     }
 
-    /// Returns `true` if the set contains direction `d`.
-    #[inline]
-    pub fn contains(&self, d: Direction) -> bool {
-        self.0 & d.0 != 0
-    }
-
-    /// Inserts direction `d` into the set, returning `true` if it was not already present.
-    #[inline]
-    pub fn insert(&mut self, d: Direction) -> bool {
-        if self.contains(d) {
-            false
-        } else {
-            self.0 |= d.0;
-            true
-        }
-    }
-
-    /// Removes direction `d` from the set, returning `true` if it was present.
-    #[inline]
-    pub fn remove(&mut self, d: Direction) -> bool {
-        if self.contains(d) {
-            self.0 &= !d.0;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns a new [`DirectionSet`] containing all directions in `self` or `other`.
-    pub fn union(&self, other: DirectionSet) -> DirectionSet {
-        *self | other
-    }
-
-    /// Returns a new [`DirectionSet`] containing directions in `self` that are not in `other`.
-    pub fn difference(&self, other: DirectionSet) -> DirectionSet {
-        *self - other
-    }
-
-    /// Returns a new [`DirectionSet`] containing only directions present in both `self` and `other`.
-    pub fn intersection(&self, other: DirectionSet) -> DirectionSet {
-        *self & other
-    }
-
-    /// Retains only the directions specified by the predicate `f`.
-    pub fn retain<F>(&mut self, mut f: F)
-    where
-        F: FnMut(Direction) -> bool,
-    {
-        self.0 = self
-            .iter()
-            .filter(|&d| f(d))
-            .fold(DirectionSet::new(), |acc, d| acc | d)
-            .0;
-    }
-
     /// Returns an iterator over all [`Direction`]s in `self`.
     pub fn iter(&self) -> DirectionSetIterator {
         DirectionSetIterator(BinaryIterator(self.0))
-    }
-
-    pub fn iter_over<T: Copy>(&self, values: &[T]) -> impl Iterator<Item = T> {
-        self.iter()
-            .map(|d| values[d.mask().trailing_zeros() as usize])
     }
 }
 
@@ -675,48 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn test_point_neighbor() {
-        let origin = Point { x: 5, y: 5 };
-        for d in ALL_DIRECTIONS {
-            let step = origin.neighbor(d);
-            assert_eq!(step.from, d.reverse());
-            let back = step.neighbor.neighbor(step.from);
-            assert_eq!(back.neighbor, origin);
-            assert_eq!(back.from, d);
-        }
-    }
-
-    #[test]
-    fn test_direction_set_operations() {
-        let mut set = DirectionSet::new();
-        assert!(set.is_empty());
-        assert_eq!(set.len(), 0);
-        assert_eq!(set.to_string(), "[]");
-
-        assert!(set.insert(NW));
-        assert!(!set.insert(NW));
-        assert!(set.insert(E));
-        assert!(set.insert(SE));
-        assert!(!set.is_empty());
-        assert_eq!(set.len(), 3);
-        assert!(set.contains(NW));
-        assert!(!set.contains(N));
-        assert_eq!(set.to_string(), "[NW, E, SE]");
-
-        let other: DirectionSet = E | S | SW;
-        assert_eq!(set | other, NW | E | SW | S | SE);
-        assert_eq!(set & other, !!E);
-        assert_eq!(set - other, NW | SE);
-
-        assert!(set.remove(E));
-        assert!(!set.remove(E));
-        assert_eq!(set.len(), 2);
-
-        set.retain(|d| d == NW);
-        assert_eq!(set.into_iter().collect::<Vec<_>>(), vec![NW]);
-    }
-
-    #[test]
     fn test_all_neighbors_3x3_and_degenerate_grids() {
         // 3x3 grid corners, edges, and center
         assert_eq!(
@@ -768,14 +661,12 @@ mod tests {
         // BitOr (|) across (DirectionSet, DirectionSet), (DirectionSet, Direction),
         // (Direction, DirectionSet), and (Direction, Direction)
         assert_eq!(a | b, NW | N | E | SE);
-        assert_eq!(a.union(b), a | b);
         assert_eq!(a | S, NW | N | E | S);
         assert_eq!(S | a, NW | N | E | S);
         assert_eq!(NW | SE, [NW, SE].into_iter().collect());
 
         // BitAnd (&) across all 4 combinations
         assert_eq!(a & b, N | E);
-        assert_eq!(a.intersection(b), a & b);
         assert_eq!(a & N, !!N);
         assert_eq!(a & S, DirectionSet::new());
         assert_eq!(N & a, !!N);
@@ -794,7 +685,6 @@ mod tests {
 
         // Sub (-) across all 4 combinations
         assert_eq!(a - b, !!NW);
-        assert_eq!(a.difference(b), a - b);
         assert_eq!(a - N, NW | E);
         assert_eq!(a - S, a);
         assert_eq!(N - a, DirectionSet::new());

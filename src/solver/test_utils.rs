@@ -9,14 +9,14 @@
 //! separate rows.
 //!
 //! Each character in a row maps to a coordinate `(x, y)` as follows:
-//! - `'0'..='8'`: Sets the cell to [`UserCellValue::Safe(n)`](UserCellValue::Safe) (or, in
+//! - `'0'..='8'`: Sets the cell to [`crate::CellValue::Safe(n)`](crate::CellValue::Safe) (or, in
 //!   [`FieldBuilder::from_spec`], asserts that the computed adjacent mine count equals `n`).
-//! - `'*'`, `'X'`, or `'x'`: Sets the cell to [`UserCellValue::Mine`].
-//! - `'_'`: Explicitly sets the cell to [`UserCellValue::Unknown`] (useful with [`MineField::update_minefield`]
+//! - `'*'`, `'X'`, or `'x'`: Sets the cell to [`crate::CellValue::Mine`].
+//! - `'_'`: Explicitly sets the cell to [`crate::CellValue::Unknown`] (useful with [`MineField::update_minefield`]
 //!   to revert a previously known cell back to unknown).
 //! - `'.'` or `' '`: Skips the cell ("do nothing"). During [`MineField::create_minefield`] and
 //!   [`FieldBuilder::from_spec`], the coordinate still contributes to the board dimensions and
-//!   defaults to [`UserCellValue::Unknown`]; during [`MineField::update_minefield`], the existing cell value at
+//!   defaults to [`crate::CellValue::Unknown`]; during [`MineField::update_minefield`], the existing cell value at
 //!   `(x, y)` is left untouched.
 //! - Any other character panics with `"Invalid field character"`.
 
@@ -38,7 +38,7 @@ use std::collections::HashSet;
 /// Unlike [`MineField::create_minefield`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
 /// (`field_data`)—computing the exact adjacent mine count for every non-mine cell—while keeping
-/// the underlying [`MineField`] cells unexposed ([`UserCellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
+/// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
 /// or [`expand_cells`](Self::expand_cells) is called.
 ///
 /// # Examples
@@ -88,7 +88,7 @@ impl FieldBuilder {
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with mines placed at `mines`.
     ///
-    /// All cells in the underlying [`MineField`] start as [`UserCellValue::Unknown`].
+    /// All cells in the underlying [`MineField`] start as [`crate::CellValue::Unknown`].
     ///
     /// # Panics
     ///
@@ -97,6 +97,12 @@ impl FieldBuilder {
     pub fn from_points(width: u32, height: u32, mines: impl IntoIterator<Item = Point>) -> Self {
         let mut field = vec![0i8; width as usize * height as usize];
         for pt in mines {
+            assert!(
+                pt.x < width && pt.y < height,
+                "Point ({}, {}) is out of bounds for {width}x{height}",
+                pt.x,
+                pt.y
+            );
             field[cell_idx(pt, width)] = Self::MINE;
         }
 
@@ -106,7 +112,7 @@ impl FieldBuilder {
     /// Creates a [`FieldBuilder`] from an ASCII `spec`, computing true neighbor counts from the
     /// specified mines (`'*'`, `'X'`, `'x'`) and verifying any user-supplied clue digits (`'0'..='8'`).
     ///
-    /// All cells in the underlying [`MineField`] start as [`UserCellValue::Unknown`] until revealed
+    /// All cells in the underlying [`MineField`] start as [`crate::CellValue::Unknown`] until revealed
     /// with [`expose_cells`](Self::expose_cells) or [`expand_cells`](Self::expand_cells).
     ///
     /// # Panics
@@ -126,6 +132,21 @@ impl FieldBuilder {
     }
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines.
+    ///
+    /// The caller provides a `shuffle` closure that randomly permutes the provided slice of cells.
+    /// This allows callers to use their own random number generator (such as `slice.shuffle(&mut rng)`
+    /// from [`rand::seq::SliceRandom`](https://docs.rs/rand/latest/rand/seq/trait.SliceRandom.html))
+    /// or a deterministic shuffling algorithm without requiring `minesweeper_solver` to depend directly on `rand`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use minesweeper_solver::FieldBuilder;
+    /// // Using a simple deterministic closure:
+    /// let builder = FieldBuilder::random(4, 4, 3, |cells| cells.reverse());
+    /// let field = builder.into_mine_field();
+    /// assert_eq!(field.mine_count(), 3);
+    /// ```
     pub fn random(
         width: u32,
         height: u32,
@@ -137,6 +158,21 @@ impl FieldBuilder {
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines,
     /// guaranteeing that `zero_cell` and all of its neighbors are mine-free (so `zero_cell` has count `0`).
+    ///
+    /// Like [`FieldBuilder::random`], the `shuffle` closure permutes the slice of available (non-reserved)
+    /// cells so callers can supply their own random number generator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use minesweeper_solver::{CellValue, FieldBuilder, Point};
+    /// let zero_pt = Point { x: 2, y: 2 };
+    /// let mut builder =
+    ///     FieldBuilder::random_with_zero_region(5, 5, 3, zero_pt, |cells| cells.reverse());
+    /// builder.expand_cells([zero_pt]);
+    /// let field = builder.into_mine_field();
+    /// assert_eq!(field.cell(zero_pt).value, CellValue::Safe(0));
+    /// ```
     pub fn random_with_zero_region(
         width: u32,
         height: u32,
@@ -144,6 +180,12 @@ impl FieldBuilder {
         zero_cell: Point,
         shuffle: impl FnMut(&mut [i8]),
     ) -> Self {
+        assert!(
+            zero_cell.x < width && zero_cell.y < height,
+            "zero_cell ({}, {}) is out of bounds for {width}x{height}",
+            zero_cell.x,
+            zero_cell.y
+        );
         Self::random_helper(
             width,
             height,
@@ -248,7 +290,7 @@ impl FieldBuilder {
         self.mine_field
     }
 
-    /// Converts the ground-truth `field_data` entry at `p` into a [`CellValue`].
+    /// Converts the ground-truth `field_data` entry at `p` into a [`UserCellValue`].
     fn cell_value(field_data: &[i8], width: u32, p: Point) -> UserCellValue {
         match field_data[cell_idx(p, width)] {
             n @ 0..=8 => UserCellValue::Safe(n as u8),
@@ -257,7 +299,7 @@ impl FieldBuilder {
         }
     }
 
-    /// Reveals the ground-truth [`CellValue`]s for the specified `points` on the underlying [`MineField`].
+    /// Reveals the ground-truth [`CellValue`](crate::CellValue)s for the specified `points` on the underlying [`MineField`].
     pub fn expose_cells(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
         let field_data = &self.field_data;
         let width = self.mine_field.width();
