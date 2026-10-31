@@ -259,15 +259,14 @@ impl MineField {
             .iter()
             .chain(self.pending_partition.iter())
         {
-            let cell = self.cells[cell_idx];
+            let cell = &mut self.cells[cell_idx];
             let pid = cell.partition_id();
             if pid != 0 {
-                if let Some(partition) = self.partitions.remove(&pid) {
-                    // reset all members of the partition.
-                    for &m in partition.members() {
-                        self.cells[m].set_partition_id(0);
-                    }
-                }
+                self.partitions.remove(&pid);
+                cell.set_partition_id(0);
+                // Note: no need to reset all partition_id values here. Just
+                // resetting those in pending_partition speeds up this loop by
+                // avoiding unnecessary calls to BTreeSet.remove
             }
         }
 
@@ -353,6 +352,7 @@ impl MineField {
             }
 
             let solve_cell = self.cells[solve_cell_ord.cell_idx()];
+            let partition_id = solve_cell.partition_id();
 
             // two options here: either the remaining_mines are all in
             // the remaining_neighbors, or none of them are
@@ -362,11 +362,6 @@ impl MineField {
                 CellValue::INFERRED_SAFE
             };
 
-            // Walk the neighbor *indices* rather than calling `mut_visit_neighbors`: that method
-            // keeps `&mut self.cells` borrowed for the whole walk (and hands the closure a
-            // `&mut Cell` into the slice), which conflicts with `change_value` needing the slice
-            // too. Cells are `Copy`, so take a snapshot of each inferred cell and let
-            // `change_value` do the mutation through `self.cells`.
             for Neighbor {
                 neighbor: inferred_idx,
                 ..
@@ -381,7 +376,7 @@ impl MineField {
                     inferred_value,
                     self.indexed_offsets,
                     |neighbor, prev| {
-                        if neighbor.partition_id() != 0 && neighbor.value().has_count() {
+                        if neighbor.partition_id() == partition_id && neighbor.value().has_count() {
                             self.pending_partition.push(neighbor.idx());
                         }
                         if let Some(prev_ord_cell) = CellOrdering::from_cell(&prev) {

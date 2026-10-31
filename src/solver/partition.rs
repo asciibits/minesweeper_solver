@@ -62,7 +62,7 @@ impl Partition {
             let cell = &mut cells[cell_idx];
             members.push(cell_idx);
 
-            cell.mut_visit_neighbors(cell.alt_neighbors(), cells, offsets, |neighbor, _| {
+            cell.mut_visit_neighbors(cell.alt_neighbors(), cells, offsets, |neighbor| {
                 if neighbor.value() != CellValue::INFERRED_SAFE {
                     if neighbor.set_partition_id(partition_id) {
                         to_process.push_back(neighbor.idx());
@@ -110,7 +110,6 @@ impl Partition {
             let cell = &mut cells[cell_idx];
             if let Some(ref_val) = ref_val {
                 if !ref_val.is_alt(cell.value()) {
-                    dbg!("alt skipping:", cell_idx, cell.value().to_string(), ref_val.to_string());
                     continue;
                 }
             }
@@ -122,7 +121,7 @@ impl Partition {
 
             // Use all neighbors rather than alt_neighbors, since their
             // inference may be reset
-            cell.visit_neighbors(cell.neighbors(), cells, offsets, |neighbor, _| {
+            cell.visit_neighbors(cell.neighbors(), cells, offsets, |neighbor| {
                 if neighbor.partition_id() != partition_id {
                     to_process.push_back((neighbor.idx(), Some(ref_val)));
                 }

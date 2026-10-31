@@ -457,10 +457,10 @@ impl Cell {
         offsets: IndexedOffsets,
         mut f: F,
     ) where
-        F: FnMut(&mut Cell, Direction),
+        F: FnMut(&mut Cell),
     {
-        for Neighbor { neighbor, from } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
-            f(&mut cells[neighbor], from);
+        for Neighbor { neighbor, .. } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
+            f(&mut cells[neighbor]);
         }
     }
 
@@ -477,10 +477,10 @@ impl Cell {
         offsets: IndexedOffsets,
         mut f: F,
     ) where
-        F: FnMut(Cell, Direction),
+        F: FnMut(Cell),
     {
-        for Neighbor { neighbor, from } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
-            f(cells[neighbor], from);
+        for Neighbor { neighbor, .. } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
+            f(cells[neighbor]);
         }
     }
 
