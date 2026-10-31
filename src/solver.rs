@@ -3,6 +3,7 @@ use cell::{Cell, UserCell, UserCellValue};
 use grid::Point;
 use partition::{CellOrdering, Partition};
 use std::{
+    cmp::max,
     collections::{BinaryHeap, HashMap, VecDeque},
     error::Error,
     fmt::{self, Display},
@@ -60,7 +61,7 @@ pub struct MineField {
 impl MineField {
     /// Creates a new [`MineField`] with the given dimensions and total `mine_count`.
     ///
-    /// All cells are initialized to [`UserCellValue::Unknown`].
+    /// All cells are initialized to [`crate::CellValue::Unknown`].
     ///
     /// # Errors
     ///
@@ -96,6 +97,85 @@ impl MineField {
         };
 
         Ok(field)
+    }
+
+    /// Creates a new [`MineField`] with dimensions inferred from `field_spec` and populates its initial cells.
+    ///
+    /// The board's `width` and `height` are determined by the maximum `x + 1` and `y + 1` coordinates
+    /// encountered across all rows in `field_spec` (including `'.'` and `' '` characters).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Creates a 4x2 MineField with 1 total mine:
+    /// // - Safe(1) at (1, 0)
+    /// // - Mine at (2, 0)
+    /// // - Safe(1) at (3, 1)
+    /// // - Unknown everywhere else
+    /// # use minesweeper_solver::{MineField, Point, CellValue};
+    /// let field = MineField::create_minefield([".1*.", "...1"], 1);
+    /// assert_eq!(field.width(), 4);
+    /// assert_eq!(field.height(), 2);
+    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Safe(1));
+    /// assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Mine);
+    /// assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Safe(1));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `field_spec` contains any character outside `'0'..='8'`, `'*'`, `'X'`, `'x'`, `'_'`, `'.'`, `' '`, or `'\n'`.
+    /// - The inferred board dimensions and `mine_count` fail [`MineField::new`] validation (e.g., an empty
+    ///   spec or `mine_count >= width * height`).
+    #[track_caller]
+    pub fn create_minefield<'a>(
+        field_spec: impl IntoIterator<Item = &'a str>,
+        mine_count: u32,
+    ) -> MineField {
+        let (width, height, cell_iter) = Self::cells_and_size_from_spec(field_spec);
+
+        let mut field = MineField::new(width, height, mine_count).unwrap();
+        field.set_cells(cell_iter).unwrap();
+
+        field
+    }
+
+    /// Applies a batch of cell updates to an existing [`MineField`] using the ASCII `field_spec` format.
+    ///
+    /// Coordinates with `'.'` or `' '` are filtered out and left unmodified on `field`. Coordinates
+    /// with `'_'`, `'!'`, or `'#'` are explicitly set to
+    /// [`crate::CellValue::Unknown`]. (Typically `'_'` would be used, but the
+    /// others are output from a [`ToString::to_string`] call indicating "inferred
+    /// mine" and "inferred safe" respectively).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use minesweeper_solver::{MineField, Point, CellValue};
+    /// let mut field = MineField::create_minefield(["1..1", "...."], 2);
+    ///
+    /// // Reveal (1, 0) as Safe(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
+    /// MineField::update_minefield(&mut field, [".2", "..*"]);
+    /// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Safe(1));
+    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Safe(2));
+    /// assert_eq!(field.cell(Point { x: 2, y: 1 }).value, CellValue::Mine);
+    ///
+    /// // Revert (1, 0) back to CellValue::Unknown using '_':
+    /// MineField::update_minefield(&mut field, ["._"]);
+    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Unknown);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `field_spec` contains an invalid character.
+    /// - Any non-skipped coordinate in `field_spec` lies outside `field`'s dimensions.
+    #[track_caller]
+    pub fn update_minefield<'a>(
+        field: &mut MineField,
+        field_spec: impl IntoIterator<Item = &'a str>,
+    ) {
+        field.set_cells(Self::cells_from_spec(field_spec)).unwrap();
     }
 
     /// Returns the width of the board in cells.
@@ -143,7 +223,7 @@ impl MineField {
         Ok(())
     }
 
-    /// Updates the board with the given [`UserCell`] and triggers a solver pass.
+    /// Updates the board with the given [`crate::Cell`] and triggers a solver pass.
     ///
     /// # Errors
     ///
@@ -154,7 +234,7 @@ impl MineField {
         Ok(())
     }
 
-    /// Updates a batch of [`UserCell`]s and runs a single solver pass after all updates are applied.
+    /// Updates a batch of [`crate::Cell`]s and runs a single solver pass after all updates are applied.
     ///
     /// # Errors
     ///
@@ -406,6 +486,68 @@ impl MineField {
         p.to_index(self.width)
     }
 
+    /// Parses `field_spec` into an iterator of [`Cell`] updates, omitting skipped (`'.'` and `' '`) positions.
+    fn cells_from_spec<'a>(
+        field_spec: impl IntoIterator<Item = &'a str>,
+    ) -> impl Iterator<Item = UserCell> {
+        Self::to_cell_iter(Self::spec_to_iter(field_spec))
+    }
+
+    /// Parses `field_spec` and returns the inferred `(width, height)` board dimensions along with an
+    /// iterator of [`Cell`] updates for all non-skipped positions.
+    pub(super) fn cells_and_size_from_spec<'a>(
+        field_spec: impl IntoIterator<Item = &'a str>,
+    ) -> (u32, u32, impl Iterator<Item = UserCell>) {
+        let cells: Vec<_> = Self::spec_to_iter(field_spec).collect();
+
+        let size = cells
+            .iter()
+            .map(|(x, y, _)| (x + 1, y + 1))
+            .fold((0, 0), |acc, r| (max(acc.0, r.0), max(acc.1, r.1)));
+
+        let cells = Self::to_cell_iter(cells);
+
+        (size.0, size.1, cells)
+    }
+
+    /// Converts `(x, y, Option<CellValue>)` tuples into [`Cell`]s, filtering out `None` entries.
+    fn to_cell_iter(
+        iter: impl IntoIterator<Item = (u32, u32, Option<UserCellValue>)>,
+    ) -> impl Iterator<Item = UserCell> {
+        iter.into_iter().filter_map(|(x, y, v)| {
+            v.map(|value| UserCell {
+                point: Point { x, y },
+                value,
+            })
+        })
+    }
+
+    /// Parses `field_spec` into `(x, y, Option<CellValue>)` tuples for every character position in the spec.
+    fn spec_to_iter<'a>(
+        field_spec: impl IntoIterator<Item = &'a str>,
+    ) -> impl Iterator<Item = (u32, u32, Option<UserCellValue>)> {
+        fn char_to_value(c: char) -> Option<UserCellValue> {
+            match c {
+                '*' | 'X' | 'x' => Some(UserCellValue::Mine),
+                n @ '0'..='8' => Some(UserCellValue::Safe(n as u8 - b'0')),
+                '_' | '!' | '#' => Some(UserCellValue::Unknown),
+                ' ' | '.' => None,
+                _ => panic!("Invalid field character: {c:?}"),
+            }
+        }
+
+        field_spec
+            .into_iter()
+            .flat_map(|s| s.split("\n"))
+            .enumerate()
+            .flat_map(|(y, l)| {
+                l.chars()
+                    .map(char_to_value)
+                    .enumerate()
+                    .map(move |(x, value)| (x as u32, y as u32, value))
+            })
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     fn to_details<'a>(&'a self) -> DetailMineField<'a> {
@@ -524,7 +666,6 @@ mod tests {
     use crate::solver::{
         cell::InferredValue,
         grid::{E, N, NE, NW, S, SE, SW, W},
-        test_utils::{create_minefield, update_minefield},
     };
 
     /// Helper asserting that a cell's `unknown_neighbors`, `safe_neighbors`, and `mine_neighbors`
@@ -567,6 +708,231 @@ mod tests {
             cell.mine_neighbors() | cell.mine_neighbors(),
             cell.mine_neighbors()
         );
+    }
+
+    #[test]
+    fn test_create_minefield_basic_example() {
+        // " 1* \n   1" -> 4x2 field with:
+        // - Count(1) at (1, 0)
+        // - Mine at (2, 0)
+        // - Count(1) at (3, 1)
+        let field = MineField::create_minefield([" 1* ", "   1"], 1);
+        assert_eq!(field.width(), 4);
+        assert_eq!(field.height(), 2);
+        assert_eq!(field.mine_count(), 1);
+
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 2, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 3, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+
+        assert_eq!(
+            field.cell(Point { x: 0, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 3, y: 1 }).value,
+            UserCellValue::Safe(1)
+        );
+
+        // Verify the solver ran on the populated cells:
+        // Both (1, 0)=Count(1) and (3, 1)=Count(1) are satisfied by the Mine at (2, 0),
+        // so all remaining unknown cells are inferred Safe!
+        for pt in [
+            Point { x: 0, y: 0 },
+            Point { x: 3, y: 0 },
+            Point { x: 0, y: 1 },
+            Point { x: 1, y: 1 },
+            Point { x: 2, y: 1 },
+        ] {
+            let idx = pt.to_index(field.width());
+            assert!(field.cells()[idx].value().is_safe());
+        }
+    }
+
+    #[test]
+    fn test_create_minefield_all_supported_characters() {
+        // Test '0'..='8', '*', 'X', 'x', ' ', '.', and '_'
+        let field = MineField::create_minefield(["01234", "5678*", "Xx._ "], 3);
+        assert_eq!(field.width(), 5);
+        assert_eq!(field.height(), 3);
+        assert_eq!(field.mine_count(), 3);
+
+        for x in 0..5u32 {
+            assert_eq!(
+                field.cell(Point { x, y: 0 }).value,
+                UserCellValue::Safe(x as u8)
+            );
+        }
+        for x in 0..4u32 {
+            assert_eq!(
+                field.cell(Point { x, y: 1 }).value,
+                UserCellValue::Safe((x + 5) as u8)
+            );
+        }
+        assert_eq!(field.cell(Point { x: 4, y: 1 }).value, UserCellValue::Mine);
+
+        // 'X' and 'x' both produce CellValue::Mine
+        assert_eq!(field.cell(Point { x: 0, y: 2 }).value, UserCellValue::Mine);
+        assert_eq!(field.cell(Point { x: 1, y: 2 }).value, UserCellValue::Mine);
+        // '.' and ' ' (filtered out) and '_' (explicit Unknown) all result in Unknown on a new board
+        for x in 2..5u32 {
+            assert_eq!(field.cell(Point { x, y: 2 }).value, UserCellValue::Unknown);
+        }
+    }
+
+    #[test]
+    fn test_cells_from_spec_and_update_minefield() {
+        // Verify ' ' and '.' are filtered out while '_', '*', 'X', 'x', and digits emit Cells
+        let cells: Vec<UserCell> = MineField::cells_from_spec([" .1_Xx*"]).collect();
+        assert_eq!(
+            cells,
+            vec![
+                UserCell {
+                    point: Point { x: 2, y: 0 },
+                    value: UserCellValue::Safe(1),
+                },
+                UserCell {
+                    point: Point { x: 3, y: 0 },
+                    value: UserCellValue::Unknown,
+                },
+                UserCell {
+                    point: Point { x: 4, y: 0 },
+                    value: UserCellValue::Mine,
+                },
+                UserCell {
+                    point: Point { x: 5, y: 0 },
+                    value: UserCellValue::Mine,
+                },
+                UserCell {
+                    point: Point { x: 6, y: 0 },
+                    value: UserCellValue::Mine,
+                },
+            ]
+        );
+
+        // Start with a 4x2 field where (0, 0)=Count(1) and (2, 0)=Count(2)
+        let mut field = MineField::create_minefield(["1.2.", "...."], 2);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Safe(2)
+        );
+
+        // Update with '.' at (0, 0) and (2, 0) (preserving their values),
+        // 'X' at (1, 0), 'x' at (3, 1), and '1' at (0, 1)
+        MineField::update_minefield(&mut field, [".X..", "1..x"]);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Safe(2)
+        );
+        assert_eq!(
+            field.cell(Point { x: 0, y: 1 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(field.cell(Point { x: 3, y: 1 }).value, UserCellValue::Mine);
+
+        // Use '_' in MineField::update_minefield to explicitly revert (1, 0) and (2, 0) back to Unknown,
+        // while '.' at (0, 0) preserves Count(1)
+        MineField::update_minefield(&mut field, [".__."]);
+        assert_eq!(
+            field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            field.cell(Point { x: 2, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+    }
+
+    #[test]
+    fn test_create_minefield_ragged_lines_and_1d_strips() {
+        // Ragged lines: row 0 has length 2, row 1 has length 5 -> produces a 5x2 field
+        // where missing trailing cells on row 0 default to Unknown.
+        let ragged = MineField::create_minefield(["1*", "....2"], 1);
+        assert_eq!(ragged.width(), 5);
+        assert_eq!(ragged.height(), 2);
+        assert_eq!(
+            ragged.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(ragged.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
+        assert_eq!(
+            ragged.cell(Point { x: 4, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            ragged.cell(Point { x: 4, y: 1 }).value,
+            UserCellValue::Safe(2)
+        );
+
+        // 1x4 vertical strip
+        let vertical = MineField::create_minefield(["1", ".", "*", "1"], 1);
+        assert_eq!(vertical.width(), 1);
+        assert_eq!(vertical.height(), 4);
+        assert_eq!(
+            vertical.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            vertical.cell(Point { x: 0, y: 1 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            vertical.cell(Point { x: 0, y: 2 }).value,
+            UserCellValue::Mine
+        );
+        assert_eq!(
+            vertical.cell(Point { x: 0, y: 3 }).value,
+            UserCellValue::Safe(1)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid field character")]
+    fn test_create_minefield_invalid_char_9_panics() {
+        MineField::create_minefield(["19*"], 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid field character")]
+    fn test_create_minefield_invalid_char_letter_panics() {
+        MineField::create_minefield(["1Z*"], 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_create_minefield_empty_spec_panics() {
+        MineField::create_minefield([""], 0);
     }
 
     #[test]
@@ -641,7 +1007,7 @@ mod tests {
     #[test]
     fn test_neighbor_sets_and_remaining_mines_tracking() {
         // Reveal (0, 0) as Count(2) on a 3x3 board
-        let mut field = create_minefield(["2..", "...", "..."], 2);
+        let mut field = MineField::create_minefield(["2..", "...", "..."], 2);
         let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
         assert_eq!(c00.remaining_mines(), 2);
         assert_eq!(c00.unknown_neighbors(), E | S | SE);
@@ -658,7 +1024,7 @@ mod tests {
 
         // Mark (1, 0) as a Mine: (0, 0) moves E from unknown_neighbors to
         // mine_neighbors (remaining_mines == 1)
-        update_minefield(&mut field, [".*"]);
+        MineField::update_minefield(&mut field, [".*"]);
         let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
         assert_eq!(c00.mine_neighbors(), !!E);
         assert!(c00.safe_neighbors().is_empty());
@@ -675,7 +1041,7 @@ mod tests {
         // Change (1, 0) from Mine to Count(1): (0, 0) moves E from mine_neighbors to safe_neighbors.
         // Because (0, 0) is Count(2) and now has only 2 unknown neighbors left (S and SE),
         // basic_solve infers both S and SE are mines, reducing remaining_mines() to 0!
-        update_minefield(&mut field, [".1"]);
+        MineField::update_minefield(&mut field, [".1"]);
         let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
         assert_eq!(c00.safe_neighbors(), !!E);
         assert!(c00.unknown_neighbors().is_empty());
@@ -685,7 +1051,7 @@ mod tests {
 
         // Revert (1, 0) back to Unknown (inference-breaking): (0, 0) moves E from safe_neighbors
         // back to unknown_neighbors, and the inferences on S and SE are cleared!
-        update_minefield(&mut field, ["._"]);
+        MineField::update_minefield(&mut field, ["._"]);
         let c00 = field.cells[field.cell_idx(Point { x: 0, y: 0 })];
         assert!(c00.mine_neighbors().is_empty());
         assert!(c00.safe_neighbors().is_empty());
@@ -699,7 +1065,7 @@ mod tests {
     fn test_partitioning_and_repartitioning_across_updates() {
         // 5x2 board with Count(1) at top-left (0, 0) and top-right (4, 0)
         // Each corner has 3 unknown neighbors (choose(3, 1) = 3 > 1), so neither is trivially solved.
-        let mut field = create_minefield(["1...1", "....."], 2);
+        let mut field = MineField::create_minefield(["1...1", "....."], 2);
 
         // Two disconnected frontier components:
         // Left: {(0,0), (1,0), (0,1), (1,1)} (4 cells)
@@ -716,7 +1082,7 @@ mod tests {
 
         // Reveal the middle top cell (2, 0) as Count(2): now both components are bridged
         // into a single 10-cell partition!
-        update_minefield(&mut field, ["..2"]);
+        MineField::update_minefield(&mut field, ["..2"]);
         assert_eq!(field.partitions.len(), 1);
         let merged_partition = field.partitions.values().next().unwrap();
         assert_eq!(merged_partition.len(), 10);
@@ -731,7 +1097,7 @@ mod tests {
     fn test_partition_split_with_distant_non_dirty_cells() {
         // 5x2 board: reveal (1, 0) = Count(1) and (3, 0) = Count(1).
         // Initially all 10 cells are connected via (2, 0) and (2, 1) into a single partition.
-        let mut field = create_minefield([".1.1.", "....."], 2);
+        let mut field = MineField::create_minefield([".1.1.", "....."], 2);
         assert_eq!(field.partitions.len(), 1);
         let initial_pid = field.cells[0].partition_id();
         assert!(field.cells.iter().all(|c| c.partition_id() == initial_pid));
@@ -741,7 +1107,7 @@ mod tests {
         // and the post-`basic_solve` repartition pass splits the board into two 3-cell
         // partitions: {(0,0), (0,1), (1,0)} and {(3,0), (4,0), (4,1)}, while (2,0)
         // and its inferred-safe neighbors get partition_id == 0.
-        update_minefield(&mut field, ["..0"]);
+        MineField::update_minefield(&mut field, ["..0"]);
 
         assert_eq!(field.partitions.len(), 2);
         assert_eq!(field.cells[2].partition_id(), 0);
@@ -787,7 +1153,7 @@ mod tests {
     fn test_partition_complete_dissolution() {
         // 3x1 board: [(0,0) = Unknown, (1,0) = Count(1), (2,0) = Unknown]
         // (1,0) has 2 unknown neighbors (choose(2, 1) = 2 > 1), so 1 partition of 3 cells remains.
-        let mut field = create_minefield([".1."], 1);
+        let mut field = MineField::create_minefield([".1."], 1);
         assert_eq!(field.partitions.len(), 1);
         assert_eq!(field.cells[1].unknown_neighbors(), W | E);
         assert_eq!(field.cells[0].safe_neighbors(), !!E);
@@ -795,7 +1161,7 @@ mod tests {
 
         // Flag (0, 0) as a Mine: basic_solve infers (2, 0) is Safe, and the post-basic_solve
         // repartition pass dissolves the partition completely.
-        update_minefield(&mut field, ["*"]);
+        MineField::update_minefield(&mut field, ["*"]);
 
         assert!(field.partitions.is_empty());
         assert_eq!(field.cells[0].partition_id(), 0);
@@ -815,13 +1181,13 @@ mod tests {
     #[test]
     fn test_batch_adjacent_cells_and_duplicate_dirty_neighbors() {
         // 3x2 board: reveal (1, 0) as Count(2) first
-        let mut field = create_minefield([".2.", "..."], 2);
+        let mut field = MineField::create_minefield([".2.", "..."], 2);
         assert_eq!(field.cells[1].remaining_mines(), 2);
 
         // In one batch, set both (0, 0) and (2, 0) to Mine, and (1, 1) to Count(2).
         // (1, 0) is a non-dirty neighbor of all three pending cells, so it appears 3 times
         // in `dirty_neighbors`.
-        update_minefield(&mut field, ["*.*", ".2."]);
+        MineField::update_minefield(&mut field, ["*.*", ".2."]);
 
         // Both (1, 0) and (1, 1) are adjacent to the two mines at (0, 0) and (2, 0),
         // so both have remaining_mines == 0, basic_solve infers (0, 1) and (2, 1) as Safe,
@@ -847,7 +1213,7 @@ mod tests {
 
     #[test]
     fn test_repeated_and_reverted_staging_on_same_cell() {
-        let mut field = create_minefield([".1."], 1);
+        let mut field = MineField::create_minefield([".1."], 1);
         assert_eq!(field.cells[1].remaining_mines(), 1);
 
         // Stage (0, 0) as Mine -> revert to Unknown -> stage again as Mine in one batch.
@@ -890,7 +1256,7 @@ mod tests {
         // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Count(1), (3,0)=Unknown]
         // 1. (0,0)=Count(1) has only 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
         // 2. That satisfies (2,0)=Count(1), which then infers (3,0) is Safe!
-        let field = create_minefield(["1.1."], 1);
+        let field = MineField::create_minefield(["1.1."], 1);
 
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_safe());
@@ -913,7 +1279,7 @@ mod tests {
         // Hop 1: (0,0)=1 has 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
         // Hop 2: (2,0)=2 now has 1 mine at (1,0), so 1 remaining mine for (3,0) -> infers (3,0) is Mine.
         // Hop 3: (4,0)=1 now has 1 mine at (3,0), so 0 remaining mines for (5,0) -> infers (5,0) is Safe.
-        let field = create_minefield(["1.2.1."], 2);
+        let field = MineField::create_minefield(["1.2.1."], 2);
 
         assert!(field.cells[1].value().is_mine() && field.cells[1].value().is_inferred());
         assert!(field.cells[3].value().is_mine() && field.cells[3].value().is_inferred());
@@ -929,7 +1295,7 @@ mod tests {
         // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
         // (0,0)=Count(0) infers (1,0) is Safe, leaving (2,0)=Count(1) with 0 available cells
         // and 1 remaining mine (solution_count == 0).
-        let field = create_minefield(["0.1"], 1);
+        let field = MineField::create_minefield(["0.1"], 1);
 
         assert!(field.cells[1].value().is_safe());
         assert!(field.cells[2].is_invalid());
@@ -945,14 +1311,14 @@ mod tests {
         // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Unknown, (3,0)=Unknown]
         // Round 1: Reveal (0,0)=Count(1) -> infers (1,0) is Mine, and updates (2,0)'s
         // inferred_mine_neighbors to include W.
-        let mut field = create_minefield(["1..."], 1);
+        let mut field = MineField::create_minefield(["1..."], 1);
         assert!(field.cells[1].value().is_mine());
         assert_eq!(field.cells[2].mine_neighbors(), !!W);
 
         // Round 2 (inference-compatible): Reveal (2,0) as Count(1).
         // Because (1,0)'s Mine inference is preserved, (2,0) immediately knows its 1 mine is at W
         // and infers (3,0) is Safe!
-        update_minefield(&mut field, ["..1"]);
+        MineField::update_minefield(&mut field, ["..1"]);
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_safe());
         for cell in &field.cells {
@@ -964,13 +1330,13 @@ mod tests {
     fn test_inference_breaking_updates_clear_and_recompute_inferences() {
         // 3x1 strip: [(0,0), (1,0), (2,0)]
         // Round 1: Reveal (1,0) as Count(2) -> both (0,0) and (2,0) are inferred as Mine.
-        let mut field = create_minefield([".2."], 2);
+        let mut field = MineField::create_minefield([".2."], 2);
         assert!(field.cells[0].value().is_mine());
         assert!(field.cells[2].value().is_mine());
 
         // Round 2 (Inference-breaking Case A): Change (1,0) from Count(2) to Count(1).
         // Neither (0,0) nor (2,0) can be inferred anymore; both must reset to InferredState::None!
-        update_minefield(&mut field, [".1"]);
+        MineField::update_minefield(&mut field, [".1"]);
         assert!(!field.cells[0].value().is_inferred());
         assert!(!field.cells[2].value().is_inferred());
         assert_eq!(field.cells[1].unknown_neighbors(), W | E);
@@ -980,14 +1346,14 @@ mod tests {
         }
 
         // Round 3: Change (1,0) to Count(0) -> both (0,0) and (2,0) are inferred as Safe.
-        update_minefield(&mut field, [".0"]);
+        MineField::update_minefield(&mut field, [".0"]);
         assert!(field.cells[0].value().is_safe());
         assert!(field.cells[2].value().is_safe());
 
         // Round 4 (Inference-breaking Case B): Directly violate inference on (0,0) by setting it to Mine,
         // and simultaneously change (1,0) to Count(1).
         // (2,0) must remain/be recomputed as Safe, and all neighbor invariants must hold.
-        update_minefield(&mut field, ["*1"]);
+        MineField::update_minefield(&mut field, ["*1"]);
         assert!(!field.cells[0].value().is_inferred());
         assert!(field.cells[2].value().is_safe());
         for cell in &field.cells {
@@ -997,7 +1363,7 @@ mod tests {
         // Round 5 (Inference-breaking Case C): Dissolve the partition completely by resetting
         // (0,0) and (1,0) to Unknown. Verify (2,0)'s Safe inference is cleared even though no
         // new partition is created!
-        update_minefield(&mut field, ["__"]);
+        MineField::update_minefield(&mut field, ["__"]);
         assert!(field.partitions.is_empty());
         for cell in &field.cells {
             assert!(!cell.value().is_inferred());
@@ -1012,7 +1378,7 @@ mod tests {
         // Two independent partitions:
         // - Left partition {(0,0), (1,0)} infers (1,0) is Mine.
         // - Right partition {(3,0), (4,0)} infers (3,0) is Mine.
-        let mut field = create_minefield(["1...1"], 2);
+        let mut field = MineField::create_minefield(["1...1"], 2);
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_mine());
         let right_pid = field.cells[4].partition_id();
@@ -1021,7 +1387,7 @@ mod tests {
         // change (0,0) from Count(1) to Count(0).
         // Left cell (1,0) must change from InferredValue::Mine to InferredValue::Safe,
         // while the untouched RIGHT partition (and cell (3,0)'s Mine inference) remains intact!
-        update_minefield(&mut field, ["0"]);
+        MineField::update_minefield(&mut field, ["0"]);
         assert!(field.cells[1].value().is_safe());
         assert!(field.cells[3].value().is_mine());
         assert_eq!(field.cells[4].partition_id(), right_pid);
@@ -1037,13 +1403,13 @@ mod tests {
         // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
         // (0,0) is visited first (mine_count = 0), inferring (1,0) is Safe.
         // (2,0) is visited last (mine_count = 1), and index 2 is added to `field.invalid`.
-        let mut field = create_minefield(["0.1"], 1);
+        let mut field = MineField::create_minefield(["0.1"], 1);
         assert_eq!(field.invalid(), vec![Point { x: 2, y: 0 }]);
 
         // Case A: Resolve the inconsistency by editing (0,0) (index 0, NOT index 2!)
         // from Count(0) to Count(1). Index 2 must be removed from `field.invalid`,
         // and (1,0) must now be inferred as Mine.
-        update_minefield(&mut field, ["1"]);
+        MineField::update_minefield(&mut field, ["1"]);
         assert!(field.invalid().is_empty());
         assert!(field.cells[1].value().is_mine());
         for cell in &field.cells {
@@ -1052,13 +1418,13 @@ mod tests {
 
         // Re-introduce the inconsistency sequentially: set (0,0) back to Count(0).
         // Index 2 (highest mine_count) is again recorded in `field.invalid`.
-        update_minefield(&mut field, ["0"]);
+        MineField::update_minefield(&mut field, ["0"]);
         assert_eq!(field.invalid(), vec![Point { x: 2, y: 0 }]);
         assert!(field.cells[1].value().is_safe());
 
         // Case B: Resolve the inconsistency by editing (2,0) (index 2 itself)
         // from Count(1) to Count(0).
-        update_minefield(&mut field, ["..0"]);
+        MineField::update_minefield(&mut field, ["..0"]);
         assert!(field.invalid().is_empty());
         assert!(field.cells[1].value().is_safe());
         for cell in &field.cells {
@@ -1073,7 +1439,7 @@ mod tests {
         // Right: [(4,0), (5,0), (6,0)]
         // Step 1: Set (2,0) = Count(1) first (infers (1,0) = Mine),
         // and set (4,0) = Count(0), (6,0) = Count(1) (marks index 6 invalid).
-        let mut field = create_minefield(["..1.0.1"], 2);
+        let mut field = MineField::create_minefield(["..1.0.1"], 2);
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[6].is_invalid());
 
@@ -1082,7 +1448,7 @@ mod tests {
         // with (1,0)'s prior Mine inference, triggering a reset of the left partition so
         // (0,0) (mine_count = 0) is visited first and (2,0) (mine_count = 1,
         // index 2) is added to `invalid`.
-        update_minefield(&mut field, ["0"]);
+        MineField::update_minefield(&mut field, ["0"]);
 
         // Note: There are two equally valid resolutions to this field.
         //
@@ -1099,7 +1465,7 @@ mod tests {
         // Step 3: Resolve ONLY the left partition by setting (1,0) = Mine and (0,0) = Count(1)
         // (so the left side has no Unknown cells left and is completely valid).
         // Index 2 must be removed from `invalid`, while untouched index 6 remains in `invalid`!
-        update_minefield(&mut field, ["1*"]);
+        MineField::update_minefield(&mut field, ["1*"]);
         assert_eq!(field.invalid(), vec![Point { x: 6, y: 0 }]);
         for cell in &field.cells {
             assert_neighbor_invariants(cell);
@@ -1113,7 +1479,7 @@ mod tests {
         // - (2,0)=Count(3) has only 3 unknown neighbors: (1,1), (2,1), (3,1) -> all 3 inferred as Mine!
         // - (1,0)=Count(3) now has 2 inferred mines at (1,1) and (2,1), leaving 1 mine among {(0,0), (0,1)}!
         // - (3,0)=Count(3) now has 2 inferred mines at (2,1) and (3,1), leaving 1 mine among {(4,0), (4,1)}!
-        let field = create_minefield([".333.", "....."], 5);
+        let field = MineField::create_minefield([".333.", "....."], 5);
 
         // (1,1), (2,1), (3,1) are inferred as Mine and removed from partitions (partition_id == 0).
         // (2,0) has no remaining unknown neighbors and gets partition_id == 0.
@@ -1226,9 +1592,9 @@ mod tests {
 
     #[test]
     fn test_partition_invariants_hold_after_merge() {
-        let mut field = create_minefield(["1...1", "....."], 2);
+        let mut field = MineField::create_minefield(["1...1", "....."], 2);
         assert_partition_invariants(&field);
-        update_minefield(&mut field, ["..2"]);
+        MineField::update_minefield(&mut field, ["..2"]);
         assert_eq!(field.partitions.len(), 1);
         assert_partition_invariants(&field);
         // pending/breaking logs are fully drained after a solve pass
@@ -1240,11 +1606,11 @@ mod tests {
     #[test]
     fn test_partition_split_leaves_no_stale_partition_ids() {
         // Initially one partition {0..=4} bridged through cell 2.
-        let mut field = create_minefield([".1.1."], 2);
+        let mut field = MineField::create_minefield([".1.1."], 2);
         assert_eq!(field.partitions.len(), 1);
 
         // Reverting cell 1 to Unknown leaves only {2, 3, 4} connected.
-        update_minefield(&mut field, ["._"]);
+        MineField::update_minefield(&mut field, ["._"]);
         assert_eq!(field.partitions.len(), 1);
         assert_eq!(field.cells[1].partition_id(), 0);
         assert_partition_invariants(&field);
@@ -1252,10 +1618,10 @@ mod tests {
 
     #[test]
     fn test_partition_dissolution_leaves_no_stale_partition_ids() {
-        let mut field = create_minefield([".1."], 1);
+        let mut field = MineField::create_minefield([".1."], 1);
         assert_eq!(field.partitions.len(), 1);
 
-        update_minefield(&mut field, ["._"]);
+        MineField::update_minefield(&mut field, ["._"]);
         assert!(field.partitions.is_empty());
         for cell in field.cells.iter() {
             assert_eq!(cell.partition_id(), 0);
@@ -1264,17 +1630,17 @@ mod tests {
 
     #[test]
     fn test_unchanged_update_does_not_rebuild_partitions() {
-        let mut field = create_minefield(["1...1", "....."], 2);
+        let mut field = MineField::create_minefield(["1...1", "....."], 2);
         let before: Vec<u32> = field.cells.iter().map(|c| c.partition_id()).collect();
 
-        update_minefield(&mut field, ["1...1"]);
+        MineField::update_minefield(&mut field, ["1...1"]);
         let after: Vec<u32> = field.cells.iter().map(|c| c.partition_id()).collect();
         assert_eq!(before, after);
     }
 
     #[test]
     fn test_solve_queue_with_duplicates() {
-        let field = create_minefield(["2.13", "2.1."], 3);
+        let field = MineField::create_minefield(["2.13", "2.1."], 3);
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[1].value().is_mine());
     }

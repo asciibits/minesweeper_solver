@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_display_all_cell_states() {
-        let field = crate::solver::test_utils::create_minefield(["*0123", "45678"], 1);
+        let field = MineField::create_minefield(["*0123", "45678"], 1);
         let rendered = print_field(&field).unwrap();
         assert_eq!(rendered, ColoredMineField(&field).to_string());
         assert!(rendered.contains("┌───"));

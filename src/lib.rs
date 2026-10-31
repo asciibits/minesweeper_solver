@@ -10,7 +10,7 @@ pub use solver::{
     MineField, SolverError,
     cell::{
         InferredValue, UserCell as Cell, UserCellValue as CellValue,
-        UserCellWithInference as CellWithReference,
+        UserCellWithInference as CellWithInference,
     },
     grid::Point,
     partition::Partition,
