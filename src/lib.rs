@@ -4,7 +4,7 @@
 //! [`MineField`], partitioning the active boundary into independent connected
 //! components ([`Partition`]) to deduce safe cells and mine locations.
 
-pub mod solver;
+mod solver;
 
 pub use solver::{
     MineField, SolverError,
