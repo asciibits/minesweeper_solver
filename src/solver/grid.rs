@@ -41,7 +41,7 @@ impl Point {
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
     pub(super) const fn from_index(cell_idx: CellIdx, width: u32) -> Point {
-        let cell_idx: u32 = cell_idx.val();
+        let cell_idx: u32 = cell_idx.0;
         let y = cell_idx / width;
         let x = cell_idx - y * width;
         Point { x, y }
@@ -92,7 +92,7 @@ pub(super) fn indexed_neighbor_iter(
     NeighborIterator {
         offset_values: offsets.0,
         apply_offset: move |to: Direction, d_idx| Neighbor {
-            neighbor: CellIdx(center.val().wrapping_add_signed(d_idx)),
+            neighbor: CellIdx(center.0.wrapping_add_signed(d_idx)),
             from: to.reverse(),
         },
         iter: neighbors.iter(),
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(
             neighbors
                 .iter()
-                .map(|n| n.neighbor.val())
+                .map(|n| n.neighbor.0)
                 .collect::<Vec<_>>(),
             vec![5, 7, 8]
         );
@@ -592,7 +592,7 @@ mod tests {
         let width = 10;
         let p = Point { x: 4, y: 7 };
         let idx = p.to_index(width);
-        assert_eq!(idx.idx(), 74);
+        assert_eq!(idx.0, 74);
         assert_eq!(Point::from_index(idx, width), p);
         assert_eq!(p.to_string(), "(4, 7)");
     }

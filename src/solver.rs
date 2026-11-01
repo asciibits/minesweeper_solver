@@ -168,7 +168,7 @@ impl MineField {
 
     /// Returns the [`UserCellWithInference`] at the given coordinate `p`.
     pub fn cell(&self, p: Point) -> UserCellWithInference {
-        self.cells[self.cell_idx(p).idx()].value().into()
+        self.cells[self.cell_idx(p)].value().into()
     }
 
     #[cfg(test)]
@@ -350,7 +350,7 @@ impl MineField {
             .iter()
             .chain(self.pending_partition.iter())
         {
-            let cell = &mut self.cells[cell_idx.idx()];
+            let cell = &mut self.cells[cell_idx];
             let pid = cell.partition_id();
             if pid != 0 {
                 self.partitions.remove(&pid);
@@ -370,7 +370,7 @@ impl MineField {
     fn partition_pending(&mut self, start_partition_id: u32) {
         // Re-partition the new cells.
         for &cell_idx in self.pending_partition.iter() {
-            let cell = &self.cells[cell_idx.idx()];
+            let cell = &self.cells[cell_idx];
             if cell.partition_id() < start_partition_id {
                 let partition_id = self.next_partition_id;
                 if let Some(partition) = Partition::create(
@@ -392,7 +392,7 @@ impl MineField {
     fn partition_reset_inferred(&mut self, start_partition_id: u32) {
         // Re-partition the new cells.
         for &cell_idx in self.breaking_pending_partition.iter() {
-            let cell = &self.cells[cell_idx.idx()];
+            let cell = &self.cells[cell_idx];
             if cell.partition_id() < start_partition_id {
                 let partition_id = self.next_partition_id;
                 if let Some(partition) = Partition::create_reset_inferred(
@@ -427,7 +427,7 @@ impl MineField {
             let partition = self.partitions.get(&partition_id).unwrap();
 
             for &cell_idx in partition.members() {
-                let cell = &self.cells[cell_idx.idx()];
+                let cell = &self.cells[cell_idx];
                 if let Some(ordered_cell) = CellOrdering::from_cell(cell_idx, cell)
                     && ordered_cell.solution_count() <= 1
                 {
@@ -437,7 +437,7 @@ impl MineField {
         }
 
         while let Some(solve_cell_ord) = unresolved.pop() {
-            let solve_cell = self.cells[solve_cell_ord.idx().idx()];
+            let solve_cell = self.cells[solve_cell_ord.idx()];
 
             if solve_cell.unknown_neighbors().is_empty() {
                 // short-circuit cases where the there are no unknown neighbors.
@@ -839,7 +839,7 @@ mod tests {
             Point { x: 2, y: 1 },
         ] {
             let idx = pt.to_index(field.width());
-            assert!(field.cells()[idx.idx()].value().is_safe());
+            assert!(field.cells()[idx].value().is_safe());
         }
     }
 
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     fn cell(field: &MineField, x: u32, y: u32) -> Cell {
-        field.cells[field.cell_idx(Point { x, y }).idx()]
+        field.cells[field.cell_idx(Point { x, y })]
     }
 
     #[test]
@@ -1615,8 +1615,8 @@ mod tests {
         assert_eq!(field.cells[2].partition_id(), 0);
         for x in 1..=3 {
             let idx = field.cell_idx(Point { x, y: 1 });
-            assert!(field.cells[idx.idx()].value().is_mine());
-            assert_eq!(field.cells[idx.idx()].partition_id(), 0);
+            assert!(field.cells[idx].value().is_mine());
+            assert_eq!(field.cells[idx].partition_id(), 0);
         }
 
         let left_pid = field.cells[0].partition_id();
@@ -1648,7 +1648,7 @@ mod tests {
         }
         for (pid, partition) in &field.partitions {
             for &member in partition.members() {
-                assert_eq!(field.cells[member.idx()].partition_id(), *pid);
+                assert_eq!(field.cells[member].partition_id(), *pid);
             }
         }
     }

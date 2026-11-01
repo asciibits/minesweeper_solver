@@ -4,6 +4,7 @@
 use std::{
     cmp::Ordering,
     fmt::{self, Display, Formatter},
+    ops::{Index, IndexMut},
 };
 
 use crate::solver::{
@@ -96,18 +97,6 @@ pub struct UserCellWithInference {
 
 #[derive(Debug, Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct CellIdx(pub(super) u32);
-
-impl CellIdx {
-    #[inline]
-    pub(super) const fn idx(&self) -> usize {
-        self.0 as usize
-    }
-
-    #[inline]
-    pub(super) const fn val(&self) -> u32 {
-        self.0
-    }
-}
 
 impl From<u32> for CellIdx {
     fn from(value: u32) -> Self {
@@ -488,7 +477,7 @@ impl Cell {
     where
         F: FnMut(CellIdx, &Cell),
     {
-        let change_type = cells[idx.idx()].value_mut().set_value(value);
+        let change_type = cells[idx].value_mut().set_value(value);
         if !matches!(change_type, CellValueChangeType::NoChange) {
             let updater = if value.is_unknown() {
                 |neighbor: &mut Cell, from: Direction| neighbor.set_unknown(from)
@@ -500,9 +489,9 @@ impl Cell {
             for Neighbor {
                 neighbor: neighbor_idx,
                 from,
-            } in indexed_neighbor_iter(idx, cells[idx.idx()].neighbors, offsets)
+            } in indexed_neighbor_iter(idx, cells[idx].neighbors, offsets)
             {
-                let neighbor = &mut cells[neighbor_idx.idx()];
+                let neighbor = &mut cells[neighbor_idx];
                 updater(neighbor, from);
                 visit_function(neighbor_idx, neighbor);
             }
@@ -531,6 +520,22 @@ impl Display for Cell {
             self.mine_neighbors,
             self.partition_id
         )
+    }
+}
+
+impl Index<CellIdx> for [Cell] {
+    type Output = Cell;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [Cell] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
     }
 }
 
@@ -622,7 +627,7 @@ mod tests {
         let width = 7u32;
         for idx in 0..35u32 {
             let p = coordinates(CellIdx(idx), width);
-            assert_eq!(cell_idx(p, width).val(), idx);
+            assert_eq!(cell_idx(p, width).0, idx);
         }
     }
 
@@ -796,7 +801,7 @@ mod tests {
         let mut visited = Vec::new();
         let change =
             Cell::change_value(&mut cells, CellIdx(1), CellValue::MINE, offsets, |i, _| {
-                visited.push(i.val())
+                visited.push(i.0)
             });
         assert_ne!(change, CellValueChangeType::NoChange);
         visited.sort();

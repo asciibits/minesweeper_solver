@@ -40,7 +40,7 @@ impl Partition {
         partition_id: u32,
         work_queue: &mut VecDeque<CellIdx>,
     ) -> Option<Partition> {
-        let start_cell = &mut cells[start_idx.idx()];
+        let start_cell = &mut cells[start_idx];
         let value = start_cell.value();
 
         if value == CellValue::INFERRED_SAFE || start_cell.alt_neighbors().is_empty() {
@@ -54,7 +54,7 @@ impl Partition {
         work_queue.push_back(start_idx);
 
         while let Some(cell_idx) = work_queue.pop_front() {
-            let cell = cells[cell_idx.idx()];
+            let cell = cells[cell_idx];
             if cell.value().is_mine() {
                 continue;
             }
@@ -63,7 +63,7 @@ impl Partition {
             for Neighbor { neighbor: idx, .. } in
                 indexed_neighbor_iter(cell_idx, cell.alt_neighbors(), offsets)
             {
-                let neighbor = &mut cells[idx.idx()];
+                let neighbor = &mut cells[idx];
                 if neighbor.value() != CellValue::INFERRED_SAFE
                     && neighbor.partition_id() != partition_id
                 {
@@ -75,7 +75,7 @@ impl Partition {
 
         // clear out single partitions
         if members.len() == 1 {
-            cells[members[0].idx()].set_partition_id(0);
+            cells[members[0]].set_partition_id(0);
             members.clear();
         }
 
@@ -91,7 +91,7 @@ impl Partition {
         partition_id: u32,
     ) -> Option<Partition> {
         // Note: don't exit early on INFERRED_MINE - it will be reset
-        if cells[start_idx.idx()].value() == CellValue::MINE {
+        if cells[start_idx].value() == CellValue::MINE {
             return None;
         }
 
@@ -104,14 +104,14 @@ impl Partition {
 
         while let Some((cell_idx, ref_val)) = to_process.pop_front() {
             // local copy of start_cell for resetting inferred state
-            let cell = cells[cell_idx.idx()];
+            let cell = cells[cell_idx];
             if cell.value().is_inferred() {
                 Cell::change_value(cells, cell_idx, CellValue::UNKNOWN, offsets, |_, _| {});
             }
             if cell.partition_id() == partition_id {
                 continue;
             }
-            let cell = &mut cells[cell_idx.idx()];
+            let cell = &mut cells[cell_idx];
             if let Some(ref_val) = ref_val
                 && !ref_val.is_alt(cell.value())
             {
@@ -129,7 +129,7 @@ impl Partition {
                 neighbor: n_idx, ..
             } in indexed_neighbor_iter(cell_idx, cell.neighbors(), offsets)
             {
-                let neighbor = cells[n_idx.idx()];
+                let neighbor = cells[n_idx];
                 if neighbor.partition_id() != partition_id {
                     to_process.push_back((n_idx, Some(ref_val)));
                 }
@@ -138,7 +138,7 @@ impl Partition {
 
         // clear out single partitions
         if members.len() == 1 {
-            cells[members[0].idx()].set_partition_id(0);
+            cells[members[0]].set_partition_id(0);
             members.clear();
         }
 
