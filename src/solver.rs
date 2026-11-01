@@ -7,12 +7,13 @@ use std::{
     collections::{BinaryHeap, HashMap, VecDeque},
     error::Error,
     fmt::{self, Display},
+    hash::{BuildHasher, Hasher},
 };
 
 use crate::{
     InferredValue,
     solver::{
-        cell::{CellValue, CellValueChangeType, UserCellWithInference, cell_idx, coordinates},
+        cell::{CellValue, CellValueChangeType, UserCellWithInference, coordinates},
         grid::{IndexedOffsets, Neighbor, indexed_neighbor_iter},
     },
 };
@@ -26,7 +27,7 @@ mod stats;
 pub(crate) mod test_utils;
 
 /// Represents the state of a Minesweeper board and its active solving partitions.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MineField {
     /// Width of the board in cells.
     width: u32,
@@ -37,7 +38,7 @@ pub struct MineField {
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
     cells: Box<[Cell]>,
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
-    pending: Vec<UserCell>,
+    pending: Vec<(usize, CellValue)>,
     /// Indices of cells whose neighborhood changed in a way that leaves existing inferences
     /// valid, queued as seeds for the next [`MineField::partition`] pass.
     /// Note: Users of this vector must be prepared for duplicates, as the same
@@ -50,7 +51,7 @@ pub struct MineField {
     global_solve_queue: BinaryHeap<CellOrdering>,
 
     /// Active connected components of frontier cells, keyed by partition ID.
-    partitions: HashMap<u32, Partition>,
+    partitions: HashMap<u32, Partition, IdBuildHasher>,
     /// Monotonically increasing counter used to assign unique partition IDs.
     next_partition_id: u32,
     /// Precomputed index offsets for walking a cell's neighbors in the flat `cells` array.
@@ -86,7 +87,7 @@ impl MineField {
             mine_count,
             cells: Cell::grid(width, height),
             pending: Vec::with_capacity(area / 4),
-            partitions: HashMap::with_capacity(20),
+            partitions: HashMap::with_capacity_and_hasher(20, IdBuildHasher),
             pending_partition: Vec::with_capacity(perimeter * 2),
             breaking_pending_partition: Vec::new(),
             partition_work_queue: VecDeque::with_capacity(perimeter * 2),
@@ -224,7 +225,8 @@ impl MineField {
                 height: self.height,
             });
         }
-        self.pending.push(cell);
+        self.pending
+            .push((self.cell_idx(cell.point), cell.value.into()));
         Ok(())
     }
 
@@ -302,24 +304,16 @@ impl MineField {
     /// `self.pending_partition`, or to `self.breaking_pending_partition` when the change may
     /// invalidate existing inferences (see [`CellValueChangeType::Breaking`]).
     fn index_pending(&mut self) {
-        for &UserCell {
-            point,
-            value: new_value,
-        } in &self.pending
-        {
+        for &(idx, new_value) in &self.pending {
             let cells = &mut self.cells;
-            let pending_cell = &mut cells[cell_idx(point, self.width)];
+            let pending_cell = &mut cells[idx];
             let pending_idx = pending_cell.idx();
             let log_idx = self.pending_partition.len();
 
-            let change_type = pending_cell.change_value(
-                cells,
-                new_value.into(),
-                self.indexed_offsets,
-                |neighbor| {
+            let change_type =
+                pending_cell.change_value(cells, new_value, self.indexed_offsets, |neighbor| {
                     self.pending_partition.push(neighbor.idx());
-                },
-            );
+                });
             if !matches!(change_type, CellValueChangeType::NoChange) {
                 self.pending_partition.push(pending_idx);
             }
@@ -526,9 +520,7 @@ impl MineField {
     }
 
     /// Parses `field_spec` into `(x, y, Option<CellValue>)` tuples for every character position in the spec.
-    fn spec_to_iter(
-        field_spec: &str,
-    ) -> impl Iterator<Item = (u32, u32, Option<UserCellValue>)> {
+    fn spec_to_iter(field_spec: &str) -> impl Iterator<Item = (u32, u32, Option<UserCellValue>)> {
         fn char_to_value(c: char) -> Option<UserCellValue> {
             match c {
                 '*' => Some(UserCellValue::Mine),
@@ -579,8 +571,80 @@ impl Display for MineField {
     }
 }
 
+impl Clone for MineField {
+    fn clone(&self) -> Self {
+        let mut cells = self.cells.clone();
+        let mut pending = Vec::with_capacity(self.pending.capacity());
+        for cell in &mut cells {
+            if !cell.value().is_inferred() && cell.value() != CellValue::UNKNOWN {
+                pending.push((cell.idx(), cell.value()));
+            }
+            cell.reset();
+        }
+        let mut field = Self {
+            width: self.width,
+            height: self.height,
+            mine_count: self.mine_count,
+            cells,
+            pending,
+            partitions: HashMap::with_capacity_and_hasher(
+                self.partitions.capacity(),
+                IdBuildHasher,
+            ),
+            pending_partition: Vec::with_capacity(self.pending_partition.capacity()),
+            breaking_pending_partition: Vec::with_capacity(
+                self.breaking_pending_partition.capacity(),
+            ),
+            partition_work_queue: VecDeque::with_capacity(self.partition_work_queue.capacity()),
+            global_solve_queue: BinaryHeap::with_capacity(self.global_solve_queue.capacity()),
+            next_partition_id: 1,
+            indexed_offsets: self.indexed_offsets,
+        };
+        field.solve();
+        field
+    }
+}
+
+#[derive(Debug, Default)]
+struct IdHasher {
+    state: u32,
+}
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.state as u64
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        unimplemented!();
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.state = i;
+    }
+}
+
+#[derive(Debug, Default)]
+struct IdBuildHasher;
+
+impl BuildHasher for IdBuildHasher {
+    type Hasher = IdHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        IdHasher::default()
+    }
+}
+
 #[cfg(test)]
+#[derive(Debug)]
 pub(crate) struct DetailMineField<'a>(&'a MineField);
+
+#[cfg(test)]
+impl<'a> DetailMineField<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn new(field: &'a MineField) -> DetailMineField<'a> {
+        DetailMineField(field)
+    }
+}
 
 #[cfg(test)]
 impl<'a> Display for DetailMineField<'a> {

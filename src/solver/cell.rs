@@ -520,6 +520,13 @@ impl Cell {
 
         change_type
     }
+
+    pub(super) fn reset(&mut self) {
+        self.mine_neighbors = DirectionSet::EMPTY;
+        self.unknown_neighbors = self.neighbors;
+        self.partition_id = 0;
+        self.value = CellValue::UNKNOWN;
+    }
 }
 
 impl Display for Cell {

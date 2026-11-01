@@ -12,8 +12,9 @@ use std::{
 pub(super) struct ColoredMineField<'a>(&'a MineField);
 
 impl<'a> ColoredMineField<'a> {
-    pub(super) fn new(field: &'a MineField) -> ColoredMineField<'a> {
-        ColoredMineField(field)
+    #[cfg(debug_assertions)]
+    pub(super) fn eprintln(field: &'a MineField) {
+        eprintln!("{}", ColoredMineField(field));
     }
 }
 

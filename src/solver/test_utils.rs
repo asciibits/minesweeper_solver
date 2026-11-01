@@ -444,17 +444,17 @@ impl Display for FieldBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::solver::display::ColoredMineField;
-
     use super::*;
-    use rand::{RngExt, rng, seq::SliceRandom};
+    use crate::solver::display::ColoredMineField;
+    use rand::{Rng, RngExt, rng, seq::SliceRandom};
+    use std::collections::HashMap;
 
-    fn shuffle(cells: &mut [i8]) {
-        cells.shuffle(&mut rng());
+    fn shuffle(rng: &mut impl Rng) -> impl FnMut(&mut [i8]) {
+        |cells| cells.shuffle(rng)
     }
 
-    fn selector(max: usize) -> usize {
-        rng().random_range(0..max)
+    fn selector(rng: &mut impl Rng) -> impl FnMut(usize) -> usize {
+        |max| rng.random_range(0..max)
     }
 
     #[test]
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_field_builder_random_and_zero_region() {
-        let random_builder = FieldBuilder::random(6, 5, 7, shuffle);
+        let random_builder = FieldBuilder::random(6, 5, 7, shuffle(&mut rng()));
         assert_eq!(random_builder.field.width(), 6);
         assert_eq!(random_builder.field.height(), 5);
         assert_eq!(random_builder.field.mine_count(), 7);
@@ -603,7 +603,8 @@ mod tests {
         assert_eq!(actual_mines, 7);
 
         let zero_pt = Point { x: 2, y: 2 };
-        let mut zero_builder = FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt, shuffle);
+        let mut zero_builder =
+            FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt, shuffle(&mut rng()));
         zero_builder.expand_cells([zero_pt]);
         let field = zero_builder.into_mine_field();
         assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));
@@ -631,20 +632,35 @@ mod tests {
         assert_eq!(builder.field.mine_count(), 2);
 
         // Ground-truth check
-        assert_eq!(builder.mines[0], FieldBuilder::MINE);  // (0, 0)
-        assert_eq!(builder.mines[1], 1);                  // (1, 0) has 1 neighbor mine at (0, 0)
+        assert_eq!(builder.mines[0], FieldBuilder::MINE); // (0, 0)
+        assert_eq!(builder.mines[1], 1); // (1, 0) has 1 neighbor mine at (0, 0)
         assert_eq!(builder.mines[11], FieldBuilder::MINE); // (3, 2)
-        assert_eq!(builder.mines[10], 1);                 // (2, 2) has 1 neighbor mine at (3, 2)
+        assert_eq!(builder.mines[10], 1); // (2, 2) has 1 neighbor mine at (3, 2)
 
         // Underlying MineField state check: pre-revealed cells from lower spec
-        assert_eq!(builder.field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Safe(1));
-        assert_eq!(builder.field.cell(Point { x: 2, y: 2 }).value, UserCellValue::Safe(1));
-        assert_eq!(builder.field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Unknown);
-        assert_eq!(builder.field.cell(Point { x: 3, y: 2 }).value, UserCellValue::Unknown);
+        assert_eq!(
+            builder.field.cell(Point { x: 1, y: 0 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            builder.field.cell(Point { x: 2, y: 2 }).value,
+            UserCellValue::Safe(1)
+        );
+        assert_eq!(
+            builder.field.cell(Point { x: 0, y: 0 }).value,
+            UserCellValue::Unknown
+        );
+        assert_eq!(
+            builder.field.cell(Point { x: 3, y: 2 }).value,
+            UserCellValue::Unknown
+        );
 
         // Exposing remaining cells verifies ground-truth consistency
         builder.expose_cells([Point { x: 1, y: 1 }]);
-        assert_eq!(builder.field.cell(Point { x: 1, y: 1 }).value, UserCellValue::Safe(1));
+        assert_eq!(
+            builder.field.cell(Point { x: 1, y: 1 }).value,
+            UserCellValue::Safe(1)
+        );
     }
 
     #[test]
@@ -737,9 +753,76 @@ mod tests {
         }
     }
 
+    fn validate_incremental_field(inc_field: &MineField) {
+        let fresh_field = inc_field.clone();
+
+        let mut id_mapping = HashMap::with_capacity(10);
+
+        // validate cells are identical, aside from a partition_id remapping
+        for (mut inc_cell, fresh_cell) in inc_field
+            .cells
+            .iter()
+            .copied()
+            .zip(fresh_field.cells.iter().copied())
+        {
+            let inc_partition_id = inc_cell.partition_id();
+            let (fresh_partition_id, _) = id_mapping
+                .entry(inc_cell.partition_id())
+                .and_modify(|e: &mut (u32, u32)| e.1 += 1)
+                .or_insert((fresh_cell.partition_id(), 1));
+            let fresh_partition_id = *fresh_partition_id;
+            inc_cell.set_partition_id(fresh_partition_id);
+            if inc_cell != fresh_cell || (fresh_partition_id == 0) != (inc_partition_id == 0) {
+                eprintln!("Incremental:");
+                ColoredMineField::eprintln(&inc_field);
+                eprintln!("Fresh:");
+                ColoredMineField::eprintln(&fresh_field);
+                panic!(
+                    "Cells don't match: {inc_cell}, {fresh_cell}, old partition_id: {inc_partition_id}"
+                );
+            }
+        }
+
+        for (inc_partition_id, (fresh_partition_id, count)) in id_mapping {
+            let inc_partition = inc_field.partitions.get(&inc_partition_id);
+            let fresh_partition = fresh_field.partitions.get(&fresh_partition_id);
+
+            if inc_partition.is_some() != fresh_partition.is_some() {
+                ColoredMineField::eprintln(&fresh_field);
+                eprintln!("Incremental Partition: {inc_partition_id}:{inc_partition:?}");
+                eprintln!("Fresh Partition: {fresh_partition_id}:{fresh_partition:?}");
+                panic!(
+                    "Partitions don't match:\nIncremental: {:?}\n\nFresh: {:?}",
+                    inc_field.partitions, fresh_field.partitions
+                );
+            }
+
+            if let Some(p1) = inc_partition
+                && let Some(p2) = fresh_partition
+            {
+                assert_eq!(p1.members().len(), count as usize);
+                assert_eq!(p2.members().len(), count as usize);
+                // should maybe verify that the members are the same, but at this point it just seems
+                // like unnecessary work
+            }
+        }
+    }
+
     #[test]
-    fn test_incremental_play_through() {
+    #[ignore]
+    fn test_multiple_random_incremental_play_through() {
+        #[allow(unused)]
         let rng = &mut rng();
+        #[allow(unused)]
+        for seed in 0..40 {
+            // Uncomment below for some determinism
+            // let rng = &mut StdRng::seed_from_u64(seed);
+            test_single_random_incremental_play_through(rng);
+        }
+    }
+
+    fn test_single_random_incremental_play_through(rng: &mut impl Rng) {
+        // let rng = &mut StdRng::seed_from_u64(seed);
         let width = 30;
         let height = 16;
         let mine_count = 99;
@@ -747,33 +830,36 @@ mod tests {
             x: rng.random_range(0..width),
             y: rng.random_range(0..height),
         };
-        let mut builder =
-            FieldBuilder::random_with_zero_region(width, height, mine_count, start_pt, shuffle);
+        let mut builder = FieldBuilder::random_with_zero_region(
+            width,
+            height,
+            mine_count,
+            start_pt,
+            shuffle(rng),
+        );
         builder.expand_cells([start_pt]);
-        eprintln!("{}", ColoredMineField::new(builder.mine_field()));
 
         let mut loop_count = 0;
-        let mut hint_count = 0;
         loop {
             let safe = builder.field.inferred_safe();
             if safe.is_empty() {
-                if let Some(pt) = builder.expand_random(selector) {
-                    hint_count += 1;
-                    eprintln!("Hint: {pt}");
-                } else {
+                let Some(_pt) = builder.expand_random(selector(rng)) else {
                     break;
-                }
+                };
             } else {
                 builder.expand_cells(safe);
             }
-            eprintln!("{}", ColoredMineField::new(builder.mine_field()));
+
+            // compare against a fresh (non incremental) MineField
+            validate_incremental_field(&builder.field);
+
             loop_count += 1;
             if loop_count >= 200 {
-                eprintln!("{}", builder);
-                panic!("Loop count exceeded bounds: {loop_count}. Hint count: {hint_count}");
+                break;
             }
         }
-        eprintln!("{}", builder);
-        eprintln!("Loop count: {loop_count}, hint count: {hint_count}");
+        if loop_count >= 200 {
+            panic!("Loop count exceeded limit: {loop_count}");
+        }
     }
 }
