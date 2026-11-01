@@ -319,7 +319,7 @@ impl MineField {
             let log_idx = self.pending_partition.len();
 
             let change_type =
-                Cell::change_value(idx, cells, new_value, self.indexed_offsets, |idx, _| {
+                Cell::change_value(cells, idx, new_value, self.indexed_offsets, |idx, _| {
                     self.pending_partition.push(idx);
                 });
             if !matches!(change_type, CellValueChangeType::NoChange) {
@@ -466,8 +466,8 @@ impl MineField {
                 self.indexed_offsets,
             ) {
                 Cell::change_value(
-                    inferred_idx,
                     &mut self.cells,
+                    inferred_idx,
                     inferred_value,
                     self.indexed_offsets,
                     |idx, neighbor| {

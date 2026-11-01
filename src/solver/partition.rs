@@ -106,7 +106,7 @@ impl Partition {
             // local copy of start_cell for resetting inferred state
             let cell = cells[cell_idx.idx()];
             if cell.value().is_inferred() {
-                Cell::change_value(cell_idx, cells, CellValue::UNKNOWN, offsets, |_, _| {});
+                Cell::change_value(cells, cell_idx, CellValue::UNKNOWN, offsets, |_, _| {});
             }
             if cell.partition_id() == partition_id {
                 continue;

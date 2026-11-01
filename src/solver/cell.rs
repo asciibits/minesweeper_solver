@@ -479,8 +479,8 @@ impl Cell {
     /// Returns how the cell's value changed. The caller is responsible for deciding which
     /// partitions need rebuilding based on the returned [`CellValueChangeType`].
     pub(super) fn change_value<F>(
-        idx: CellIdx,
         cells: &mut [Cell],
+        idx: CellIdx,
         value: CellValue,
         offsets: IndexedOffsets,
         mut visit_function: F,
@@ -795,7 +795,7 @@ mod tests {
 
         let mut visited = Vec::new();
         let change =
-            Cell::change_value(CellIdx(1), &mut cells, CellValue::MINE, offsets, |i, _| {
+            Cell::change_value(&mut cells, CellIdx(1), CellValue::MINE, offsets, |i, _| {
                 visited.push(i.val())
             });
         assert_ne!(change, CellValueChangeType::NoChange);
@@ -809,8 +809,8 @@ mod tests {
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
         Cell::change_value(
-            CellIdx(1),
             &mut cells,
+            CellIdx(1),
             CellValue::for_mine_count(1),
             offsets,
             |_, _| {},
@@ -821,8 +821,8 @@ mod tests {
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
         Cell::change_value(
-            CellIdx(1),
             &mut cells,
+            CellIdx(1),
             CellValue::UNKNOWN,
             offsets,
             |_, _| {},

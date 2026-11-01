@@ -43,8 +43,7 @@ impl Point {
     pub(super) const fn from_index(cell_idx: CellIdx, width: u32) -> Point {
         let cell_idx: u32 = cell_idx.val();
         let y = cell_idx / width;
-        let x = (cell_idx - y * width) as u32;
-        let y = y as u32;
+        let x = cell_idx - y * width;
         Point { x, y }
     }
 
@@ -93,7 +92,7 @@ pub(super) fn indexed_neighbor_iter(
     NeighborIterator {
         offset_values: offsets.0,
         apply_offset: move |to: Direction, d_idx| Neighbor {
-            neighbor: CellIdx(center.val().wrapping_add_signed(d_idx as i32)),
+            neighbor: CellIdx(center.val().wrapping_add_signed(d_idx)),
             from: to.reverse(),
         },
         iter: neighbors.iter(),
