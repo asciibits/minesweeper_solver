@@ -40,7 +40,7 @@ use std::{
 ///
 /// Unlike [`MineField::create`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
-/// (`field_data`)—computing the exact adjacent mine count for every non-mine cell—while keeping
+/// (`mines`)—computing the exact adjacent mine count for every non-mine cell—while keeping
 /// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
 /// or [`expand_cells`](Self::expand_cells) is called.
 ///
@@ -69,25 +69,8 @@ pub struct FieldBuilder {
 }
 
 impl FieldBuilder {
-    /// Sentinel value stored in `field_data` to represent a mine.
-    ///
-    /// Chosen as `-10` so that even if all 8 neighbors are mines (incrementing the cell 8 times
-    /// during neighbor-count accumulation), the value remains negative (`-10 + 8 = -2 < 0`).
+    /// Sentinel value stored in `mines` to represent a mine.
     const MINE: i8 = -10;
-
-    /// Encodes a [`UserCellValue`] from an ASCII spec into a temporary `i8` representation before
-    /// neighbor mine counts are accumulated.
-    fn value_to_i8(value: UserCellValue) -> i8 {
-        match value {
-            UserCellValue::Mine => Self::MINE,
-            UserCellValue::Unknown => 0,
-            // a little hacky, but store the user provided values in bits 4-7
-            // they will be compared to the final bits 0-3 in the last pass to
-            // verify the user values. Add one first to avoid an overlap between
-            // a Safe(0) and Unknown
-            UserCellValue::Safe(n) => ((n + 1) << 4) as i8,
-        }
-    }
 
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with mines placed at `mines`.
     ///
@@ -199,10 +182,23 @@ impl FieldBuilder {
 
         let (width, height, cell_iter) = MineField::cells_and_size_from_spec(mine_spec);
         let mut field = vec![0i8; width as usize * height as usize];
+        let mut user_checks = Vec::new();
         for UserCell { point, value } in cell_iter {
-            field[cell_idx(point, width)] = Self::value_to_i8(value);
+            match value {
+                UserCellValue::Mine => field[cell_idx(point, width)] = Self::MINE,
+                UserCellValue::Safe(n) => user_checks.push((point, n)),
+                UserCellValue::Unknown => {}
+            }
         }
         let mut builder = Self::from_vec(width, height, field);
+        for (point, expected) in user_checks {
+            let actual = builder.mines[cell_idx(point, width)];
+            assert!(
+                actual == expected as i8,
+                "Invalid user provided value: {expected} at coordinates {point}. \
+                 It does not reflect the actual mine count {actual}"
+            );
+        }
         if !field_spec.trim().is_empty() {
             builder.field.update(field_spec);
         }
@@ -309,46 +305,26 @@ impl FieldBuilder {
         Self::from_vec(width, height, field)
     }
 
-    /// Accumulates neighbor mine counts across `field`, validates any user-specified counts packed
-    /// into the upper nibble, and initializes the [`MineField`].
+    /// Accumulates neighbor mine counts across `field` and initializes the [`FieldBuilder`].
     fn from_vec(width: u32, height: u32, mut field: Vec<i8>) -> Self {
         assert_eq!(width as usize * height as usize, field.len());
 
         let offsets = IndexedOffsets::new(width);
+        let mut mine_count = 0;
 
-        // apply mine counts to neighbors
-        let mut idx = 0;
-        for y in 0..height {
-            for x in 0..width {
-                if field[idx] < 0 && field[idx] >= Self::MINE {
-                    let pt = Point { x, y };
-                    for Neighbor { neighbor, .. } in indexed_neighbor_iter(
-                        idx,
-                        DirectionSet::all_neighbors(pt, width, height),
-                        offsets,
-                    ) {
+        for idx in 0..field.len() {
+            if field[idx] == Self::MINE {
+                mine_count += 1;
+                let pt = coordinates(idx, width);
+                for Neighbor { neighbor, .. } in indexed_neighbor_iter(
+                    idx,
+                    DirectionSet::all_neighbors(pt, width, height),
+                    offsets,
+                ) {
+                    if field[neighbor] != Self::MINE {
                         field[neighbor] += 1;
                     }
                 }
-                idx += 1;
-            }
-        }
-
-        // second pass - validate user numbers and normalize mine values
-        let mut mine_count = 0;
-        for (idx, val) in field.iter_mut().enumerate() {
-            if *val < 0 && *val >= Self::MINE {
-                *val = Self::MINE;
-                mine_count += 1;
-            } else {
-                let user_val = (*val as u8 >> 4) as i8 - 1;
-                *val &= 0xf;
-                assert!(
-                    user_val == -1 || user_val == *val,
-                    "Invalid user provided value: {user_val} at coordinates {}. \
-                        It does not reflect the actual mine count {val}",
-                    coordinates(idx, width)
-                );
             }
         }
 
@@ -368,37 +344,32 @@ impl FieldBuilder {
         self.field
     }
 
-    /// Converts the ground-truth `field_data` entry at `p` into a [`UserCellValue`].
-    fn cell_value(field_data: &[i8], idx: usize) -> UserCellValue {
-        match field_data[idx] {
+    /// Converts the ground-truth `mines` entry at `idx` into a [`UserCellValue`].
+    fn cell_value(&self, idx: usize) -> UserCellValue {
+        match self.mines[idx] {
             n @ 0..=8 => UserCellValue::Safe(n as u8),
             Self::MINE => UserCellValue::Mine,
             _ => unreachable!(),
         }
     }
 
-    /// Converts the ground-truth `field_data` entry at `p` into a [`UserCellValue`].
-    fn cell_value_from_point(field_data: &[i8], width: u32, p: Point) -> UserCellValue {
-        Self::cell_value(field_data, cell_idx(p, width))
-    }
-
     /// Reveals the ground-truth [`CellValue`](crate::CellValue)s for the specified `points` on the underlying [`MineField`].
     pub fn expose_cells(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
-        let field_data = &self.mines;
         let width = self.field.width();
-        self.field
-            .set_cells(points.into_iter().map(|point| UserCell {
+        let cells: Vec<_> = points
+            .into_iter()
+            .map(|point| UserCell {
                 point,
-                value: Self::cell_value_from_point(field_data, width, point),
-            }))
-            .unwrap();
+                value: self.cell_value(cell_idx(point, width)),
+            })
+            .collect();
+        self.field.set_cells(cells).unwrap();
         self
     }
 
     /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
     /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
     pub fn expand_cells(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
-        let field_data = &self.mines;
         let width = self.field.width;
         let height = self.field.height;
         let mut all_points = HashSet::new();
@@ -406,7 +377,7 @@ impl FieldBuilder {
         for p in points.into_iter() {
             all_points.insert(p);
             let idx = cell_idx(p, width);
-            if field_data[idx] == 0 {
+            if self.mines[idx] == 0 {
                 zero_queue.push(p);
             }
         }
@@ -416,7 +387,7 @@ impl FieldBuilder {
             {
                 if all_points.insert(neighbor) {
                     let n_idx = cell_idx(neighbor, width);
-                    if field_data[n_idx] == 0 {
+                    if self.mines[n_idx] == 0 {
                         zero_queue.push(neighbor);
                     }
                 }
@@ -438,12 +409,7 @@ impl FieldBuilder {
             .iter()
             .map(|i| self.field.cells[*i])
             .filter(|c| c.value().is_unknown())
-            .filter(|c| {
-                matches!(
-                    Self::cell_value(&self.mines, c.idx()),
-                    UserCellValue::Safe(_)
-                )
-            })
+            .filter(|c| matches!(self.cell_value(c.idx()), UserCellValue::Safe(_)))
             .collect();
         if members.is_empty() {
             return None;
