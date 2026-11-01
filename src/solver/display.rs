@@ -1,6 +1,9 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::cell::{InferredValue, UserCellValue, UserCellWithInference};
+use crate::solver::{
+    cell::{InferredValue, UserCellValue, UserCellWithInference},
+    partition::PartitionId,
+};
 
 use super::MineField;
 use colored::Colorize;
@@ -13,6 +16,7 @@ pub(super) struct ColoredMineField<'a>(&'a MineField);
 
 impl<'a> ColoredMineField<'a> {
     #[cfg(debug_assertions)]
+    #[allow(dead_code)]
     pub(super) fn eprintln(field: &'a MineField) {
         eprintln!("{}", ColoredMineField(field));
     }
@@ -33,8 +37,7 @@ impl Display for ColoredMineField<'_> {
         }
 
         // get the current partitions
-        let mut partition_ids: Vec<_> = self.partitions.keys().copied().collect();
-        partition_ids.sort();
+        let partition_ids: Vec<_> = self.partition_cache.partitions().collect();
 
         print_pre_header(self, f)?;
         print_header(self, f)?;
@@ -54,7 +57,7 @@ fn print_row(
     field: &MineField,
     row: u32,
     f: &mut Formatter<'_>,
-    partition_ids: &[u32],
+    partition_ids: &[PartitionId],
 ) -> fmt::Result {
     if field.width == 0 {
         return Ok(());
@@ -197,6 +200,7 @@ mod tests {
         field_builder
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn test_print() {
         let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });

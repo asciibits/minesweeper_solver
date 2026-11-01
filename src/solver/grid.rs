@@ -2,13 +2,12 @@
 
 //! 2D grid coordinates, compass directions, and bitset-backed neighbor iteration.
 
+use crate::solver::CellIdx;
 use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
-
-use crate::solver::CellIdx;
 
 /// A 2D coordinate (`x`, `y`) on the Minesweeper grid, with `(0, 0)` at the top-left corner.
 #[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq)]
@@ -121,6 +120,7 @@ impl IndexedOffsets {
         ])
     }
 
+    #[cfg(test)]
     pub(super) fn width(&self) -> u32 {
         self.0[6] as u32
     }
@@ -252,6 +252,10 @@ impl DirectionSet {
     /// Returns `true` if the set contains no directions.
     pub fn is_empty(&self) -> bool {
         self.0 == 0
+    }
+
+    pub fn contains(&self, d: Direction) -> bool {
+        *self & d != Self::EMPTY
     }
 
     /// Returns an iterator over all [`Direction`]s in `self`.

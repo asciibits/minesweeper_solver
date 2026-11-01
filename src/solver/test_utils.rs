@@ -21,9 +21,9 @@
 //! - Any other character panics with `"Invalid field character"`.
 
 use crate::{
-    MineField, Point,
+    MineField, Partition, Point,
     solver::{
-        CellIdx, CellValue, IdBuildHasher, IndexedOffsets,
+        CellIdx, CellValue, IndexedOffsets, Metrics,
         cell::{UserCell, UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
         indexed_neighbor_iter,
@@ -447,7 +447,7 @@ impl FieldBuilder {
     /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
     /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
     pub(super) fn expand_cells(&mut self, ids: impl IntoIterator<Item = CellIdx>) -> &mut Self {
-        let mut all_ids = HashSet::with_capacity_and_hasher(self.mines.len(), IdBuildHasher);
+        let mut all_ids = HashSet::with_capacity(self.mines.len());
         let mut zero_queue = Vec::with_capacity(self.mines.len());
 
         for idx in ids {
@@ -478,12 +478,11 @@ impl FieldBuilder {
     }
 
     // Selects a random member of a live partition to expose.
-    pub fn expand_random(&mut self, mut idx_selector: impl FnMut(usize) -> usize) -> Option<Point> {
-        let partitions: Vec<_> = self.field.partitions.values().collect();
-        if partitions.is_empty() {
-            return None;
-        }
-        let partition = partitions[idx_selector(partitions.len())];
+    pub fn hint(
+        &self,
+        partition: &Partition,
+        mut idx_selector: impl FnMut(usize) -> usize,
+    ) -> Option<Point> {
         let members: Vec<_> = partition
             .members()
             .iter()
@@ -497,7 +496,6 @@ impl FieldBuilder {
             return None;
         }
         let pt = coordinates(members[idx_selector(members.len())], self.field.width);
-        self.expand_points([pt]);
         Some(pt)
     }
 }
@@ -529,7 +527,12 @@ mod tests {
     use super::*;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use rand::{Rng, RngExt, SeedableRng, rng, rngs::StdRng, seq::SliceRandom};
+    use crate::solver::{DetailMineField, partition::PartitionId};
+    use rand::{
+        Rng, RngExt, SeedableRng, rng,
+        rngs::StdRng,
+        seq::{IteratorRandom, SliceRandom},
+    };
     use std::{
         collections::HashMap,
         time::{Duration, Instant},
@@ -839,26 +842,31 @@ mod tests {
         }
     }
 
-    fn validate_incremental_field(inc_field: &MineField) {
+    #[allow(dead_code)]
+    fn validate_incremental_field(inc_field: &MineField, validation_metrics: &mut Metrics) {
         let fresh_field = inc_field.clone();
+        validation_metrics.tally_game(&fresh_field);
 
         let mut id_mapping = HashMap::with_capacity(10);
 
         // validate cells are identical, aside from a partition_id remapping
-        for (mut inc_cell, fresh_cell) in inc_field
+        for ((_idx, mut inc_cell), fresh_cell) in inc_field
             .cells
             .iter()
             .copied()
+            .enumerate()
             .zip(fresh_field.cells.iter().copied())
         {
             let inc_partition_id = inc_cell.partition_id();
             let (fresh_partition_id, _) = id_mapping
                 .entry(inc_cell.partition_id())
-                .and_modify(|e: &mut (u32, u32)| e.1 += 1)
+                .and_modify(|e: &mut (PartitionId, u32)| e.1 += 1)
                 .or_insert((fresh_cell.partition_id(), 1));
             let fresh_partition_id = *fresh_partition_id;
             inc_cell.set_partition_id(fresh_partition_id);
-            if inc_cell != fresh_cell || (fresh_partition_id == 0) != (inc_partition_id == 0) {
+            if inc_cell != fresh_cell
+                || fresh_partition_id.is_partitioned() != inc_partition_id.is_partitioned()
+            {
                 #[cfg(debug_assertions)]
                 {
                     eprintln!("Incremental:");
@@ -873,29 +881,16 @@ mod tests {
         }
 
         for (inc_partition_id, (fresh_partition_id, count)) in id_mapping {
-            let inc_partition = inc_field.partitions.get(&inc_partition_id);
-            let fresh_partition = fresh_field.partitions.get(&fresh_partition_id);
+            assert_eq!(
+                inc_partition_id.is_partitioned(),
+                fresh_partition_id.is_partitioned()
+            );
+            if inc_partition_id.is_partitioned() {
+                let inc_partition = inc_field.partition_cache.get(inc_partition_id).unwrap();
+                let fresh_partition = fresh_field.partition_cache.get(fresh_partition_id).unwrap();
 
-            if inc_partition.is_some() != fresh_partition.is_some() {
-                #[cfg(debug_assertions)]
-                {
-                    ColoredMineField::eprintln(&fresh_field);
-                }
-                eprintln!("Incremental Partition: {inc_partition_id}:{inc_partition:?}");
-                eprintln!("Fresh Partition: {fresh_partition_id}:{fresh_partition:?}");
-                panic!(
-                    "Partitions don't match:\nIncremental: {:?}\n\nFresh: {:?}",
-                    inc_field.partitions, fresh_field.partitions
-                );
-            }
-
-            if let Some(p1) = inc_partition
-                && let Some(p2) = fresh_partition
-            {
-                assert_eq!(p1.members().len(), count as usize);
-                assert_eq!(p2.members().len(), count as usize);
-                // should maybe verify that the members are the same, but at this point it just seems
-                // like unnecessary work
+                assert_eq!(inc_partition.len(), count as usize);
+                assert_eq!(fresh_partition.len(), count as usize);
             }
         }
     }
@@ -904,23 +899,54 @@ mod tests {
     #[ignore]
     fn test_multiple_random_incremental_play_through() {
         let rng = &mut rng();
-        #[allow(unused)]
-        for _seed in 0..10 {
+
+        let mut metrics = Metrics::new();
+        let mut validation_metrics = Metrics::new();
+
+        // let width = 30;
+        // let height = 16;
+        // let mine_count = 99;
+
+        let count = 130;
+        let width = 30;
+        let height = 24;
+        let mine_count = 130;
+
+        for _seed in 0..count {
             // Uncomment below for some determinism
             let seed = rng.next_u64(); // use _seed for determinism
+            // let seed = 1270114618373538810; // use _seed for determinism
             eprintln!("Using random seed: {seed}");
-            test_single_random_incremental_play_through(&mut StdRng::seed_from_u64(seed));
+            test_single_random_incremental_play_through(
+                width,
+                height,
+                mine_count,
+                &mut metrics,
+                &mut validation_metrics,
+                &mut StdRng::seed_from_u64(seed),
+            );
         }
+
+        eprintln!("For incremental:\n{metrics:#}");
+        eprintln!("For validation:\n{validation_metrics:#}");
+
+        // eprintln!(
+        //     "Played {count} {width}x{height}@{mine_count} games, averaging {} neighbor scans and {} partition scans. Average partitions created: {}. Max partitions: {}",
+        //     metrics.neighbor_visits() / count,
+        //     metrics.partition_visits() / count,
+        //     metrics.partitions_created() / count,
+        //     metrics.max_partitions()
+        // );
     }
 
-    fn test_single_random_incremental_play_through(rng: &mut impl Rng) {
-        let start = Instant::now();
-        // let width = 200;
-        // let height = 200;
-        // let mine_count = 800;
-        let width = 30;
-        let height = 16;
-        let mine_count = 99;
+    fn test_single_random_incremental_play_through(
+        width: u32,
+        height: u32,
+        mine_count: u32,
+        metrics: &mut Metrics,
+        validation_metrics: &mut Metrics,
+        rng: &mut impl Rng,
+    ) {
         let start_pt = Point {
             x: rng.random_range(0..width),
             y: rng.random_range(0..height),
@@ -932,45 +958,46 @@ mod tests {
             start_pt,
             shuffle(rng),
         );
-        let built = Instant::now();
         builder.expand_points([start_pt]);
-        let init_expand = Instant::now();
 
         let mut loop_count = 0;
-        let mut validate_duration = Duration::ZERO;
         loop {
-            let safe = builder.field.inferred_safe();
-            if safe.is_empty() {
-                let Some(_pt) = builder.expand_random(selector(rng)) else {
-                    break;
-                };
+            let partition = builder.field.partition_cache.partitions().choose(rng);
+            if let Some(partition_id) = partition
+                && let Some(partition) = builder.field.partition_cache.get(partition_id)
+            {
+                let safe: Vec<_> = partition
+                    .members()
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let value = builder.field.cells[i].value();
+                        value.is_inferred() && value.is_safe()
+                    })
+                    .collect();
+
+                if safe.is_empty() {
+                    if let Some(pt) = builder.hint(partition, selector(rng)) {
+                        builder.expand_points([pt]);
+                    } else {
+                        break;
+                    };
+                } else {
+                    builder.expand_cells(safe);
+                }
             } else {
-                builder.expand_points(safe);
+                break;
             }
 
             // compare against a fresh (non incremental) MineField
-            let validate_begin = Instant::now();
-            validate_incremental_field(&builder.field);
-            let validate_end = Instant::now();
-            validate_duration += validate_end - validate_begin;
+            validate_incremental_field(&builder.field, validation_metrics);
 
             loop_count += 1;
-            if loop_count >= 200 {
-                break;
+            if loop_count >= width * height {
+                panic!("Loop count exceeded limit: {loop_count}");
             }
+            // ColoredMineField::eprintln(&builder.field);
         }
-        let done = Instant::now();
-
-        eprintln!(
-            "Build: {:?}, init_expand: {:?}, validate: {:?}, increment: {:?}",
-            built - start,
-            init_expand - built,
-            done - init_expand - validate_duration,
-            validate_duration
-        );
-
-        if loop_count >= 200 {
-            panic!("Loop count exceeded limit: {loop_count}");
-        }
+        metrics.tally_game(&builder.field);
     }
 }

@@ -8,9 +8,11 @@ use std::{
 };
 
 use crate::solver::{
-    IndexedOffsets,
+    IndexedOffsets, Metrics,
     grid::{Direction, DirectionSet, Neighbor, Point},
-    indexed_neighbor_iter, stats,
+    indexed_neighbor_iter,
+    partition::PartitionId,
+    stats,
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
@@ -209,20 +211,32 @@ impl CellValue {
         self.0 == 0
     }
 
-    // Returns if this value and `other` are alternating types as occur during
-    // partitioning. This means one is safe (inferred or not), while the other
-    // is unknown (i.e. not inferred and not known).
+    /// Returns `true` if `other` is the same "type" is this. This means that both will return the
+    /// same result for [`CellValue::is_safe`], [`CellValue::is_mine`], and
+    /// [`CellValue::is_unknown`]. Note: This wil return `false` if one is an inferred mine and the
+    /// other is a known mine. Same fore inferred/knows safe cells. Also Note: this wil return false
+    /// if both cells are safe, even if they have different mine count.
+    #[inline]
+    pub(super) fn is_different_type(&self, other: CellValue) -> bool {
+        (self.0 ^ other.0) & Self::KNOWN_MASK != 0
+    }
+
+    /// Returns if this value and `other` are alternating types as occur during
+    /// partitioning. This means one is safe (inferred or not), while the other
+    /// is unknown (i.e. not inferred and not known).
     pub(super) fn is_alt(&self, other: Self) -> bool {
         (self.0 ^ other.0) & Self::KNOWN_MASK == Self::SAFE_MASK
     }
 
-    /// Note: For valid, non-inferred Safe cells, this returns the mine count.
+    /// For valid, non-inferred Safe cells, this returns the mine count.
     /// For all other types, returns 0.
     #[inline]
     pub(super) fn mine_count(&self) -> u8 {
         self.0 & 0xf
     }
 
+    /// For valid, non-inferred Safe cells, this returns the mine count.
+    /// For all other types, returns None.
     pub(super) fn safe_mine_count(&self) -> Option<u8> {
         // NOTE: this is not the same as `.is_safe()`. This will not return
         // `true` for inferred values
@@ -319,6 +333,30 @@ pub(super) enum CellValueChangeType {
     Breaking,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(super) struct CellFlags(bool);
+
+impl CellFlags {
+    pub(super) fn new() -> CellFlags {
+        CellFlags(false)
+    }
+
+    #[inline]
+    pub(super) fn is_set(&self) -> bool {
+        self.0
+    }
+
+    #[inline]
+    pub(super) fn set(&mut self) {
+        self.0 = true
+    }
+
+    #[inline]
+    pub(super) fn clear(&mut self) {
+        self.0 = false
+    }
+}
+
 /// Internal solver representation of a board cell, caching neighbor masks and partition membership.
 ///
 /// A cell does not store its own index; callers identify a cell by its row-major position in the
@@ -336,10 +374,12 @@ pub(super) struct Cell {
     mine_neighbors: DirectionSet,
 
     /// The partition this cell belongs to (`0` if unpartitioned).
-    partition_id: u32,
+    partition_id: PartitionId,
+
+    flags: CellFlags,
 }
 
-const _: () = assert!(std::mem::size_of::<Cell>() == 8);
+const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
 
 impl Cell {
     pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
@@ -355,7 +395,8 @@ impl Cell {
                     neighbors,
                     unknown_neighbors: neighbors,
                     mine_neighbors: DirectionSet::new(),
-                    partition_id: 0,
+                    partition_id: PartitionId::new(),
+                    flags: CellFlags::new(),
                 });
             }
         }
@@ -410,13 +451,19 @@ impl Cell {
 
     /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
-    pub(super) fn partition_id(&self) -> u32 {
+    pub(super) fn partition_id(&self) -> PartitionId {
         self.partition_id
+    }
+
+    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
+    #[inline]
+    pub(super) fn flags(&mut self) -> &mut CellFlags {
+        &mut self.flags
     }
 
     /// Updates the ID of the partition this cell belongs to.
     #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: u32) {
+    pub(super) fn set_partition_id(&mut self, partition_id: PartitionId) {
         self.partition_id = partition_id;
     }
 
@@ -446,19 +493,34 @@ impl Cell {
         mines_remaining < 0 || mines_remaining > self.unknown_neighbors.len() as i8
     }
 
-    pub(super) fn set_unknown(&mut self, direction: Direction) {
-        self.unknown_neighbors |= direction;
-        self.mine_neighbors -= direction;
+    pub(super) fn set_unknown(&mut self, direction: Direction) -> bool {
+        if self.unknown_neighbors.contains(direction) {
+            false
+        } else {
+            self.unknown_neighbors |= direction;
+            self.mine_neighbors -= direction;
+            true
+        }
     }
 
-    pub(super) fn set_safe(&mut self, direction: Direction) {
-        self.unknown_neighbors -= direction;
-        self.mine_neighbors -= direction;
+    pub(super) fn set_safe(&mut self, direction: Direction) -> bool {
+        if (self.unknown_neighbors | self.mine_neighbors).contains(direction) {
+            self.unknown_neighbors -= direction;
+            self.mine_neighbors -= direction;
+            true
+        } else {
+            false
+        }
     }
 
-    pub(super) fn set_mine(&mut self, direction: Direction) {
-        self.unknown_neighbors -= direction;
-        self.mine_neighbors |= direction;
+    pub(super) fn set_mine(&mut self, direction: Direction) -> bool {
+        if self.mine_neighbors.contains(direction) {
+            false
+        } else {
+            self.unknown_neighbors -= direction;
+            self.mine_neighbors |= direction;
+            true
+        }
     }
 
     /// Sets `cells[idx]` to `value` and updates the `unknown`/`mine` neighbor masks of every
@@ -472,13 +534,19 @@ impl Cell {
         idx: CellIdx,
         value: CellValue,
         offsets: IndexedOffsets,
+        metrics: &mut Metrics,
         mut visit_function: F,
     ) -> CellValueChangeType
     where
-        F: FnMut(CellIdx, &Cell),
+        F: FnMut(CellIdx, &mut Cell, &mut Metrics),
     {
-        let change_type = cells[idx].value_mut().set_value(value);
-        if !matches!(change_type, CellValueChangeType::NoChange) {
+        let cell = &mut cells[idx];
+        let prev_val = cell.value();
+        let change_type = cell.value_mut().set_value(value);
+
+        if !matches!(change_type, CellValueChangeType::NoChange)
+            && prev_val.is_different_type(value)
+        {
             let updater = if value.is_unknown() {
                 |neighbor: &mut Cell, from: Direction| neighbor.set_unknown(from)
             } else if value.is_mine() {
@@ -486,14 +554,18 @@ impl Cell {
             } else {
                 |neighbor: &mut Cell, from: Direction| neighbor.set_safe(from)
             };
+
+            metrics.inc_neighbor_visits(cell.neighbors);
+
             for Neighbor {
                 neighbor: neighbor_idx,
                 from,
-            } in indexed_neighbor_iter(idx, cells[idx].neighbors, offsets)
+            } in indexed_neighbor_iter(idx, cell.neighbors, offsets)
             {
                 let neighbor = &mut cells[neighbor_idx];
-                updater(neighbor, from);
-                visit_function(neighbor_idx, neighbor);
+                if updater(neighbor, from) {
+                    visit_function(neighbor_idx, neighbor, metrics);
+                }
             }
         }
 
@@ -503,23 +575,27 @@ impl Cell {
     pub(super) fn reset(&mut self) {
         self.mine_neighbors = DirectionSet::EMPTY;
         self.unknown_neighbors = self.neighbors;
-        self.partition_id = 0;
+        self.partition_id = PartitionId::new();
         self.value = CellValue::UNKNOWN;
     }
 }
 
 impl Display for Cell {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let spacer = if f.alternate() { "\n  " } else { " " };
+        let spacer = if f.alternate() { "\n    " } else { " " };
         write!(
             f,
-            "Cell{{{spacer}value:{},{spacer}neighbors:{},{spacer}unknown_neighbors:{},{spacer}mine_neighbors:{},{spacer}partition_id:{} }}",
+            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}partition_id: {}",
             self.value,
             self.neighbors,
             self.unknown_neighbors,
             self.mine_neighbors,
             self.partition_id
-        )
+        )?;
+        if f.alternate() {
+            writeln!(f)?;
+        }
+        write!(f, " }}")
     }
 }
 
@@ -647,14 +723,14 @@ mod tests {
         assert_eq!(pc.neighbors, E | S | SE);
         assert_eq!(pc.unknown_neighbors, E | S | SE);
         assert_eq!(pc.mine_neighbors, DirectionSet::new());
-        assert_eq!(pc.partition_id, 0);
+        assert_eq!(pc.partition_id, PartitionId::new());
 
         pc.value = CellValue::for_mine_count(2);
 
         let compact = format!("{pc}");
         let alternate = format!("{pc:#}");
-        assert!(compact.contains("Cell{ value:2"));
-        assert!(alternate.contains("Cell{\n  value:2"));
+        assert!(compact.contains("Cell{ value: 2"));
+        assert!(alternate.contains("Cell{\n    value: 2"));
     }
 
     #[test]
@@ -799,10 +875,14 @@ mod tests {
         let offsets = IndexedOffsets::new(3);
 
         let mut visited = Vec::new();
-        let change =
-            Cell::change_value(&mut cells, CellIdx(1), CellValue::MINE, offsets, |i, _| {
-                visited.push(i.0)
-            });
+        let change = Cell::change_value(
+            &mut cells,
+            CellIdx(1),
+            CellValue::MINE,
+            offsets,
+            &mut Metrics::new(),
+            |i, _, _| visited.push(i.0),
+        );
         assert_ne!(change, CellValueChangeType::NoChange);
         visited.sort();
         assert_eq!(visited, vec![0, 2]);
@@ -818,7 +898,8 @@ mod tests {
             CellIdx(1),
             CellValue::for_mine_count(1),
             offsets,
-            |_, _| {},
+            &mut Metrics::new(),
+            |_, _, _| {},
         );
         assert!(cells[0].mine_neighbors().is_empty());
         assert!(cells[0].unknown_neighbors().is_empty());
@@ -830,7 +911,8 @@ mod tests {
             CellIdx(1),
             CellValue::UNKNOWN,
             offsets,
-            |_, _| {},
+            &mut Metrics::new(),
+            |_, _, _| {},
         );
         assert_eq!(cells[0].unknown_neighbors(), !!E);
         assert_eq!(cells[2].unknown_neighbors(), !!W);
