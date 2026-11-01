@@ -1,21 +1,26 @@
 //! Cell data structures representing both the external, user-facing board state
 //! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and internal cell representations.
 
-use std::{cmp::Ordering, fmt::{self, Display, Formatter}};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display, Formatter},
+};
 
 use crate::solver::{
-    IndexedOffsets, grid::{Direction, DirectionSet, Neighbor, Point}, indexed_neighbor_iter, stats,
+    IndexedOffsets,
+    grid::{Direction, DirectionSet, Neighbor, Point},
+    indexed_neighbor_iter, stats,
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the corollary to `cell_id`.
-pub fn coordinates(cell_idx: usize, width: u32) -> Point {
+pub(super) fn coordinates(cell_idx: CellIdx, width: u32) -> Point {
     Point::from_index(cell_idx, width)
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
 /// a Vector or Array. This is the corollary to `coordinates`.
-pub fn cell_idx(p: Point, width: u32) -> usize {
+pub(super) fn cell_idx(p: Point, width: u32) -> CellIdx {
     p.to_index(width)
 }
 
@@ -87,6 +92,45 @@ pub struct UserCellWithInference {
     pub value: UserCellValue,
     /// The solver's deduction for this cell.
     pub inferred: InferredValue,
+}
+
+#[derive(Debug, Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct CellIdx(pub(super) u32);
+
+impl CellIdx {
+    #[inline]
+    pub(super) const fn idx(&self) -> usize {
+        self.0 as usize
+    }
+
+    #[inline]
+    pub(super) const fn val(&self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for CellIdx {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<CellIdx> for u32 {
+    fn from(value: CellIdx) -> Self {
+        value.0
+    }
+}
+
+impl From<CellIdx> for usize {
+    fn from(value: CellIdx) -> Self {
+        value.0 as usize
+    }
+}
+
+impl Display for CellIdx {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Compact (1 byte) internal cell value that packs the user value *and* any solver inference.
@@ -287,12 +331,12 @@ pub(super) enum CellValueChangeType {
 }
 
 /// Internal solver representation of a board cell, caching neighbor masks and partition membership.
-// Note: Try to keep this under 32 bytes to fit in a single cache line.
+///
+/// A cell does not store its own index; callers identify a cell by its row-major position in the
+/// `cells` slice (see [`coordinates`] / [`cell_idx`]).
+// Note: Kept at 8 bytes so 8 cells fit in a single 64-byte cache line (enforced below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Cell {
-    /// The id - calculated as `cell.x + cell.y * field.width`.
-    idx: usize,
-
     /// Inline the contents of Cell
     value: CellValue,
 
@@ -306,26 +350,24 @@ pub(super) struct Cell {
     partition_id: u32,
 }
 
+const _: () = assert!(std::mem::size_of::<Cell>() == 8);
+
 impl Cell {
     pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
         let len = width as usize * height as usize;
         let mut grid: Vec<Cell> = Vec::with_capacity(len);
 
-        let mut idx = 0;
         for y in 0..height {
             for x in 0..width {
                 let point = Point { x, y };
                 let neighbors = DirectionSet::all_neighbors(point, width, height);
                 grid.push(Cell {
-                    idx,
                     value: CellValue::UNKNOWN,
                     neighbors,
                     unknown_neighbors: neighbors,
                     mine_neighbors: DirectionSet::new(),
                     partition_id: 0,
                 });
-
-                idx += 1;
             }
         }
 
@@ -349,12 +391,6 @@ impl Cell {
     #[cfg(test)]
     pub(super) fn set_value(&mut self, value: CellValue) {
         self.value = value;
-    }
-
-    /// Returns the cell's row-major linear index.
-    #[inline]
-    pub(super) fn idx(&self) -> usize {
-        self.idx
     }
 
     /// Returns the mask of all valid board neighbors for this cell.
@@ -391,13 +427,8 @@ impl Cell {
 
     /// Updates the ID of the partition this cell belongs to.
     #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: u32) -> bool {
-        if self.partition_id != partition_id {
-            self.partition_id = partition_id;
-            true
-        } else {
-            false
-        }
+    pub(super) fn set_partition_id(&mut self, partition_id: u32) {
+        self.partition_id = partition_id;
     }
 
     pub(super) fn alt_neighbors(&self) -> DirectionSet {
@@ -441,62 +472,23 @@ impl Cell {
         self.mine_neighbors |= direction;
     }
 
-    /// Calls `f` on a mutable reference to every neighbor of this cell selected by `neighbors`,
-    /// along with the [`Direction`] from the neighbor back to this cell.
-    ///
-    /// `self` is taken by value (cells are `Copy`) so the caller can pass the whole `cells`
-    /// slice mutably without a conflicting borrow of `self`. As a consequence `self` is a
-    /// snapshot; it will not reflect changes `f` makes to `cells[self.idx]`.
-    pub(super) fn mut_visit_neighbors<F>(
-        self,
-        neighbors: DirectionSet,
-        cells: &mut [Cell],
-        offsets: IndexedOffsets,
-        mut f: F,
-    ) where
-        F: FnMut(&mut Cell),
-    {
-        for Neighbor { neighbor, .. } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
-            f(&mut cells[neighbor]);
-        }
-    }
-
-    /// Calls `f` on a mutable reference to every neighbor of this cell selected by `neighbors`,
-    /// along with the [`Direction`] from the neighbor back to this cell.
-    ///
-    /// `self` is taken by value (cells are `Copy`) so the caller can pass the whole `cells`
-    /// slice mutably without a conflicting borrow of `self`. As a consequence `self` is a
-    /// snapshot; it will not reflect changes `f` makes to `cells[self.idx]`.
-    pub(super) fn visit_neighbors<F>(
-        self,
-        neighbors: DirectionSet,
-        cells: &[Cell],
-        offsets: IndexedOffsets,
-        mut f: F,
-    ) where
-        F: FnMut(Cell),
-    {
-        for Neighbor { neighbor, .. } in indexed_neighbor_iter(self.idx, neighbors, offsets) {
-            f(cells[neighbor]);
-        }
-    }
-
-    /// Sets `cells[self.idx]` to `value` and updates the `unknown`/`mine` neighbor masks of
-    /// every adjacent cell to match, calling `visit_function` with the index of each neighbor.
+    /// Sets `cells[idx]` to `value` and updates the `unknown`/`mine` neighbor masks of every
+    /// adjacent cell to match, then calls `visit_function` with each neighbor's index and its
+    /// already-updated state. `visit_function` is not called if the value did not change.
     ///
     /// Returns how the cell's value changed. The caller is responsible for deciding which
     /// partitions need rebuilding based on the returned [`CellValueChangeType`].
     pub(super) fn change_value<F>(
-        self,
+        idx: CellIdx,
         cells: &mut [Cell],
         value: CellValue,
         offsets: IndexedOffsets,
         mut visit_function: F,
     ) -> CellValueChangeType
     where
-        F: FnMut(&mut Cell),
+        F: FnMut(CellIdx, &Cell),
     {
-        let change_type = cells[self.idx].value_mut().set_value(value);
+        let change_type = cells[idx.idx()].value_mut().set_value(value);
         if !matches!(change_type, CellValueChangeType::NoChange) {
             let updater = if value.is_unknown() {
                 |neighbor: &mut Cell, from: Direction| neighbor.set_unknown(from)
@@ -508,11 +500,11 @@ impl Cell {
             for Neighbor {
                 neighbor: neighbor_idx,
                 from,
-            } in indexed_neighbor_iter(self.idx, self.neighbors, offsets)
+            } in indexed_neighbor_iter(idx, cells[idx.idx()].neighbors, offsets)
             {
-                let neighbor = &mut cells[neighbor_idx];
+                let neighbor = &mut cells[neighbor_idx.idx()];
                 updater(neighbor, from);
-                visit_function(neighbor);
+                visit_function(neighbor_idx, neighbor);
             }
         }
 
@@ -532,8 +524,7 @@ impl Display for Cell {
         let spacer = if f.alternate() { "\n  " } else { " " };
         write!(
             f,
-            "Cell{{{spacer}idx:{},{spacer}value:{},{spacer}neighbors:{},{spacer}unknown_neighbors:{},{spacer}mine_neighbors:{},{spacer}partition_id:{} }}",
-            self.idx,
+            "Cell{{{spacer}value:{},{spacer}neighbors:{},{spacer}unknown_neighbors:{},{spacer}mine_neighbors:{},{spacer}partition_id:{} }}",
             self.value,
             self.neighbors,
             self.unknown_neighbors,
@@ -548,7 +539,7 @@ impl Display for Cell {
 #[derive(Debug, Copy, Hash, Clone, PartialEq, Eq)]
 pub(super) struct CellOrdering {
     /// Linear index of the cell on the board.
-    cell_idx: usize,
+    idx: CellIdx,
     /// Original clue count on the cell.
     mine_count: u8,
     /// Number of mines still unaccounted for among the cell's unknown neighbors.
@@ -561,13 +552,13 @@ pub(super) struct CellOrdering {
 
 impl CellOrdering {
     /// Constructs a [`CellOrdering`] if `cell` holds a known clue (`Safe(n)`), or `None` otherwise.
-    pub(super) fn from_cell(cell: &Cell) -> Option<CellOrdering> {
+    pub(super) fn from_cell(idx: CellIdx, cell: &Cell) -> Option<CellOrdering> {
         if let Some(mine_count) = cell.value().safe_mine_count() {
             let available_cells = cell.unknown_neighbors().len();
             let remaining_mines = cell.remaining_mines();
             let solution_count = stats::choose(available_cells, remaining_mines) as u8;
             Some(CellOrdering {
-                cell_idx: cell.idx(),
+                idx,
                 mine_count,
                 remaining_mines,
                 available_cells,
@@ -580,8 +571,8 @@ impl CellOrdering {
 
     /// Returns the linear board index of this cell.
     #[inline]
-    pub(super) fn cell_idx(&self) -> usize {
-        self.cell_idx
+    pub(super) fn idx(&self) -> CellIdx {
+        self.idx
     }
 
     /// Returns the number of mines still unaccounted for among the cell's unknown neighbors.
@@ -617,7 +608,7 @@ impl Ord for CellOrdering {
             .then(other.mine_count.cmp(&self.mine_count))
             .then(other.remaining_mines.cmp(&self.remaining_mines))
             .then(other.available_cells.cmp(&self.available_cells))
-            .then(other.cell_idx.cmp(&self.cell_idx))
+            .then(other.idx.cmp(&self.idx))
     }
 }
 
@@ -629,9 +620,9 @@ mod tests {
     #[test]
     fn test_coordinates_and_cell_idx_round_trip() {
         let width = 7u32;
-        for idx in 0..35usize {
-            let p = coordinates(idx, width);
-            assert_eq!(cell_idx(p, width), idx);
+        for idx in 0..35u32 {
+            let p = coordinates(CellIdx(idx), width);
+            assert_eq!(cell_idx(p, width).val(), idx);
         }
     }
 
@@ -647,7 +638,6 @@ mod tests {
     fn test_processed_cell_initialization_and_display() {
         let grid = Cell::grid(3, 3);
         let mut pc = grid[0];
-        assert_eq!(pc.idx, 0);
         assert_eq!(pc.value, CellValue::UNKNOWN);
         assert_eq!(pc.neighbors, E | S | SE);
         assert_eq!(pc.unknown_neighbors, E | S | SE);
@@ -658,8 +648,8 @@ mod tests {
 
         let compact = format!("{pc}");
         let alternate = format!("{pc:#}");
-        assert!(compact.contains("Cell{ idx:0, value:2"));
-        assert!(alternate.contains("Cell{\n  idx:0,\n  value:2"));
+        assert!(compact.contains("Cell{ value:2"));
+        assert!(alternate.contains("Cell{\n  value:2"));
     }
 
     #[test]
@@ -802,12 +792,12 @@ mod tests {
         // 3x1 strip, change the middle cell and watch both neighbors
         let mut cells = Cell::grid(3, 1);
         let offsets = IndexedOffsets::new(3);
-        let middle = cells[1];
 
         let mut visited = Vec::new();
-        let change = middle.change_value(&mut cells, CellValue::MINE, offsets, |c| {
-            visited.push(c.idx())
-        });
+        let change =
+            Cell::change_value(CellIdx(1), &mut cells, CellValue::MINE, offsets, |i, _| {
+                visited.push(i.val())
+            });
         assert_ne!(change, CellValueChangeType::NoChange);
         visited.sort();
         assert_eq!(visited, vec![0, 2]);
@@ -818,15 +808,25 @@ mod tests {
         assert!(cells[2].unknown_neighbors().is_empty());
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
-        let middle = cells[1];
-        middle.change_value(&mut cells, CellValue::for_mine_count(1), offsets, |_| {});
+        Cell::change_value(
+            CellIdx(1),
+            &mut cells,
+            CellValue::for_mine_count(1),
+            offsets,
+            |_, _| {},
+        );
         assert!(cells[0].mine_neighbors().is_empty());
         assert!(cells[0].unknown_neighbors().is_empty());
         assert_eq!(cells[0].safe_neighbors(), !!E);
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
-        let middle = cells[1];
-        middle.change_value(&mut cells, CellValue::UNKNOWN, offsets, |_| {});
+        Cell::change_value(
+            CellIdx(1),
+            &mut cells,
+            CellValue::UNKNOWN,
+            offsets,
+            |_, _| {},
+        );
         assert_eq!(cells[0].unknown_neighbors(), !!E);
         assert_eq!(cells[2].unknown_neighbors(), !!W);
         assert!(cells[0].mine_neighbors().is_empty());
@@ -865,10 +865,10 @@ mod tests {
     fn test_ordered_cell_from_cell_and_ordering() {
         let grid = Cell::grid(3, 3);
         let mut unknown_cell = grid[0];
-        assert!(CellOrdering::from_cell(&unknown_cell).is_none());
+        assert!(CellOrdering::from_cell(CellIdx(0), &unknown_cell).is_none());
 
         unknown_cell.set_value(CellValue::MINE);
-        assert!(CellOrdering::from_cell(&unknown_cell).is_none());
+        assert!(CellOrdering::from_cell(CellIdx(0), &unknown_cell).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
@@ -884,9 +884,9 @@ mod tests {
         let mut cell_c = grid[2];
         cell_c.set_value(CellValue::for_mine_count(1));
 
-        let ord_a = CellOrdering::from_cell(&cell_a).unwrap();
-        let ord_b = CellOrdering::from_cell(&cell_b).unwrap();
-        let ord_c = CellOrdering::from_cell(&cell_c).unwrap();
+        let ord_a = CellOrdering::from_cell(CellIdx(0), &cell_a).unwrap();
+        let ord_b = CellOrdering::from_cell(CellIdx(1), &cell_b).unwrap();
+        let ord_c = CellOrdering::from_cell(CellIdx(2), &cell_c).unwrap();
 
         assert_eq!(ord_a.remaining_mines(), 2);
         assert_eq!(ord_b.remaining_mines(), 0);

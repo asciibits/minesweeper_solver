@@ -23,7 +23,7 @@
 use crate::{
     MineField, Point,
     solver::{
-        IndexedOffsets,
+        CellIdx, IndexedOffsets,
         cell::{UserCell, UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
         indexed_neighbor_iter,
@@ -89,7 +89,7 @@ impl FieldBuilder {
                 pt.x,
                 pt.y
             );
-            field[cell_idx(pt, width)] = Self::MINE;
+            field[cell_idx(pt, width).idx()] = Self::MINE;
         }
 
         Self::from_vec(width, height, field)
@@ -185,14 +185,14 @@ impl FieldBuilder {
         let mut user_checks = Vec::new();
         for UserCell { point, value } in cell_iter {
             match value {
-                UserCellValue::Mine => field[cell_idx(point, width)] = Self::MINE,
+                UserCellValue::Mine => field[cell_idx(point, width).idx()] = Self::MINE,
                 UserCellValue::Safe(n) => user_checks.push((point, n)),
                 UserCellValue::Unknown => {}
             }
         }
         let mut builder = Self::from_vec(width, height, field);
         for (point, expected) in user_checks {
-            let actual = builder.mines[cell_idx(point, width)];
+            let actual = builder.mines[cell_idx(point, width).idx()];
             assert!(
                 actual == expected as i8,
                 "Invalid user provided value: {expected} at coordinates {point}. \
@@ -299,7 +299,7 @@ impl FieldBuilder {
         shuffle(&mut field[0..end_shuffle]);
 
         for (i, reserve_idx) in (end_shuffle..).zip(reserved_indices) {
-            field.swap(i, reserve_idx);
+            field.swap(i, reserve_idx.idx());
         }
 
         Self::from_vec(width, height, field)
@@ -314,6 +314,7 @@ impl FieldBuilder {
 
         for idx in 0..field.len() {
             if field[idx] == Self::MINE {
+                let idx = CellIdx(idx as u32);
                 mine_count += 1;
                 let pt = coordinates(idx, width);
                 for Neighbor { neighbor, .. } in indexed_neighbor_iter(
@@ -321,8 +322,8 @@ impl FieldBuilder {
                     DirectionSet::all_neighbors(pt, width, height),
                     offsets,
                 ) {
-                    if field[neighbor] != Self::MINE {
-                        field[neighbor] += 1;
+                    if field[neighbor.idx()] != Self::MINE {
+                        field[neighbor.idx()] += 1;
                     }
                 }
             }
@@ -345,8 +346,8 @@ impl FieldBuilder {
     }
 
     /// Converts the ground-truth `mines` entry at `idx` into a [`UserCellValue`].
-    fn cell_value(&self, idx: usize) -> UserCellValue {
-        match self.mines[idx] {
+    fn cell_value(&self, idx: CellIdx) -> UserCellValue {
+        match self.mines[idx.idx()] {
             n @ 0..=8 => UserCellValue::Safe(n as u8),
             Self::MINE => UserCellValue::Mine,
             _ => unreachable!(),
@@ -377,7 +378,7 @@ impl FieldBuilder {
         for p in points.into_iter() {
             all_points.insert(p);
             let idx = cell_idx(p, width);
-            if self.mines[idx] == 0 {
+            if self.mines[idx.idx()] == 0 {
                 zero_queue.push(p);
             }
         }
@@ -387,7 +388,7 @@ impl FieldBuilder {
             {
                 if all_points.insert(neighbor) {
                     let n_idx = cell_idx(neighbor, width);
-                    if self.mines[n_idx] == 0 {
+                    if self.mines[n_idx.idx()] == 0 {
                         zero_queue.push(neighbor);
                     }
                 }
@@ -407,14 +408,16 @@ impl FieldBuilder {
         let members: Vec<_> = partition
             .members()
             .iter()
-            .map(|i| self.field.cells[*i])
-            .filter(|c| c.value().is_unknown())
-            .filter(|c| matches!(self.cell_value(c.idx()), UserCellValue::Safe(_)))
+            .copied()
+            .filter(|&i| {
+                let c = self.field.cells[i.idx()];
+                c.value().is_unknown() && matches!(self.cell_value(i), UserCellValue::Safe(_))
+            })
             .collect();
         if members.is_empty() {
             return None;
         }
-        let pt = coordinates(members[idx_selector(members.len())].idx(), self.field.width);
+        let pt = coordinates(members[idx_selector(members.len())], self.field.width);
         self.expand_cells([pt]);
         Some(pt)
     }
@@ -446,7 +449,7 @@ impl Display for FieldBuilder {
 mod tests {
     use super::*;
     use crate::solver::display::ColoredMineField;
-    use rand::{Rng, RngExt, rng, seq::SliceRandom};
+    use rand::{Rng, RngExt, SeedableRng, rng, rngs::StdRng, seq::SliceRandom};
     use std::collections::HashMap;
 
     fn shuffle(rng: &mut impl Rng) -> impl FnMut(&mut [i8]) {
@@ -811,13 +814,13 @@ mod tests {
     #[test]
     #[ignore]
     fn test_multiple_random_incremental_play_through() {
-        #[allow(unused)]
         let rng = &mut rng();
         #[allow(unused)]
-        for seed in 0..40 {
+        for _seed in 0..40 {
             // Uncomment below for some determinism
-            // let rng = &mut StdRng::seed_from_u64(seed);
-            test_single_random_incremental_play_through(rng);
+            let seed = rng.next_u64(); // use _seed for determinism
+            eprintln!("Using random seed: {seed}");
+            test_single_random_incremental_play_through(&mut StdRng::seed_from_u64(seed));
         }
     }
 

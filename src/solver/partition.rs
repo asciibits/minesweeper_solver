@@ -1,6 +1,8 @@
 //! Connected components ([`Partition`]) of frontier cells and cell priority ordering.
 
-use crate::solver::{CellValue, IndexedOffsets, cell::Cell};
+use crate::solver::{
+    CellIdx, CellValue, IndexedOffsets, cell::Cell, grid::Neighbor, indexed_neighbor_iter,
+};
 use std::collections::VecDeque;
 
 /// A connected component of bipartite frontier cells (`known` clue cells adjacent to `unknown` cells).
@@ -9,17 +11,17 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub struct Partition {
     /// Linear cell indices of frontier cells belonging to this partition.
-    members: Vec<usize>,
+    members: Vec<CellIdx>,
 }
 
 impl Partition {
-    pub(super) fn new(members: Vec<usize>) -> Partition {
+    pub(super) fn new(members: Vec<CellIdx>) -> Partition {
         Partition { members }
     }
 
     /// Returns the slice of linear cell indices belonging to this partition.
     #[inline]
-    pub(super) fn members(&self) -> &[usize] {
+    pub(super) fn members(&self) -> &[CellIdx] {
         &self.members
     }
 
@@ -34,11 +36,11 @@ impl Partition {
     pub(super) fn create(
         cells: &mut [Cell],
         offsets: IndexedOffsets,
-        start_idx: usize,
+        start_idx: CellIdx,
         partition_id: u32,
-        work_queue: &mut VecDeque<usize>,
+        work_queue: &mut VecDeque<CellIdx>,
     ) -> Option<Partition> {
-        let start_cell = &mut cells[start_idx];
+        let start_cell = &mut cells[start_idx.idx()];
         let value = start_cell.value();
 
         if value == CellValue::INFERRED_SAFE || start_cell.alt_neighbors().is_empty() {
@@ -52,25 +54,28 @@ impl Partition {
         work_queue.push_back(start_idx);
 
         while let Some(cell_idx) = work_queue.pop_front() {
-            let cell = cells[cell_idx];
+            let cell = cells[cell_idx.idx()];
             if cell.value().is_mine() {
                 continue;
             }
-            let cell = &mut cells[cell_idx];
             members.push(cell_idx);
 
-            cell.mut_visit_neighbors(cell.alt_neighbors(), cells, offsets, |neighbor| {
+            for Neighbor { neighbor: idx, .. } in
+                indexed_neighbor_iter(cell_idx, cell.alt_neighbors(), offsets)
+            {
+                let neighbor = &mut cells[idx.idx()];
                 if neighbor.value() != CellValue::INFERRED_SAFE
-                    && neighbor.set_partition_id(partition_id)
+                    && neighbor.partition_id() != partition_id
                 {
-                    work_queue.push_back(neighbor.idx());
+                    neighbor.set_partition_id(partition_id);
+                    work_queue.push_back(idx);
                 }
-            });
+            }
         }
 
         // clear out single partitions
         if members.len() == 1 {
-            cells[members[0]].set_partition_id(0);
+            cells[members[0].idx()].set_partition_id(0);
             members.clear();
         }
 
@@ -82,31 +87,31 @@ impl Partition {
     pub(super) fn create_reset_inferred(
         cells: &mut [Cell],
         offsets: IndexedOffsets,
-        start_idx: usize,
+        start_idx: CellIdx,
         partition_id: u32,
     ) -> Option<Partition> {
         // Note: don't exit early on INFERRED_MINE - it will be reset
-        if cells[start_idx].value() == CellValue::MINE {
+        if cells[start_idx.idx()].value() == CellValue::MINE {
             return None;
         }
 
         let perimeter = offsets.width() as usize * 4;
         let mut members = Vec::with_capacity(perimeter);
-        let mut to_process: VecDeque<(usize, Option<CellValue>)> =
+        let mut to_process: VecDeque<(CellIdx, Option<CellValue>)> =
             VecDeque::with_capacity(perimeter);
 
         to_process.push_back((start_idx, None));
 
         while let Some((cell_idx, ref_val)) = to_process.pop_front() {
             // local copy of start_cell for resetting inferred state
-            let cell = cells[cell_idx];
+            let cell = cells[cell_idx.idx()];
             if cell.value().is_inferred() {
-                cell.change_value(cells, CellValue::UNKNOWN, offsets, |_| {});
+                Cell::change_value(cell_idx, cells, CellValue::UNKNOWN, offsets, |_, _| {});
             }
             if cell.partition_id() == partition_id {
                 continue;
             }
-            let cell = &mut cells[cell_idx];
+            let cell = &mut cells[cell_idx.idx()];
             if let Some(ref_val) = ref_val
                 && !ref_val.is_alt(cell.value())
             {
@@ -120,16 +125,20 @@ impl Partition {
 
             // Use all neighbors rather than alt_neighbors, since their
             // inference may be reset
-            cell.visit_neighbors(cell.neighbors(), cells, offsets, |neighbor| {
+            for Neighbor {
+                neighbor: n_idx, ..
+            } in indexed_neighbor_iter(cell_idx, cell.neighbors(), offsets)
+            {
+                let neighbor = cells[n_idx.idx()];
                 if neighbor.partition_id() != partition_id {
-                    to_process.push_back((neighbor.idx(), Some(ref_val)));
+                    to_process.push_back((n_idx, Some(ref_val)));
                 }
-            });
+            }
         }
 
         // clear out single partitions
         if members.len() == 1 {
-            cells[members[0]].set_partition_id(0);
+            cells[members[0].idx()].set_partition_id(0);
             members.clear();
         }
 
@@ -164,7 +173,7 @@ mod tests {
             Partition::create(
                 &mut cells,
                 IndexedOffsets::new(2),
-                0,
+                CellIdx(0),
                 100,
                 &mut VecDeque::new()
             )
@@ -179,7 +188,7 @@ mod tests {
             Partition::create(
                 &mut cells,
                 IndexedOffsets::new(2),
-                1,
+                CellIdx(1),
                 100,
                 &mut VecDeque::new()
             )
@@ -202,14 +211,14 @@ mod tests {
         let partition = Partition::create(
             &mut cells,
             IndexedOffsets::new(3),
-            0,
+            CellIdx(0),
             7,
             &mut VecDeque::new(),
         )
         .expect("should create partition");
         assert!(!partition.is_empty());
         assert_eq!(partition.len(), 3);
-        assert_eq!(partition.members(), &[0, 1, 2]);
+        assert_eq!(partition.members(), &[CellIdx(0), CellIdx(1), CellIdx(2)]);
         for c in &cells {
             assert_eq!(c.partition_id(), 7);
         }
