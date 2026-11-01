@@ -575,10 +575,7 @@ mod tests {
         let neighbors: Vec<_> =
             indexed_neighbor_iter(CellIdx(4), E | S | SE, IndexedOffsets::new(3)).collect();
         assert_eq!(
-            neighbors
-                .iter()
-                .map(|n| n.neighbor.0)
-                .collect::<Vec<_>>(),
+            neighbors.iter().map(|n| n.neighbor.0).collect::<Vec<_>>(),
             vec![5, 7, 8]
         );
         assert_eq!(
