@@ -1,12 +1,10 @@
 //! Cell data structures representing both the external, user-facing board state
 //! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and internal cell representations.
 
-use std::fmt::{self, Display, Formatter};
+use std::{cmp::Ordering, fmt::{self, Display, Formatter}};
 
 use crate::solver::{
-    IndexedOffsets,
-    grid::{Direction, DirectionSet, Neighbor, Point},
-    indexed_neighbor_iter,
+    IndexedOffsets, grid::{Direction, DirectionSet, Neighbor, Point}, indexed_neighbor_iter, stats,
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
@@ -545,6 +543,84 @@ impl Display for Cell {
     }
 }
 
+/// A known clue cell annotated with its local combinatorial complexity (`solution_count`),
+/// ordered from most constrained (fewest valid mine placements) to least constrained.
+#[derive(Debug, Copy, Hash, Clone, PartialEq, Eq)]
+pub(super) struct CellOrdering {
+    /// Linear index of the cell on the board.
+    cell_idx: usize,
+    /// Original clue count on the cell.
+    mine_count: u8,
+    /// Number of mines still unaccounted for among the cell's unknown neighbors.
+    remaining_mines: i8,
+    /// Number of adjacent unknown cells available to hold `remaining_mines`.
+    available_cells: u8,
+    /// Number of ways to choose `remaining_mines` from `available_cells` ($\binom{\text{available}}{\text{remaining}}$).
+    solution_count: u8,
+}
+
+impl CellOrdering {
+    /// Constructs a [`CellOrdering`] if `cell` holds a known clue (`Safe(n)`), or `None` otherwise.
+    pub(super) fn from_cell(cell: &Cell) -> Option<CellOrdering> {
+        if let Some(mine_count) = cell.value().safe_mine_count() {
+            let available_cells = cell.unknown_neighbors().len();
+            let remaining_mines = cell.remaining_mines();
+            let solution_count = stats::choose(available_cells, remaining_mines) as u8;
+            Some(CellOrdering {
+                cell_idx: cell.idx(),
+                mine_count,
+                remaining_mines,
+                available_cells,
+                solution_count,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the linear board index of this cell.
+    #[inline]
+    pub(super) fn cell_idx(&self) -> usize {
+        self.cell_idx
+    }
+
+    /// Returns the number of mines still unaccounted for among the cell's unknown neighbors.
+    #[inline]
+    pub(super) fn remaining_mines(&self) -> i8 {
+        self.remaining_mines
+    }
+
+    /// Returns the number of ways to choose `remaining_mines` from `available_cells`.
+    #[inline]
+    pub(super) fn solution_count(&self) -> u8 {
+        self.solution_count
+    }
+}
+
+impl PartialOrd for CellOrdering {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CellOrdering {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Cells with 0 or 1 possible configurations are equally trivial (immediately solvable),
+        // so clamp solution_count to at least 1 before tie-breaking.
+        //
+        // Order "easier" solves as greater-than "harder" - this makes use with
+        // the BinaryHeap natural without needing to reverse it.
+        other
+            .solution_count
+            .max(1)
+            .cmp(&self.solution_count.max(1))
+            .then(other.mine_count.cmp(&self.mine_count))
+            .then(other.remaining_mines.cmp(&self.remaining_mines))
+            .then(other.available_cells.cmp(&self.available_cells))
+            .then(other.cell_idx.cmp(&self.cell_idx))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,5 +859,46 @@ mod tests {
         cells[0].set_value(CellValue::for_mine_count(0));
         cells[0].set_mine(E);
         assert!(cells[0].is_invalid());
+    }
+
+    #[test]
+    fn test_ordered_cell_from_cell_and_ordering() {
+        let grid = Cell::grid(3, 3);
+        let mut unknown_cell = grid[0];
+        assert!(CellOrdering::from_cell(&unknown_cell).is_none());
+
+        unknown_cell.set_value(CellValue::MINE);
+        assert!(CellOrdering::from_cell(&unknown_cell).is_none());
+
+        // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
+        let mut cell_a = grid[0];
+        cell_a.set_value(CellValue::for_mine_count(2));
+        cell_a.set_safe(SE);
+
+        // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
+        let mut cell_b = grid[1];
+        cell_b.set_value(CellValue::for_mine_count(1));
+        cell_b.set_mine(S);
+
+        // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
+        let mut cell_c = grid[2];
+        cell_c.set_value(CellValue::for_mine_count(1));
+
+        let ord_a = CellOrdering::from_cell(&cell_a).unwrap();
+        let ord_b = CellOrdering::from_cell(&cell_b).unwrap();
+        let ord_c = CellOrdering::from_cell(&cell_c).unwrap();
+
+        assert_eq!(ord_a.remaining_mines(), 2);
+        assert_eq!(ord_b.remaining_mines(), 0);
+        assert_eq!(ord_c.remaining_mines(), 1);
+
+        assert_eq!(ord_a.solution_count(), 1);
+        assert_eq!(ord_b.solution_count(), 1);
+        assert_eq!(ord_c.solution_count(), 3);
+
+        // ord_b < ord_a (both have solution_count <= 1, but ord_b has smaller mine_count)
+        assert!(ord_b > ord_a);
+        // ord_a < ord_c (1 solution < 3 solutions)
+        assert!(ord_a > ord_c);
     }
 }

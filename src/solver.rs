@@ -1,7 +1,7 @@
 //! Core Minesweeper solver state and partition orchestration.
-use cell::{Cell, UserCell, UserCellValue};
+use cell::{Cell, CellOrdering, UserCell, UserCellValue};
 use grid::Point;
-use partition::{CellOrdering, Partition};
+use partition::Partition;
 use std::{
     cmp::max,
     collections::{BinaryHeap, HashMap, VecDeque},
