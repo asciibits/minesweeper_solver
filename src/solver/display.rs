@@ -192,7 +192,7 @@ mod tests {
             FieldBuilder::random_with_zero_region(width, height, mine_count, zero_point, |cells| {
                 cells.shuffle(&mut rng())
             });
-        field_builder.expand_cells([zero_point]);
+        field_builder.expand_points([zero_point]);
 
         field_builder
     }
