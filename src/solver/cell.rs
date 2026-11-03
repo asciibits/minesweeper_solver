@@ -192,6 +192,7 @@ impl CellValue {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn has_count(&self) -> bool {
         self.0 & Self::META_MASK == Self::SAFE_MASK
     }
@@ -477,6 +478,7 @@ impl Cell {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn remaining_mines(&self) -> i8 {
         self.value.mine_count() as i8 - self.mine_neighbors.len() as i8
     }
@@ -485,12 +487,29 @@ impl Cell {
     /// more mines than it has unknown neighbors left to hold, or it has more
     /// mines than remaining spaces
     pub(super) fn is_invalid(&self) -> bool {
-        if !self.value.has_count() {
-            // only safe cells with a count can be invalid
-            return false;
-        }
-        let mines_remaining = self.remaining_mines();
-        mines_remaining < 0 || mines_remaining > self.unknown_neighbors.len() as i8
+        let mine_neighbors = self.mine_neighbors.len() as i8;
+        let unknown_neighbors = self.unknown_neighbors.len() as i8;
+        self.value().safe_mine_count().is_some_and(|mine_count| {
+            let mines_remaining = mine_count as i8 - mine_neighbors as i8;
+            mines_remaining < 0 || mines_remaining > unknown_neighbors
+        })
+    }
+
+    // If the cell is a clue cell that is not yet solved, and the neighbors can be inferred as
+    // either a Mine or Safe...
+    pub(super) fn infer_unknown_neighbors(&self) -> Option<CellValue> {
+        let unknown_count = self.unknown_neighbors().len() as i8;
+
+        self.value().safe_mine_count().and_then(|mine_count| {
+            let remaining = mine_count as i8 - self.mine_neighbors.len() as i8;
+            if remaining <= 0 {
+                Some(CellValue::INFERRED_SAFE)
+            } else if remaining >= unknown_count {
+                Some(CellValue::INFERRED_MINE)
+            } else {
+                None
+            }
+        })
     }
 
     pub(super) fn set_unknown(&mut self, direction: Direction) -> bool {
@@ -631,6 +650,7 @@ pub(super) struct CellOrdering {
     solution_count: u8,
 }
 
+#[allow(dead_code)]
 impl CellOrdering {
     /// Constructs a [`CellOrdering`] if `cell` holds a known clue (`Safe(n)`), or `None` otherwise.
     pub(super) fn from_cell(idx: CellIdx, cell: &Cell) -> Option<CellOrdering> {
@@ -652,6 +672,7 @@ impl CellOrdering {
 
     /// Returns the linear board index of this cell.
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn idx(&self) -> CellIdx {
         self.idx
     }

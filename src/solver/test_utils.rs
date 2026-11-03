@@ -23,7 +23,7 @@
 use crate::{
     MineField, Partition, Point,
     solver::{
-        CellIdx, CellValue, IndexedOffsets, Metrics,
+        CellIdx, CellValue, IndexedOffsets,
         cell::{UserCell, UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
         indexed_neighbor_iter,
@@ -527,16 +527,13 @@ mod tests {
     use super::*;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use crate::solver::{DetailMineField, partition::PartitionId};
+    use crate::solver::{Metrics, partition::PartitionId};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
         seq::{IteratorRandom, SliceRandom},
     };
-    use std::{
-        collections::HashMap,
-        time::{Duration, Instant},
-    };
+    use std::collections::HashMap;
 
     fn shuffle(rng: &mut impl Rng) -> impl FnMut(&mut [i8]) {
         |cells| cells.shuffle(rng)

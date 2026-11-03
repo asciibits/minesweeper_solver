@@ -268,6 +268,7 @@ impl PartitionCache {
             .map(|(i, _)| PartitionId::for_usize(i))
     }
 
+    #[allow(dead_code)]
     pub(super) fn len(&self) -> u16 {
         self.length
     }
