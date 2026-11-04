@@ -5,7 +5,6 @@
 use crate::solver::CellIdx;
 use std::{
     fmt::{self, Display, Formatter},
-    marker::PhantomData,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
@@ -19,24 +18,6 @@ pub struct Point {
 }
 
 impl Point {
-    const DIRECTION_OFFSETS: [(i8, i8); 8] = [
-        // NW
-        (-1, -1),
-        // N
-        (0, -1),
-        // NE
-        (1, -1),
-        // W
-        (-1, 0),
-        // E
-        (1, 0),
-        // SW
-        (-1, 1),
-        // S
-        (0, 1),
-        // SE
-        (1, 1),
-    ];
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
     pub(super) const fn from_index(cell_idx: CellIdx, width: u32) -> Point {
@@ -58,22 +39,66 @@ impl Point {
         &self,
         directions: DirectionSet,
     ) -> impl Iterator<Item = Neighbor<Point>> {
-        NeighborIterator {
-            offset_values: Self::DIRECTION_OFFSETS,
-            apply_offset: |d, (dx, dy)| self.to_neighbor(d, dx, dy),
-            iter: directions.iter(),
-            _result: PhantomData,
-        }
-    }
-
-    fn to_neighbor(self, to: Direction, dx: i8, dy: i8) -> Neighbor<Point> {
-        Neighbor {
-            neighbor: Point {
-                x: self.x.wrapping_add_signed(dx as i32),
-                y: self.y.wrapping_add_signed(dy as i32),
+        let pt = *self;
+        DirectionSetIterator::new(directions).map(move |d| match d.index() {
+            0 => Neighbor {
+                neighbor: Point {
+                    x: pt.x - 1,
+                    y: pt.y - 1,
+                },
+                from: SE,
             },
-            from: to.reverse(),
-        }
+            1 => Neighbor {
+                neighbor: Point {
+                    x: pt.x,
+                    y: pt.y - 1,
+                },
+                from: S,
+            },
+            2 => Neighbor {
+                neighbor: Point {
+                    x: pt.x + 1,
+                    y: pt.y - 1,
+                },
+                from: SW,
+            },
+            3 => Neighbor {
+                neighbor: Point {
+                    x: pt.x - 1,
+                    y: pt.y,
+                },
+                from: E,
+            },
+            4 => Neighbor {
+                neighbor: Point {
+                    x: pt.x + 1,
+                    y: pt.y,
+                },
+                from: W,
+            },
+            5 => Neighbor {
+                neighbor: Point {
+                    x: pt.x - 1,
+                    y: pt.y + 1,
+                },
+                from: NE,
+            },
+            6 => Neighbor {
+                neighbor: Point {
+                    x: pt.x,
+                    y: pt.y + 1,
+                },
+                from: N,
+            },
+            7 => Neighbor {
+                neighbor: Point {
+                    x: pt.x + 1,
+                    y: pt.y + 1,
+                },
+                from: NW,
+            },
+            _ => unreachable!(),
+        })
     }
 }
 
@@ -81,58 +106,6 @@ impl Display for Point {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.x, self.y)
     }
-}
-
-pub(super) fn indexed_neighbor_iter(
-    center: CellIdx,
-    neighbors: DirectionSet,
-    offsets: IndexedOffsets,
-) -> impl Iterator<Item = Neighbor<CellIdx>> {
-    NeighborIterator {
-        offset_values: offsets.0,
-        apply_offset: move |to: Direction, d_idx| Neighbor {
-            neighbor: CellIdx(center.0.wrapping_add_signed(d_idx)),
-            from: to.reverse(),
-        },
-        iter: neighbors.iter(),
-        _result: PhantomData,
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub(super) struct IndexedOffsets([i32; 8]);
-
-impl IndexedOffsets {
-    pub(super) fn new(width: u32) -> IndexedOffsets {
-        // need the conversion too and from i32 to work without overflow, plus
-        // space for one extra value.
-        assert!(width < (1 << 31) - 1);
-        let width = width as i32;
-        IndexedOffsets([
-            -1 - width,
-            -width,
-            1 - width,
-            -1,
-            1,
-            -1 + width,
-            width,
-            1 + width,
-        ])
-    }
-
-    #[cfg(test)]
-    pub(super) fn width(&self) -> u32 {
-        self.0[6] as u32
-    }
-}
-
-/// An iterator yielding the [`Neighbor<Point>`]s of a [`Point`] for each direction in a [`DirectionSet`].
-#[derive(Debug, Clone, Copy)]
-pub(super) struct NeighborIterator<O, R, F> {
-    pub(super) offset_values: [O; 8],
-    pub(super) apply_offset: F,
-    pub(super) iter: DirectionSetIterator,
-    pub(super) _result: PhantomData<R>,
 }
 
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
@@ -143,30 +116,6 @@ pub struct Neighbor<T: Copy> {
     pub neighbor: T,
     /// The direction from `neighbor` back to the origin cell.
     pub from: Direction,
-}
-
-impl<O, R, F> Iterator for NeighborIterator<O, R, F>
-where
-    O: Copy,
-    R: Copy,
-    F: FnMut(Direction, O) -> R,
-{
-    type Item = R;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let d = self.iter.next()?;
-        Some((self.apply_offset)(
-            d,
-            self.offset_values[d.mask().trailing_zeros() as usize],
-        ))
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-impl<O: Copy, R: Copy, F: FnMut(Direction, O) -> R> ExactSizeIterator
-    for NeighborIterator<O, R, F>
-{
 }
 
 /// Human-readable compass abbreviations ordered by bit position (`0..8`).
@@ -250,6 +199,7 @@ impl DirectionSet {
     }
 
     /// Returns `true` if the set contains no directions.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
@@ -425,22 +375,15 @@ impl Display for DirectionSet {
 pub struct Direction(u8);
 
 impl Direction {
-    /// Returns the single-bit mask (`1 << 0..8`) identifying this direction.
     #[inline]
-    pub const fn mask(&self) -> u8 {
-        self.0
-    }
-
-    /// Returns the opposite [`Direction`] (e.g., [`NW`] $\leftrightarrow$ [`SE`]).
-    #[inline]
-    pub const fn reverse(&self) -> Direction {
-        Direction(self.0.reverse_bits())
+    pub const fn index(&self) -> u8 {
+        self.0.trailing_zeros() as u8
     }
 }
 
 impl Display for Direction {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", DIRECTION_NAMES[self.0.trailing_zeros() as usize])
+        write!(f, "{}", DIRECTION_NAMES[self.index() as usize])
     }
 }
 
@@ -520,6 +463,12 @@ impl Sub<DirectionSet> for Direction {
 #[derive(Debug, Clone, Copy)]
 pub struct DirectionSetIterator(BinaryIterator);
 
+impl DirectionSetIterator {
+    pub fn new(directions: DirectionSet) -> DirectionSetIterator {
+        DirectionSetIterator(BinaryIterator(directions.0))
+    }
+}
+
 impl Iterator for DirectionSetIterator {
     type Item = Direction;
 
@@ -574,21 +523,6 @@ mod tests {
     }
 
     #[test]
-    fn test_neighbor_iter() {
-        // use a 3x3 grid, indices going from 0..=8, center 4
-        let neighbors: Vec<_> =
-            indexed_neighbor_iter(CellIdx(4), E | S | SE, IndexedOffsets::new(3)).collect();
-        assert_eq!(
-            neighbors.iter().map(|n| n.neighbor.0).collect::<Vec<_>>(),
-            vec![5, 7, 8]
-        );
-        assert_eq!(
-            neighbors.iter().map(|n| n.from).collect::<DirectionSet>(),
-            W | N | NW
-        );
-    }
-
-    #[test]
     fn test_point_index_round_trip_and_display() {
         let width = 10;
         let p = Point { x: 4, y: 7 };
@@ -599,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn test_direction_reverse_and_display() {
+    fn test_display() {
         let expected_pairs = [
             (NW, SE, "NW", "SE"),
             (N, S, "N", "S"),
@@ -607,8 +541,6 @@ mod tests {
             (W, E, "W", "E"),
         ];
         for (d, rev, name, rev_name) in expected_pairs {
-            assert_eq!(d.reverse(), rev);
-            assert_eq!(rev.reverse(), d);
             assert_eq!(d.to_string(), name);
             assert_eq!(rev.to_string(), rev_name);
         }

@@ -3,16 +3,22 @@
 
 use std::{
     cmp::Ordering,
+    collections::VecDeque,
     fmt::{self, Display, Formatter},
+    hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
 };
 
-use crate::solver::{
-    IndexedOffsets, Metrics,
-    grid::{Direction, DirectionSet, Neighbor, Point},
-    indexed_neighbor_iter,
-    partition::PartitionId,
-    stats,
+use crate::{
+    MineField,
+    solver::{
+        Metrics,
+        grid::{
+            Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE,
+            SW, W,
+        },
+        stats,
+    },
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
@@ -215,18 +221,12 @@ impl CellValue {
     /// Returns `true` if `other` is the same "type" is this. This means that both will return the
     /// same result for [`CellValue::is_safe`], [`CellValue::is_mine`], and
     /// [`CellValue::is_unknown`]. Note: This wil return `false` if one is an inferred mine and the
-    /// other is a known mine. Same fore inferred/knows safe cells. Also Note: this wil return false
-    /// if both cells are safe, even if they have different mine count.
+    /// other is a known mine - those are not considered "different". Same fore inferred/knows safe
+    /// cells. Also Note: this wil return false if both cells are safe, even if they have different
+    /// mine count.
     #[inline]
-    pub(super) fn is_different_type(&self, other: CellValue) -> bool {
-        (self.0 ^ other.0) & Self::KNOWN_MASK != 0
-    }
-
-    /// Returns if this value and `other` are alternating types as occur during
-    /// partitioning. This means one is safe (inferred or not), while the other
-    /// is unknown (i.e. not inferred and not known).
-    pub(super) fn is_alt(&self, other: Self) -> bool {
-        (self.0 ^ other.0) & Self::KNOWN_MASK == Self::SAFE_MASK
+    pub(super) fn types_match(&self, other: CellValue) -> bool {
+        (self.0 ^ other.0) & Self::KNOWN_MASK == 0
     }
 
     /// For valid, non-inferred Safe cells, this returns the mine count.
@@ -335,26 +335,76 @@ pub(super) enum CellValueChangeType {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub(super) struct CellFlags(bool);
+pub(super) struct CellFlags(u8);
 
 impl CellFlags {
+    const PENDING_PARTITION_MASK: u8 = 0b1;
+    const SOLVED_QUEUE_MASK: u8 = 0b10;
+    const UNSOLVED_QUEUE_MASK: u8 = 0b100;
+
     pub(super) fn new() -> CellFlags {
-        CellFlags(false)
+        CellFlags(0)
     }
 
     #[inline]
-    pub(super) fn is_set(&self) -> bool {
-        self.0
+    pub(super) fn is_pending_partition(&self) -> bool {
+        self.0 & Self::PENDING_PARTITION_MASK != 0
     }
 
     #[inline]
-    pub(super) fn set(&mut self) {
-        self.0 = true
+    pub(super) fn mark_pending_partition(&mut self) {
+        self.0 |= Self::PENDING_PARTITION_MASK
     }
 
     #[inline]
-    pub(super) fn clear(&mut self) {
-        self.0 = false
+    pub(super) fn clear_pending_partition(&mut self) {
+        self.0 &= !Self::PENDING_PARTITION_MASK
+    }
+
+    #[inline]
+    pub(super) fn is_unsolved(&self) -> bool {
+        self.0 & Self::UNSOLVED_QUEUE_MASK != 0
+    }
+
+    #[inline]
+    pub(super) fn mark_unsolved(&mut self) {
+        self.0 |= Self::UNSOLVED_QUEUE_MASK
+    }
+
+    #[inline]
+    pub(super) fn clear_unsolved(&mut self) {
+        self.0 &= !Self::UNSOLVED_QUEUE_MASK;
+    }
+
+    #[inline]
+    pub(super) fn is_solved(&self) -> bool {
+        self.0 & Self::SOLVED_QUEUE_MASK != 0
+    }
+
+    #[inline]
+    pub(super) fn mark_solved(&mut self) {
+        self.0 |= Self::SOLVED_QUEUE_MASK
+    }
+
+    #[inline]
+    pub(super) fn clear_solved(&mut self) {
+        self.0 &= !Self::SOLVED_QUEUE_MASK
+    }
+}
+
+impl Display for CellFlags {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+        if self.is_pending_partition() {
+            write!(f, "PENDING_PARTITION,")?;
+        }
+        if self.is_solved() {
+            write!(f, "SOLVED,")?;
+        }
+        if self.is_unsolved() {
+            write!(f, "UNSOLVED,")?;
+        }
+        write!(f, "]")
     }
 }
 
@@ -374,8 +424,7 @@ pub(super) struct Cell {
 
     mine_neighbors: DirectionSet,
 
-    /// The partition this cell belongs to (`0` if unpartitioned).
-    partition_id: PartitionId,
+    partition_id: u16,
 
     flags: CellFlags,
 }
@@ -396,7 +445,7 @@ impl Cell {
                     neighbors,
                     unknown_neighbors: neighbors,
                     mine_neighbors: DirectionSet::new(),
-                    partition_id: PartitionId::new(),
+                    partition_id: 0,
                     flags: CellFlags::new(),
                 });
             }
@@ -419,9 +468,14 @@ impl Cell {
 
     /// Updates the cell's [`CellValue`].
     #[inline]
-    #[cfg(test)]
-    pub(super) fn set_value(&mut self, value: CellValue) {
-        self.value = value;
+    pub(super) fn partition_id(&self) -> u16 {
+        self.partition_id
+    }
+
+    /// Updates the cell's [`CellValue`].
+    #[inline]
+    pub(super) fn set_partition_id(&mut self, partition_id: u16) {
+        self.partition_id = partition_id;
     }
 
     /// Returns the mask of all valid board neighbors for this cell.
@@ -452,30 +506,8 @@ impl Cell {
 
     /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
-    pub(super) fn partition_id(&self) -> PartitionId {
-        self.partition_id
-    }
-
-    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
-    #[inline]
     pub(super) fn flags(&mut self) -> &mut CellFlags {
         &mut self.flags
-    }
-
-    /// Updates the ID of the partition this cell belongs to.
-    #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: PartitionId) {
-        self.partition_id = partition_id;
-    }
-
-    pub(super) fn alt_neighbors(&self) -> DirectionSet {
-        if self.value.is_unknown() {
-            self.safe_neighbors()
-        } else if self.value.is_safe() {
-            self.unknown_neighbors
-        } else {
-            DirectionSet::EMPTY
-        }
     }
 
     #[allow(dead_code)]
@@ -495,9 +527,15 @@ impl Cell {
         })
     }
 
+    // A fully solved cell is one with no neighbors. Note, this is distinct from a "solvable" cell,
+    // which has all of its mines accounted for, but still has unknown neighbors to be set.
+    pub(super) fn is_solved(&self) -> bool {
+        self.unknown_neighbors.len() == 0
+    }
+
     // If the cell is a clue cell that is not yet solved, and the neighbors can be inferred as
     // either a Mine or Safe...
-    pub(super) fn infer_unknown_neighbors(&self) -> Option<CellValue> {
+    pub(super) fn infer_neighbors(&self) -> Option<CellValue> {
         let unknown_count = self.unknown_neighbors().len() as i8;
 
         self.value().safe_mine_count().and_then(|mine_count| {
@@ -512,34 +550,19 @@ impl Cell {
         })
     }
 
-    pub(super) fn set_unknown(&mut self, direction: Direction) -> bool {
-        if self.unknown_neighbors.contains(direction) {
-            false
-        } else {
-            self.unknown_neighbors |= direction;
-            self.mine_neighbors -= direction;
-            true
-        }
+    pub(super) fn set_unknown(&mut self, direction: Direction) {
+        self.unknown_neighbors |= direction;
+        self.mine_neighbors -= direction;
     }
 
-    pub(super) fn set_safe(&mut self, direction: Direction) -> bool {
-        if (self.unknown_neighbors | self.mine_neighbors).contains(direction) {
-            self.unknown_neighbors -= direction;
-            self.mine_neighbors -= direction;
-            true
-        } else {
-            false
-        }
+    pub(super) fn set_safe(&mut self, direction: Direction) {
+        self.unknown_neighbors -= direction;
+        self.mine_neighbors -= direction;
     }
 
-    pub(super) fn set_mine(&mut self, direction: Direction) -> bool {
-        if self.mine_neighbors.contains(direction) {
-            false
-        } else {
-            self.unknown_neighbors -= direction;
-            self.mine_neighbors |= direction;
-            true
-        }
+    pub(super) fn set_mine(&mut self, direction: Direction) {
+        self.unknown_neighbors -= direction;
+        self.mine_neighbors |= direction;
     }
 
     /// Sets `cells[idx]` to `value` and updates the `unknown`/`mine` neighbor masks of every
@@ -548,53 +571,163 @@ impl Cell {
     ///
     /// Returns how the cell's value changed. The caller is responsible for deciding which
     /// partitions need rebuilding based on the returned [`CellValueChangeType`].
-    pub(super) fn change_value<F>(
-        cells: &mut [Cell],
+    pub(super) fn change_value(
         idx: CellIdx,
         value: CellValue,
-        offsets: IndexedOffsets,
-        metrics: &mut Metrics,
-        mut visit_function: F,
-    ) -> CellValueChangeType
-    where
-        F: FnMut(CellIdx, &mut Cell, &mut Metrics),
-    {
-        let cell = &mut cells[idx];
+        field_args: &mut FieldArgs,
+    ) -> CellValueChangeType {
+        let cell = &mut field_args.cells[idx];
+
         let prev_val = cell.value();
         let change_type = cell.value_mut().set_value(value);
 
-        if !matches!(change_type, CellValueChangeType::NoChange)
-            && prev_val.is_different_type(value)
-        {
-            let updater = if value.is_unknown() {
-                |neighbor: &mut Cell, from: Direction| neighbor.set_unknown(from)
+        let inference_breaking = match change_type {
+            CellValueChangeType::NoChange => return CellValueChangeType::NoChange,
+            CellValueChangeType::NonBreaking => false,
+            CellValueChangeType::Breaking => true,
+        };
+
+        if !cell.flags.is_pending_partition() {
+            cell.flags.mark_pending_partition();
+            if let Some(pending_partition_queue) = field_args.pending_partition_queue.as_mut() {
+                pending_partition_queue.push_back(idx);
+            }
+        }
+        Self::check_cell_solve(idx, inference_breaking, field_args);
+
+        if !prev_val.types_match(value) {
+            let mark_neighbor = if value.is_unknown() {
+                Self::mark_neighbor_unknown
             } else if value.is_mine() {
-                |neighbor: &mut Cell, from: Direction| neighbor.set_mine(from)
+                Self::mark_neighbor_mine
             } else {
-                |neighbor: &mut Cell, from: Direction| neighbor.set_safe(from)
+                Self::mark_neighbor_safe
             };
 
-            metrics.inc_neighbor_visits(cell.neighbors);
+            let neighbors = field_args.cells[idx].neighbors();
+            if let Some(metrics) = field_args.metrics.as_mut() {
+                metrics.inc_neighbor_visits(neighbors);
+            }
 
             for Neighbor {
                 neighbor: neighbor_idx,
                 from,
-            } in indexed_neighbor_iter(idx, cell.neighbors, offsets)
+            } in Cell::neighbor_iter(idx, field_args.width, neighbors)
             {
-                let neighbor = &mut cells[neighbor_idx];
-                if updater(neighbor, from) {
-                    visit_function(neighbor_idx, neighbor, metrics);
+                mark_neighbor(neighbor_idx, from, field_args);
+            }
+        }
+        change_type
+    }
+
+    fn mark_neighbor_unknown(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
+        // if the cell starts out as solved, the transition of a neighbor to unknown changes its
+        // solved state (unless it was invalid and over-mined)
+        let neighbor = &mut field_args.cells[n_idx];
+        let was_solved = neighbor.is_solved();
+        neighbor.set_unknown(from);
+        Self::check_cell_solve(n_idx, was_solved, field_args);
+    }
+
+    fn mark_neighbor_mine(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
+        // if the cell starts out as a solved given cell, the transition of a neighbor
+        // to unknown changes its solved state
+        let neighbor = &mut field_args.cells[n_idx];
+        let was_known = !neighbor.unknown_neighbors().contains(from);
+        neighbor.set_mine(from);
+        Self::check_cell_solve(n_idx, was_known, field_args);
+    }
+
+    fn mark_neighbor_safe(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
+        // if the cell starts out as a solved given cell, the transition of a neighbor
+        // to unknown changes its solved state
+        let neighbor = &mut field_args.cells[n_idx];
+        let was_known = !neighbor.unknown_neighbors().contains(from);
+        neighbor.set_safe(from);
+        Self::check_cell_solve(n_idx, was_known, field_args);
+    }
+
+    fn check_cell_solve(idx: CellIdx, inference_breaking: bool, field_args: &mut FieldArgs) {
+        let cell = field_args.cells[idx];
+        let flags = field_args.cells[idx].flags();
+        if cell.value().has_count() {
+            if inference_breaking {
+                // !safe -> !safe transition.
+                if !flags.is_unsolved() {
+                    // Possibly newly invalid. Reset inferred.
+                    if let Some(unsolved_queue) = field_args.unsolved_queue.as_mut() {
+                        unsolved_queue.push_back(idx);
+                    }
+                    flags.mark_unsolved();
+                }
+                if !flags.is_solved()
+                    && let Some(inferred_value) = cell.infer_neighbors()
+                {
+                    // newly solvable
+                    if let Some(solved_queue) = field_args.solved_queue.as_mut() {
+                        solved_queue.push_back((idx, inferred_value));
+                    }
+                    flags.mark_solved();
+                }
+            } else {
+                if !flags.is_solved()
+                    && let Some(inferred_value) = cell.infer_neighbors()
+                {
+                    if let Some(solved_queue) = field_args.solved_queue.as_mut() {
+                        solved_queue.push_back((idx, inferred_value));
+                    }
+
+                    flags.mark_solved();
                 }
             }
         }
+    }
 
-        change_type
+    pub(super) fn neighbor_iter(
+        idx: CellIdx,
+        width: u32,
+        directions: DirectionSet,
+    ) -> impl Iterator<Item = Neighbor<CellIdx>> {
+        DirectionSetIterator::new(directions).map(move |d| match d.index() {
+            0 => Neighbor {
+                neighbor: CellIdx(idx.0 - width - 1),
+                from: SE,
+            },
+            1 => Neighbor {
+                neighbor: CellIdx(idx.0 - width),
+                from: S,
+            },
+            2 => Neighbor {
+                neighbor: CellIdx(idx.0 - width + 1),
+                from: SW,
+            },
+            3 => Neighbor {
+                neighbor: CellIdx(idx.0 - 1),
+                from: E,
+            },
+            4 => Neighbor {
+                neighbor: CellIdx(idx.0 + 1),
+                from: W,
+            },
+            5 => Neighbor {
+                neighbor: CellIdx(idx.0 + width - 1),
+                from: NE,
+            },
+            6 => Neighbor {
+                neighbor: CellIdx(idx.0 + width),
+                from: N,
+            },
+            7 => Neighbor {
+                neighbor: CellIdx(idx.0 + width + 1),
+                from: NW,
+            },
+            _ => unreachable!(),
+        })
     }
 
     pub(super) fn reset(&mut self) {
         self.mine_neighbors = DirectionSet::EMPTY;
         self.unknown_neighbors = self.neighbors;
-        self.partition_id = PartitionId::new();
         self.value = CellValue::UNKNOWN;
     }
 }
@@ -604,12 +737,13 @@ impl Display for Cell {
         let spacer = if f.alternate() { "\n    " } else { " " };
         write!(
             f,
-            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}partition_id: {}",
+            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}partition_id: {},{spacer}flags: {}",
             self.value,
             self.neighbors,
             self.unknown_neighbors,
             self.mine_neighbors,
-            self.partition_id
+            self.partition_id,
+            self.flags
         )?;
         if f.alternate() {
             writeln!(f)?;
@@ -631,6 +765,83 @@ impl IndexMut<CellIdx> for [Cell] {
     #[inline]
     fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
         &mut self[index.0 as usize]
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct FieldArgs<'field> {
+    pub(super) cells: &'field mut [Cell],
+    pub(super) width: u32,
+    pub(super) next_partition_id: &'field mut u16,
+    pub(super) unsolved_queue: Option<&'field mut VecDeque<CellIdx>>,
+    pub(super) solved_queue: Option<&'field mut VecDeque<(CellIdx, CellValue)>>,
+    pub(super) pending_partition_queue: Option<&'field mut VecDeque<CellIdx>>,
+    pub(super) metrics: Option<&'field mut Metrics>,
+}
+
+impl<'field> FieldArgs<'field> {
+    pub(super) fn new(field: &'field mut MineField) -> Self {
+        FieldArgs {
+            cells: &mut field.cells,
+            width: field.width,
+            next_partition_id: &mut field.next_partition_id,
+            unsolved_queue: Some(&mut field.unsolved_queue),
+            solved_queue: Some(&mut field.solved_queue),
+            pending_partition_queue: Some(&mut field.pending_partition_queue),
+            metrics: Some(&mut field.metrics),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_basic(
+        cells: &'field mut [Cell],
+        width: u32,
+        next_partition_id: &'field mut u16,
+    ) -> Self {
+        #[allow(static_mut_refs)]
+        FieldArgs {
+            cells,
+            width,
+            next_partition_id,
+            unsolved_queue: None,
+            solved_queue: None,
+            pending_partition_queue: None,
+            metrics: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct FastNumberHasher(u32);
+
+impl Hasher for FastNumberHasher {
+    // This is called sequentially for chunks of bytes in the key
+    fn write(&mut self, _: &[u8]) {
+        unimplemented!();
+    }
+
+    fn write_u16(&mut self, i: u16) {
+        self.0 = i as u32;
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0 = i;
+    }
+
+    // Return the final computed hash value
+    fn finish(&self) -> u64 {
+        self.0 as u64
+    }
+}
+
+#[derive(Default)]
+pub(super) struct FastNumberHasherBuilder;
+
+impl BuildHasher for FastNumberHasherBuilder {
+    type Hasher = FastNumberHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        FastNumberHasher(0)
     }
 }
 
@@ -717,7 +928,7 @@ impl Ord for CellOrdering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::grid::{E, N, NE, NW, S, SE, W};
+    use crate::solver::grid::{E, N, NW, S, SE, W};
 
     #[test]
     fn test_coordinates_and_cell_idx_round_trip() {
@@ -744,7 +955,6 @@ mod tests {
         assert_eq!(pc.neighbors, E | S | SE);
         assert_eq!(pc.unknown_neighbors, E | S | SE);
         assert_eq!(pc.mine_neighbors, DirectionSet::new());
-        assert_eq!(pc.partition_id, PartitionId::new());
 
         pc.value = CellValue::for_mine_count(2);
 
@@ -752,27 +962,6 @@ mod tests {
         let alternate = format!("{pc:#}");
         assert!(compact.contains("Cell{ value: 2"));
         assert!(alternate.contains("Cell{\n    value: 2"));
-    }
-
-    #[test]
-    fn test_processed_cell_alt_neighbors_and_partition_state_reset() {
-        let grid = Cell::grid(3, 3);
-        let mut pc = grid[0];
-        pc.neighbors -= NW | N | NE | W;
-        pc.set_safe(S);
-        pc.set_mine(SE);
-
-        // Unknown cells return safe_neighbors from alt_neighbors()
-        pc.value = CellValue::UNKNOWN;
-        assert_eq!(pc.alt_neighbors(), !!S);
-
-        // Count cells return unknown_neighbors from alt_neighbors()
-        pc.value = CellValue::for_mine_count(1);
-        assert_eq!(pc.alt_neighbors(), !!E);
-
-        // Mine cells return an empty set from alt_neighbors()
-        pc.value = CellValue::MINE;
-        assert_eq!(pc.alt_neighbors(), DirectionSet::new());
     }
 
     #[test]
@@ -893,20 +1082,12 @@ mod tests {
     fn test_cell_change_value_updates_neighbor_masks() {
         // 3x1 strip, change the middle cell and watch both neighbors
         let mut cells = Cell::grid(3, 1);
-        let offsets = IndexedOffsets::new(3);
 
-        let mut visited = Vec::new();
-        let change = Cell::change_value(
-            &mut cells,
+        Cell::change_value(
             CellIdx(1),
             CellValue::MINE,
-            offsets,
-            &mut Metrics::new(),
-            |i, _, _| visited.push(i.0),
+            &mut FieldArgs::new_basic(&mut cells, 3, &mut 1),
         );
-        assert_ne!(change, CellValueChangeType::NoChange);
-        visited.sort();
-        assert_eq!(visited, vec![0, 2]);
         assert_eq!(cells[1].value(), CellValue::MINE);
         assert_eq!(cells[0].mine_neighbors(), !!E);
         assert!(cells[0].unknown_neighbors().is_empty());
@@ -915,12 +1096,9 @@ mod tests {
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
         Cell::change_value(
-            &mut cells,
             CellIdx(1),
             CellValue::for_mine_count(1),
-            offsets,
-            &mut Metrics::new(),
-            |_, _, _| {},
+            &mut FieldArgs::new_basic(&mut cells, 3, &mut 2),
         );
         assert!(cells[0].mine_neighbors().is_empty());
         assert!(cells[0].unknown_neighbors().is_empty());
@@ -928,12 +1106,9 @@ mod tests {
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
         Cell::change_value(
-            &mut cells,
             CellIdx(1),
             CellValue::UNKNOWN,
-            offsets,
-            &mut Metrics::new(),
-            |_, _, _| {},
+            &mut FieldArgs::new_basic(&mut cells, 3, &mut 3),
         );
         assert_eq!(cells[0].unknown_neighbors(), !!E);
         assert_eq!(cells[2].unknown_neighbors(), !!W);
@@ -944,14 +1119,14 @@ mod tests {
     fn test_cell_is_invalid_detects_unsatisfiable_clues() {
         // 2x1 strip [Count(2), Unknown]: needs 2 mines but only 1 unknown neighbor -> invalid
         let mut cells = Cell::grid(2, 1);
-        cells[0].set_value(CellValue::for_mine_count(2));
+        cells[0].value_mut().set_value(CellValue::for_mine_count(2));
         assert!(
             cells[0].is_invalid(),
             "needs 2 mines but only 1 unknown neighbor"
         );
 
         let mut cells = Cell::grid(2, 1);
-        cells[0].set_value(CellValue::for_mine_count(1));
+        cells[0].value_mut().set_value(CellValue::for_mine_count(1));
         assert!(!cells[0].is_invalid());
     }
 
@@ -964,7 +1139,7 @@ mod tests {
 
         // a Count(0) next to a known mine is over-satisfied
         let mut cells = Cell::grid(2, 1);
-        cells[0].set_value(CellValue::for_mine_count(0));
+        cells[0].value_mut().set_value(CellValue::for_mine_count(0));
         cells[0].set_mine(E);
         assert!(cells[0].is_invalid());
     }
@@ -975,22 +1150,22 @@ mod tests {
         let mut unknown_cell = grid[0];
         assert!(CellOrdering::from_cell(CellIdx(0), &unknown_cell).is_none());
 
-        unknown_cell.set_value(CellValue::MINE);
+        unknown_cell.value_mut().set_value(CellValue::MINE);
         assert!(CellOrdering::from_cell(CellIdx(0), &unknown_cell).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut cell_a = grid[0];
-        cell_a.set_value(CellValue::for_mine_count(2));
+        cell_a.value_mut().set_value(CellValue::for_mine_count(2));
         cell_a.set_safe(SE);
 
         // Trivial cell B: 2 available, 0 remaining (1 mine already found) -> choose(2, 0) = 1 solution, lower mine_count
         let mut cell_b = grid[1];
-        cell_b.set_value(CellValue::for_mine_count(1));
+        cell_b.value_mut().set_value(CellValue::for_mine_count(1));
         cell_b.set_mine(S);
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = grid[2];
-        cell_c.set_value(CellValue::for_mine_count(1));
+        cell_c.value_mut().set_value(CellValue::for_mine_count(1));
 
         let ord_a = CellOrdering::from_cell(CellIdx(0), &cell_a).unwrap();
         let ord_b = CellOrdering::from_cell(CellIdx(1), &cell_b).unwrap();
@@ -1008,5 +1183,19 @@ mod tests {
         assert!(ord_b > ord_a);
         // ord_a < ord_c (1 solution < 3 solutions)
         assert!(ord_a > ord_c);
+    }
+
+    #[test]
+    fn test_neighbor_iter() {
+        // use a 3x3 grid, indices going from 0..=8, center 4
+        let neighbors: Vec<_> = Cell::neighbor_iter(CellIdx(4), 3, E | S | SE).collect();
+        assert_eq!(
+            neighbors.iter().map(|n| n.neighbor.0).collect::<Vec<_>>(),
+            vec![5, 7, 8]
+        );
+        assert_eq!(
+            neighbors.iter().map(|n| n.from).collect::<DirectionSet>(),
+            W | N | NW
+        );
     }
 }

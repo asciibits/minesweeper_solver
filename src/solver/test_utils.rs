@@ -21,12 +21,11 @@
 //! - Any other character panics with `"Invalid field character"`.
 
 use crate::{
-    MineField, Partition, Point,
+    MineField, Point,
     solver::{
-        CellIdx, CellValue, IndexedOffsets,
-        cell::{UserCell, UserCellValue, cell_idx, coordinates},
+        Cell, CellIdx, CellValue, FastNumberHasherBuilder,
+        cell::{UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
-        indexed_neighbor_iter,
     },
 };
 
@@ -164,6 +163,19 @@ impl FieldBuilder {
         Self::from_vec(width, height, field)
     }
 
+    pub(super) fn from_cells(
+        width: u32,
+        height: u32,
+        mines: impl IntoIterator<Item = CellIdx>,
+    ) -> Self {
+        let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
+        for idx in mines {
+            field[idx] = MineOrCount::MINE;
+        }
+
+        Self::from_vec(width, height, field)
+    }
+
     /// Creates a [`FieldBuilder`] from an ASCII `spec`.
     ///
     /// The `spec` can be formatted in one of two ways:
@@ -252,20 +264,21 @@ impl FieldBuilder {
         let (width, height, cell_iter) = MineField::cells_and_size_from_spec(mine_spec);
         let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
         let mut user_checks = Vec::new();
-        for UserCell { point, value } in cell_iter {
-            match value {
-                UserCellValue::Mine => field[cell_idx(point, width)] = MineOrCount::MINE,
-                UserCellValue::Safe(n) => user_checks.push((point, n)),
-                UserCellValue::Unknown => {}
+        for (idx, value) in cell_iter {
+            if value.is_mine() {
+                field[idx] = MineOrCount::MINE;
+            } else if value.has_count() {
+                user_checks.push((idx, value.mine_count()));
             }
         }
         let mut builder = Self::from_vec(width, height, field);
-        for (point, expected) in user_checks {
-            let actual = builder.mines[cell_idx(point, width)];
+        for (idx, expected) in user_checks {
+            let actual = builder.mines[idx];
             assert!(
                 actual.0 == expected as i8,
-                "Invalid user provided value: {expected} at coordinates {point}. \
+                "Invalid user provided value: {expected} at coordinates {}. \
                  It does not reflect the actual mine count {}",
+                coordinates(idx, width),
                 actual.count()
             );
         }
@@ -386,7 +399,6 @@ impl FieldBuilder {
     fn from_vec(width: u32, height: u32, mut field: Vec<MineOrCount>) -> Self {
         assert_eq!(width as usize * height as usize, field.len());
 
-        let offsets = IndexedOffsets::new(width);
         let mut mine_count = 0;
 
         for idx in 0..field.len() {
@@ -394,11 +406,9 @@ impl FieldBuilder {
                 let idx = CellIdx(idx as u32);
                 mine_count += 1;
                 let pt = coordinates(idx, width);
-                for Neighbor { neighbor, .. } in indexed_neighbor_iter(
-                    idx,
-                    DirectionSet::all_neighbors(pt, width, height),
-                    offsets,
-                ) {
+                for Neighbor { neighbor, .. } in
+                    Cell::neighbor_iter(idx, width, DirectionSet::all_neighbors(pt, width, height))
+                {
                     if !field[neighbor].is_mine() {
                         field[neighbor] = MineOrCount(field[neighbor].count() + 1);
                     }
@@ -422,14 +432,6 @@ impl FieldBuilder {
         self.field
     }
 
-    /// Converts the ground-truth `mines` entry at `idx` into a [`UserCellValue`].
-    fn cell_value(&self, idx: CellIdx) -> UserCellValue {
-        match self.mines[idx] {
-            MineOrCount::MINE => UserCellValue::Mine,
-            MineOrCount(n) => UserCellValue::Safe(n as u8),
-        }
-    }
-
     /// Reveals the ground-truth [`CellValue`](crate::CellValue)s for the specified `points` on the underlying [`MineField`].
     pub(super) fn expose_cells(&mut self, points: impl IntoIterator<Item = CellIdx>) -> &mut Self {
         self.field
@@ -447,7 +449,8 @@ impl FieldBuilder {
     /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
     /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
     pub(super) fn expand_cells(&mut self, ids: impl IntoIterator<Item = CellIdx>) -> &mut Self {
-        let mut all_ids = HashSet::with_capacity(self.mines.len());
+        let mut all_ids =
+            HashSet::with_capacity_and_hasher(self.mines.len(), FastNumberHasherBuilder);
         let mut zero_queue = Vec::with_capacity(self.mines.len());
 
         for idx in ids {
@@ -459,7 +462,7 @@ impl FieldBuilder {
         while let Some(idx) = zero_queue.pop() {
             let cell = self.field.cells[idx];
             for Neighbor { neighbor, .. } in
-                indexed_neighbor_iter(idx, cell.neighbors(), self.field.indexed_offsets)
+                Cell::neighbor_iter(idx, self.field.width, cell.neighbors())
             {
                 if all_ids.insert(neighbor) && self.mines[neighbor].count() == 0 {
                     zero_queue.push(neighbor);
@@ -478,25 +481,21 @@ impl FieldBuilder {
     }
 
     // Selects a random member of a live partition to expose.
-    pub fn hint(
+    #[cfg(test)]
+    pub(super) fn hint(
         &self,
-        partition: &Partition,
+        members: &Vec<CellIdx>,
         mut idx_selector: impl FnMut(usize) -> usize,
     ) -> Option<Point> {
-        let members: Vec<_> = partition
-            .members()
+        let members: Vec<_> = members
             .iter()
-            .copied()
-            .filter(|&i| {
-                let c = self.field.cells[i];
-                c.value().is_unknown() && matches!(self.cell_value(i), UserCellValue::Safe(_))
-            })
+            .filter_map(|&i| self.field.cells[i].value().is_unknown().then_some(i))
             .collect();
         if members.is_empty() {
             return None;
         }
         let pt = coordinates(members[idx_selector(members.len())], self.field.width);
-        Some(pt)
+        Some(dbg!(pt))
     }
 }
 
@@ -527,13 +526,12 @@ mod tests {
     use super::*;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use crate::solver::{Metrics, partition::PartitionId};
+    use crate::solver::{DetailMineField, FieldArgs, Metrics, partition};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
         seq::{IteratorRandom, SliceRandom},
     };
-    use std::collections::HashMap;
 
     fn shuffle(rng: &mut impl Rng) -> impl FnMut(&mut [i8]) {
         |cells| cells.shuffle(rng)
@@ -667,7 +665,13 @@ mod tests {
                 let pt = Point { x, y };
                 if pt == (Point { x: 3, y: 2 }) {
                     assert_eq!(field.cell(pt).value, UserCellValue::Unknown);
-                    assert_eq!(field.inferred_mines(), vec![pt]);
+                    assert_eq!(
+                        field
+                            .recent_inferred_mine_cells()
+                            .map(|i| coordinates(i, 4))
+                            .collect::<Vec<Point>>(),
+                        vec![pt]
+                    );
                 } else {
                     assert!(matches!(field.cell(pt).value, UserCellValue::Safe(_)));
                 }
@@ -842,28 +846,17 @@ mod tests {
     #[allow(dead_code)]
     fn validate_incremental_field(inc_field: &MineField, validation_metrics: &mut Metrics) {
         let fresh_field = inc_field.clone();
-        validation_metrics.tally_game(&fresh_field);
-
-        let mut id_mapping = HashMap::with_capacity(10);
+        validation_metrics.tally_game(&fresh_field.metrics);
 
         // validate cells are identical, aside from a partition_id remapping
-        for ((_idx, mut inc_cell), fresh_cell) in inc_field
+        for ((_idx, inc_cell), fresh_cell) in inc_field
             .cells
             .iter()
             .copied()
             .enumerate()
             .zip(fresh_field.cells.iter().copied())
         {
-            let inc_partition_id = inc_cell.partition_id();
-            let (fresh_partition_id, _) = id_mapping
-                .entry(inc_cell.partition_id())
-                .and_modify(|e: &mut (PartitionId, u32)| e.1 += 1)
-                .or_insert((fresh_cell.partition_id(), 1));
-            let fresh_partition_id = *fresh_partition_id;
-            inc_cell.set_partition_id(fresh_partition_id);
-            if inc_cell != fresh_cell
-                || fresh_partition_id.is_partitioned() != inc_partition_id.is_partitioned()
-            {
+            if inc_cell != fresh_cell {
                 #[cfg(debug_assertions)]
                 {
                     eprintln!("Incremental:");
@@ -871,23 +864,7 @@ mod tests {
                     eprintln!("Fresh:");
                     ColoredMineField::eprintln(&fresh_field);
                 }
-                panic!(
-                    "Cells don't match: {inc_cell}, {fresh_cell}, old partition_id: {inc_partition_id}"
-                );
-            }
-        }
-
-        for (inc_partition_id, (fresh_partition_id, count)) in id_mapping {
-            assert_eq!(
-                inc_partition_id.is_partitioned(),
-                fresh_partition_id.is_partitioned()
-            );
-            if inc_partition_id.is_partitioned() {
-                let inc_partition = inc_field.partition_cache.get(inc_partition_id).unwrap();
-                let fresh_partition = fresh_field.partition_cache.get(fresh_partition_id).unwrap();
-
-                assert_eq!(inc_partition.len(), count as usize);
-                assert_eq!(fresh_partition.len(), count as usize);
+                panic!("Cells don't match: {inc_cell}, {fresh_cell}");
             }
         }
     }
@@ -897,22 +874,21 @@ mod tests {
     fn test_multiple_random_incremental_play_through() {
         let rng = &mut rng();
 
-        let mut metrics = Metrics::new();
-        let mut validation_metrics = Metrics::new();
+        let mut metrics = Metrics::default();
+        let mut validation_metrics = Metrics::default();
 
-        // let width = 30;
-        // let height = 16;
-        // let mine_count = 99;
-
-        let count = 130;
-        let width = 30;
-        let height = 24;
-        let mine_count = 130;
+        let count = 1;
+        // let width = 8;
+        // let height = 5;
+        // let mine_count = 7;
+        let width = 7;
+        let height = 5;
+        let mine_count = 5;
 
         for _seed in 0..count {
             // Uncomment below for some determinism
             let seed = rng.next_u64(); // use _seed for determinism
-            // let seed = 1270114618373538810; // use _seed for determinism
+            let seed = 6024929086430166544; // use _seed for determinism
             eprintln!("Using random seed: {seed}");
             test_single_random_incremental_play_through(
                 width,
@@ -924,16 +900,8 @@ mod tests {
             );
         }
 
-        eprintln!("For incremental:\n{metrics:#}");
-        eprintln!("For validation:\n{validation_metrics:#}");
-
-        // eprintln!(
-        //     "Played {count} {width}x{height}@{mine_count} games, averaging {} neighbor scans and {} partition scans. Average partitions created: {}. Max partitions: {}",
-        //     metrics.neighbor_visits() / count,
-        //     metrics.partition_visits() / count,
-        //     metrics.partitions_created() / count,
-        //     metrics.max_partitions()
-        // );
+        println!("For incremental:\n{metrics:#}");
+        println!("For validation:\n{validation_metrics:#}");
     }
 
     fn test_single_random_incremental_play_through(
@@ -959,29 +927,26 @@ mod tests {
 
         let mut loop_count = 0;
         loop {
-            let partition = builder.field.partition_cache.partitions().choose(rng);
-            if let Some(partition_id) = partition
-                && let Some(partition) = builder.field.partition_cache.get(partition_id)
-            {
-                let safe: Vec<_> = partition
-                    .members()
+            ColoredMineField::println(&builder.field);
+            DetailMineField::eprintln(&builder.field);
+            if let Some(pt) = builder
+                .field
+                .recent_inferred_safe_cells()
+                .choose(rng)
+                .map(|i| coordinates(i, width))
+                .or(builder
+                    .field
+                    .partitions
                     .iter()
-                    .copied()
-                    .filter(|&i| {
-                        let value = builder.field.cells[i].value();
-                        value.is_inferred() && value.is_safe()
+                    .map(|(&idx, &len)| (idx, len))
+                    .choose(rng)
+                    .map(|(idx, len)| {
+                        partition::members(idx, len, &mut FieldArgs::new(&mut builder.field))
                     })
-                    .collect();
-
-                if safe.is_empty() {
-                    if let Some(pt) = builder.hint(partition, selector(rng)) {
-                        builder.expand_points([pt]);
-                    } else {
-                        break;
-                    };
-                } else {
-                    builder.expand_cells(safe);
-                }
+                    .map(|m| builder.hint(&m, selector(rng)))
+                    .flatten())
+            {
+                builder.expand_points([pt]);
             } else {
                 break;
             }
@@ -993,8 +958,9 @@ mod tests {
             if loop_count >= width * height {
                 panic!("Loop count exceeded limit: {loop_count}");
             }
-            // ColoredMineField::eprintln(&builder.field);
         }
-        metrics.tally_game(&builder.field);
+        ColoredMineField::println(&builder.field);
+        DetailMineField::eprintln(&builder.field);
+        metrics.tally_game(&builder.field.metrics);
     }
 }

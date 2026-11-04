@@ -13,6 +13,5 @@ pub use solver::{
         UserCellWithInference as CellWithInference,
     },
     grid::Point,
-    partition::Partition,
     test_utils::FieldBuilder,
 };

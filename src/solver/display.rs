@@ -1,9 +1,6 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::{
-    cell::{InferredValue, UserCellValue, UserCellWithInference},
-    partition::PartitionId,
-};
+use crate::solver::cell::{InferredValue, UserCellValue, UserCellWithInference};
 
 use super::MineField;
 use colored::Colorize;
@@ -19,6 +16,12 @@ impl<'a> ColoredMineField<'a> {
     #[allow(dead_code)]
     pub(super) fn eprintln(field: &'a MineField) {
         eprintln!("{}", ColoredMineField(field));
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(super) fn println(field: &'a MineField) {
+        println!("{}", ColoredMineField(field));
     }
 }
 
@@ -37,14 +40,12 @@ impl Display for ColoredMineField<'_> {
         }
 
         // get the current partitions
-        let partition_ids: Vec<_> = self.partition_cache.partitions().collect();
-
         print_pre_header(self, f)?;
         print_header(self, f)?;
-        print_row(self, 0, f, &partition_ids)?;
+        print_row(self, 0, f)?;
         for row in 1..self.height {
             print_separator(self, f)?;
-            print_row(self, row, f, &partition_ids)?;
+            print_row(self, row, f)?;
         }
         print_footer(self, f)?;
 
@@ -53,12 +54,7 @@ impl Display for ColoredMineField<'_> {
 }
 
 /// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
-fn print_row(
-    field: &MineField,
-    row: u32,
-    f: &mut Formatter<'_>,
-    partition_ids: &[PartitionId],
-) -> fmt::Result {
+fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
     if field.width == 0 {
         return Ok(());
     }
@@ -101,16 +97,16 @@ fn print_row(
             },
         };
 
-        let printable = if let Ok(pid) = partition_ids.binary_search(&cell.partition_id()) {
-            match pid % 3 {
-                0 => printable.bold().on_yellow(),
-                1 => printable.bold().on_magenta(),
-                2 => printable.bold().on_white(),
-                _ => unreachable!(),
-            }
-        } else {
-            printable
-        };
+        // let printable = if let Ok(pid) = partition_ids.binary_search(&cell.partition_id()) {
+        //     match pid % 3 {
+        //         0 => printable.bold().on_yellow(),
+        //         1 => printable.bold().on_magenta(),
+        //         2 => printable.bold().on_white(),
+        //         _ => unreachable!(),
+        //     }
+        // } else {
+        //     printable
+        // };
 
         write!(f, "{printable}")?;
         write!(f, " ")?;
