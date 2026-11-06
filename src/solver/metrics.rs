@@ -1,6 +1,9 @@
+#[cfg(any(debug_assertions, test))]
+use std::cmp;
+use std::fmt;
 use std::fmt::Display;
+#[cfg(any(debug_assertions, test))]
 use std::time::{Duration, Instant};
-use std::{cmp, fmt};
 
 use crate::solver::grid::DirectionSet;
 
@@ -51,7 +54,7 @@ impl Metrics {
         self.max_partitions
     }
     pub(super) fn set_max_partitions(&mut self, maybe_max: usize) {
-        self.max_partitions = cmp::max(self.max_partitions, maybe_max as usize);
+        self.max_partitions = cmp::max(self.max_partitions, maybe_max);
     }
 
     pub(super) fn max_partition_size(&self) -> usize {
@@ -236,88 +239,39 @@ pub(super) struct Metrics;
 #[cfg(not(any(debug_assertions, test)))]
 impl Metrics {
     #[inline(always)]
-    pub(super) fn games_played(&self) -> usize {
-        0
-    }
-
-    #[inline(always)]
-    pub(super) fn tally_game(&mut self, other: &Metrics) {}
-
-    #[inline(always)]
-    pub(super) fn solve_passes(&self) -> usize {
-        0
-    }
-    #[inline(always)]
     pub(super) fn inc_solve_passes(&mut self) {}
 
     #[inline(always)]
-    pub(super) fn max_partitions(&self) -> usize {
-        0
-    }
-    #[inline(always)]
-    pub(super) fn set_max_partitions(&mut self, maybe_max: usize) {}
+    pub(super) fn set_max_partitions(&mut self, _maybe_max: usize) {}
 
     #[inline(always)]
-    pub(super) fn max_partition_size(&self) -> usize {
-        0
-    }
-    #[inline(always)]
-    pub(super) fn set_max_partition_size(&mut self, maybe_max: usize) {}
+    pub(super) fn set_max_partition_size(&mut self, _maybe_max: usize) {}
 
-    #[inline(always)]
-    pub(super) fn partitions_created(&self) -> usize {
-        0
-    }
     #[inline(always)]
     pub(super) fn inc_partitions_created(&mut self) {}
 
     #[inline(always)]
-    pub(super) fn neighbor_visits(&self) -> usize {
-        0
-    }
-    #[inline(always)]
-    pub(super) fn inc_neighbor_visits(&mut self, directions: DirectionSet) {}
+    pub(super) fn inc_neighbor_visits(&mut self, _directions: DirectionSet) {}
 
-    #[inline(always)]
-    pub(super) fn indexing_duration(&self) -> Duration {
-        Duration::ZERO
-    }
     #[inline(always)]
     pub(super) fn inc_indexing_duration(&mut self) {}
 
     #[inline(always)]
-    pub(super) fn unsolved_duration(&self) -> Duration {
-        Duration::ZERO
-    }
-    #[inline(always)]
     pub(super) fn inc_unsolved_duration(&mut self) {}
 
     #[inline(always)]
-    pub(super) fn basic_solve_duration(&self) -> Duration {
-        Duration::ZERO
-    }
-    #[inline(always)]
     pub(super) fn inc_basic_solve_duration(&mut self) {}
 
-    #[inline(always)]
-    pub(super) fn partition_duration(&self) -> Duration {
-        Duration::ZERO
-    }
     #[inline(always)]
     pub(super) fn inc_partition_duration(&mut self) {}
 
     #[inline(always)]
     pub(super) fn mark_now(&mut self) {}
-
-    #[inline(always)]
-    pub(super) fn total_duration(&self) -> Duration {
-        Duration::ZERO
-    }
 }
 
 #[cfg(not(any(debug_assertions, test)))]
 impl Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!("Metrics not available in release mode")
+        write!(f, "Metrics not available in release mode")
     }
 }

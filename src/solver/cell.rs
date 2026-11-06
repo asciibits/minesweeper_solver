@@ -172,7 +172,7 @@ impl CellValue {
     /// - [`CellValueChangeType::NonBreaking`]: previous inferences remain valid.
     /// - [`CellValueChangeType::Breaking`]: previous inferences may be invalid, so affected
     ///   partitions must be reset and re-solved.
-    pub(super) fn set_value(&mut self, value: CellValue) -> CellValueChangeType {
+    fn set_value(&mut self, value: CellValue) -> CellValueChangeType {
         if *self == value {
             return CellValueChangeType::NoChange;
         }
@@ -522,7 +522,7 @@ impl Cell {
         let mine_neighbors = self.mine_neighbors.len() as i8;
         let unknown_neighbors = self.unknown_neighbors.len() as i8;
         self.value().safe_mine_count().is_some_and(|mine_count| {
-            let mines_remaining = mine_count as i8 - mine_neighbors as i8;
+            let mines_remaining = mine_count as i8 - mine_neighbors;
             mines_remaining < 0 || mines_remaining > unknown_neighbors
         })
     }

@@ -163,19 +163,6 @@ impl FieldBuilder {
         Self::from_vec(width, height, field)
     }
 
-    pub(super) fn from_cells(
-        width: u32,
-        height: u32,
-        mines: impl IntoIterator<Item = CellIdx>,
-    ) -> Self {
-        let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
-        for idx in mines {
-            field[idx] = MineOrCount::MINE;
-        }
-
-        Self::from_vec(width, height, field)
-    }
-
     /// Creates a [`FieldBuilder`] from an ASCII `spec`.
     ///
     /// The `spec` can be formatted in one of two ways:
@@ -486,16 +473,13 @@ impl FieldBuilder {
         &self,
         members: &Vec<CellIdx>,
         mut idx_selector: impl FnMut(usize) -> usize,
-    ) -> Option<Point> {
+    ) -> Option<CellIdx> {
         let members: Vec<_> = members
             .iter()
+            .filter(|&i| self.mines[i.0 as usize] != MineOrCount::MINE)
             .filter_map(|&i| self.field.cells[i].value().is_unknown().then_some(i))
             .collect();
-        if members.is_empty() {
-            return None;
-        }
-        let pt = coordinates(members[idx_selector(members.len())], self.field.width);
-        Some(dbg!(pt))
+        (!members.is_empty()).then_some(members[idx_selector(members.len())])
     }
 }
 
@@ -526,7 +510,7 @@ mod tests {
     use super::*;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use crate::solver::{DetailMineField, FieldArgs, Metrics, partition};
+    use crate::solver::{FieldArgs, Metrics};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -877,18 +861,14 @@ mod tests {
         let mut metrics = Metrics::default();
         let mut validation_metrics = Metrics::default();
 
-        let count = 1;
-        // let width = 8;
-        // let height = 5;
-        // let mine_count = 7;
-        let width = 7;
-        let height = 5;
-        let mine_count = 5;
+        let count = 100;
+        let width = 30;
+        let height = 24;
+        let mine_count = 130;
 
         for _seed in 0..count {
             // Uncomment below for some determinism
             let seed = rng.next_u64(); // use _seed for determinism
-            let seed = 6024929086430166544; // use _seed for determinism
             eprintln!("Using random seed: {seed}");
             test_single_random_incremental_play_through(
                 width,
@@ -927,28 +907,53 @@ mod tests {
 
         let mut loop_count = 0;
         loop {
-            ColoredMineField::println(&builder.field);
-            DetailMineField::eprintln(&builder.field);
-            if let Some(pt) = builder
-                .field
-                .recent_inferred_safe_cells()
-                .choose(rng)
-                .map(|i| coordinates(i, width))
-                .or(builder
+            // DetailMineField::eprintln(&builder.field);
+            // ColoredMineField::println(&builder.field);
+            let inferred: Vec<_> = builder.field.recent_inferred_safe_cells().collect();
+            if inferred.is_empty() {
+                let partition = builder
                     .field
                     .partitions
                     .iter()
                     .map(|(&idx, &len)| (idx, len))
-                    .choose(rng)
-                    .map(|(idx, len)| {
-                        partition::members(idx, len, &mut FieldArgs::new(&mut builder.field))
-                    })
-                    .map(|m| builder.hint(&m, selector(rng)))
-                    .flatten())
-            {
-                builder.expand_points([pt]);
+                    .choose(rng);
+                if let Some((member, len)) = partition {
+                    let members =
+                        MineField::members(member, len, &mut FieldArgs::new(&mut builder.field));
+                    let idx = builder.hint(&members, selector(rng)).expect(
+                        format!(
+                            "Didn't get a hint from members: {:?}",
+                            members
+                                .iter()
+                                .map(|i| i.0.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                        .as_str(),
+                    );
+                    if builder.field.cells[idx].value() != CellValue::UNKNOWN {
+                        eprintln!(
+                            "Members: [{:?}]",
+                            members
+                                .iter()
+                                .map(|i| i.0.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
+                        eprintln!("Hinted member is not UNKNOWN: {idx}");
+                        panic!();
+                    }
+                    assert_eq!(builder.field.cells[idx].value(), CellValue::UNKNOWN);
+                    builder.expand_cells([idx]);
+                    assert_ne!(builder.field.cells[idx].value(), CellValue::UNKNOWN);
+                } else {
+                    break;
+                }
             } else {
-                break;
+                for &i in inferred.iter() {
+                    assert_eq!(builder.field.cells[i].value(), CellValue::INFERRED_SAFE);
+                }
+                builder.expand_cells(inferred);
             }
 
             // compare against a fresh (non incremental) MineField
@@ -959,8 +964,6 @@ mod tests {
                 panic!("Loop count exceeded limit: {loop_count}");
             }
         }
-        ColoredMineField::println(&builder.field);
-        DetailMineField::eprintln(&builder.field);
         metrics.tally_game(&builder.field.metrics);
     }
 }
