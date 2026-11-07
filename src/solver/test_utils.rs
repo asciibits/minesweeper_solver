@@ -3,7 +3,7 @@
 //!
 //! # Specification Format
 //!
-//! [`MineField::create_minefield`], [`MineField::update_minefield`], and [`FieldBuilder::from_spec`] accept an iterator
+//! [`MineField::create`], [`MineField::update`], and [`FieldBuilder::from_spec`] accept an iterator
 //! of string slices representing rows of the board (top-to-bottom, with `y = 0` first and `x = 0`
 //! leftmost). Strings containing embedded newline (`\n`) characters are automatically split into
 //! separate rows.
@@ -42,8 +42,8 @@ use std::{
 /// Unlike [`MineField::create`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
 /// (`mines`)—computing the exact adjacent mine count for every non-mine cell—while keeping
-/// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until [`expose_cells`](Self::expose_cells)
-/// or [`expand_cells`](Self::expand_cells) is called.
+/// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until `expose_cells`
+/// or `expand_cells` is called.
 ///
 /// # Examples
 ///
@@ -171,7 +171,7 @@ impl FieldBuilder {
     ///    Contains only the mine layout (`'*'` for mines, `'.'` for safe cells, or optional verified
     ///    clue digits `'0'..='8'`). True neighbor mine counts are computed for all non-mine cells,
     ///    and all cells in the underlying [`MineField`] start as [`CellValue::Unknown`](crate::CellValue::Unknown)
-    ///    until revealed with [`expose_cells`](Self::expose_cells) or [`expand_cells`](Self::expand_cells).
+    ///    until revealed with `expose_cells` or `expand_cells`.
     ///
     /// 2. **Two-part field spec (ground truth and field state)**:
     ///    Consists of two field specs separated by a single line containing one contiguous set of
@@ -304,7 +304,7 @@ impl FieldBuilder {
     /// Creates a [`FieldBuilder`] of dimensions `width` × `height` with `mine_count` randomly placed mines,
     /// guaranteeing that `zero_cell` and all of its neighbors are mine-free (so `zero_cell` has count `0`).
     ///
-    /// Like [`FieldBuilder::random`], the `shuffle` closure permutes the slice of available (non-reserved)
+    /// Like `FieldBuilder::random`, the `shuffle` closure permutes the slice of available (non-reserved)
     /// cells so callers can supply their own random number generator.
     ///
     /// # Examples
@@ -471,7 +471,7 @@ impl FieldBuilder {
     #[cfg(test)]
     pub(super) fn hint(
         &self,
-        members: &Vec<CellIdx>,
+        members: &[CellIdx],
         mut idx_selector: impl FnMut(usize) -> usize,
     ) -> Option<CellIdx> {
         let members: Vec<_> = members
@@ -827,9 +827,8 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
     fn validate_incremental_field(inc_field: &MineField, validation_metrics: &mut Metrics) {
-        let fresh_field = inc_field.clone();
+        let fresh_field = inc_field.rebuild_from_scratch();
         validation_metrics.tally_game(&fresh_field.metrics);
 
         // validate cells are identical, aside from a partition_id remapping
@@ -920,8 +919,8 @@ mod tests {
                 if let Some((member, len)) = partition {
                     let members =
                         MineField::members(member, len, &mut FieldArgs::new(&mut builder.field));
-                    let idx = builder.hint(&members, selector(rng)).expect(
-                        format!(
+                    let idx = builder.hint(&members, selector(rng)).unwrap_or_else(|| {
+                        panic!(
                             "Didn't get a hint from members: {:?}",
                             members
                                 .iter()
@@ -929,8 +928,7 @@ mod tests {
                                 .collect::<Vec<_>>()
                                 .join(",")
                         )
-                        .as_str(),
-                    );
+                    });
                     if builder.field.cells[idx].value() != CellValue::UNKNOWN {
                         eprintln!(
                             "Members: [{:?}]",

@@ -5,6 +5,7 @@ use crate::solver::cell::{InferredValue, UserCellValue, UserCellWithInference};
 use super::MineField;
 use colored::Colorize;
 use std::{
+    collections::HashMap,
     fmt::{self, Display, Formatter},
     ops::Deref,
 };
@@ -97,16 +98,24 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             },
         };
 
-        // let printable = if let Ok(pid) = partition_ids.binary_search(&cell.partition_id()) {
-        //     match pid % 3 {
-        //         0 => printable.bold().on_yellow(),
-        //         1 => printable.bold().on_magenta(),
-        //         2 => printable.bold().on_white(),
-        //         _ => unreachable!(),
-        //     }
-        // } else {
-        //     printable
-        // };
+        let partition_ids: HashMap<u16, usize> = field
+            .partitions
+            .keys()
+            .copied()
+            .map(|i| field.cells[i].partition_id())
+            .enumerate()
+            .map(|(i, pid)| (pid, i))
+            .collect();
+        let printable = if let Some(&i) = partition_ids.get(&cell.partition_id()) {
+            match i % 3 {
+                0 => printable.bold().on_yellow(),
+                1 => printable.bold().on_magenta(),
+                2 => printable.bold().on_white(),
+                _ => unreachable!(),
+            }
+        } else {
+            printable
+        };
 
         write!(f, "{printable}")?;
         write!(f, " ")?;

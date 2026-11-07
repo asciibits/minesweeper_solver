@@ -3,7 +3,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
@@ -466,13 +466,20 @@ impl Cell {
         &mut self.value
     }
 
-    /// Updates the cell's [`CellValue`].
+    /// Sets the cell's [`CellValue`].
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn set_value(&mut self, value: CellValue) {
+        self.value = value;
+    }
+
+    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
     pub(super) fn partition_id(&self) -> u16 {
         self.partition_id
     }
 
-    /// Updates the cell's [`CellValue`].
+    /// Sets the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
     pub(super) fn set_partition_id(&mut self, partition_id: u16) {
         self.partition_id = partition_id;
@@ -504,7 +511,7 @@ impl Cell {
         self.mine_neighbors
     }
 
-    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
+    /// Returns mutable reference to the cell's status flags.
     #[inline]
     pub(super) fn flags(&mut self) -> &mut CellFlags {
         &mut self.flags
@@ -530,7 +537,7 @@ impl Cell {
     // A fully solved cell is one with no neighbors. Note, this is distinct from a "solvable" cell,
     // which has all of its mines accounted for, but still has unknown neighbors to be set.
     pub(super) fn is_solved(&self) -> bool {
-        self.unknown_neighbors.len() == 0
+        self.unknown_neighbors.is_empty()
     }
 
     // If the cell is a clue cell that is not yet solved, and the neighbors can be inferred as
@@ -589,9 +596,7 @@ impl Cell {
 
         if !cell.flags.is_pending_partition() {
             cell.flags.mark_pending_partition();
-            if let Some(pending_partition_queue) = field_args.pending_partition_queue.as_mut() {
-                pending_partition_queue.push_back(idx);
-            }
+            field_args.pending_partition_queue.push_back(idx);
         }
         Self::check_cell_solve(idx, inference_breaking, field_args);
 
@@ -605,9 +610,7 @@ impl Cell {
             };
 
             let neighbors = field_args.cells[idx].neighbors();
-            if let Some(metrics) = field_args.metrics.as_mut() {
-                metrics.inc_neighbor_visits(neighbors);
-            }
+            field_args.metrics.inc_neighbor_visits(neighbors);
 
             for Neighbor {
                 neighbor: neighbor_idx,
@@ -627,6 +630,22 @@ impl Cell {
         let was_solved = neighbor.is_solved();
         neighbor.set_unknown(from);
         Self::check_cell_solve(n_idx, was_solved, field_args);
+
+        // When a clue neighbor reverts to unknown, any other clue cells sharing this unknown
+        // cell may have had their partition split and need to be repartitioned.
+        if field_args.cells[n_idx].value().is_unknown() {
+            let safe_neighbors = field_args.cells[n_idx].safe_neighbors();
+            for Neighbor {
+                neighbor: clue_idx, ..
+            } in Cell::neighbor_iter(n_idx, field_args.width, safe_neighbors)
+            {
+                let clue_cell = &mut field_args.cells[clue_idx];
+                if clue_cell.value().has_count() && !clue_cell.flags().is_pending_partition() {
+                    clue_cell.flags().mark_pending_partition();
+                    field_args.pending_partition_queue.push_back(clue_idx);
+                }
+            }
+        }
     }
 
     fn mark_neighbor_mine(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
@@ -650,35 +669,21 @@ impl Cell {
     fn check_cell_solve(idx: CellIdx, inference_breaking: bool, field_args: &mut FieldArgs) {
         let cell = field_args.cells[idx];
         let flags = field_args.cells[idx].flags();
+        if inference_breaking && !flags.is_unsolved() {
+            // Inferences attached to this cell's partition may be invalidated. Reset inferred.
+            field_args.unsolved_queue.push_back(idx);
+            flags.mark_unsolved();
+        }
         if cell.value().has_count() {
-            if inference_breaking {
-                // !safe -> !safe transition.
-                if !flags.is_unsolved() {
-                    // Possibly newly invalid. Reset inferred.
-                    if let Some(unsolved_queue) = field_args.unsolved_queue.as_mut() {
-                        unsolved_queue.push_back(idx);
-                    }
-                    flags.mark_unsolved();
-                }
-                if !flags.is_solved()
-                    && let Some(inferred_value) = cell.infer_neighbors()
-                {
-                    // newly solvable
-                    if let Some(solved_queue) = field_args.solved_queue.as_mut() {
-                        solved_queue.push_back((idx, inferred_value));
-                    }
-                    flags.mark_solved();
-                }
-            } else {
-                if !flags.is_solved()
-                    && let Some(inferred_value) = cell.infer_neighbors()
-                {
-                    if let Some(solved_queue) = field_args.solved_queue.as_mut() {
-                        solved_queue.push_back((idx, inferred_value));
-                    }
-
-                    flags.mark_solved();
-                }
+            if !flags.is_pending_partition() {
+                flags.mark_pending_partition();
+                field_args.pending_partition_queue.push_back(idx);
+            }
+            if !flags.is_solved()
+                && let Some(inferred_value) = cell.infer_neighbors()
+            {
+                field_args.solved_queue.push_back((idx, inferred_value));
+                flags.mark_solved();
             }
         }
     }
@@ -725,6 +730,7 @@ impl Cell {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.mine_neighbors = DirectionSet::EMPTY;
         self.unknown_neighbors = self.neighbors;
@@ -773,10 +779,11 @@ pub(super) struct FieldArgs<'field> {
     pub(super) cells: &'field mut [Cell],
     pub(super) width: u32,
     pub(super) next_partition_id: &'field mut u16,
-    pub(super) unsolved_queue: Option<&'field mut VecDeque<CellIdx>>,
-    pub(super) solved_queue: Option<&'field mut VecDeque<(CellIdx, CellValue)>>,
-    pub(super) pending_partition_queue: Option<&'field mut VecDeque<CellIdx>>,
-    pub(super) metrics: Option<&'field mut Metrics>,
+    pub(super) unsolved_queue: &'field mut VecDeque<CellIdx>,
+    pub(super) solved_queue: &'field mut VecDeque<(CellIdx, CellValue)>,
+    pub(super) pending_partition_queue: &'field mut VecDeque<CellIdx>,
+    pub(super) metrics: &'field mut Metrics,
+    pub(super) partitions: &'field mut HashMap<CellIdx, usize, FastNumberHasherBuilder>,
 }
 
 impl<'field> FieldArgs<'field> {
@@ -785,28 +792,11 @@ impl<'field> FieldArgs<'field> {
             cells: &mut field.cells,
             width: field.width,
             next_partition_id: &mut field.next_partition_id,
-            unsolved_queue: Some(&mut field.unsolved_queue),
-            solved_queue: Some(&mut field.solved_queue),
-            pending_partition_queue: Some(&mut field.pending_partition_queue),
-            metrics: Some(&mut field.metrics),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_basic(
-        cells: &'field mut [Cell],
-        width: u32,
-        next_partition_id: &'field mut u16,
-    ) -> Self {
-        #[allow(static_mut_refs)]
-        FieldArgs {
-            cells,
-            width,
-            next_partition_id,
-            unsolved_queue: None,
-            solved_queue: None,
-            pending_partition_queue: None,
-            metrics: None,
+            unsolved_queue: &mut field.unsolved_queue,
+            solved_queue: &mut field.solved_queue,
+            pending_partition_queue: &mut field.pending_partition_queue,
+            metrics: &mut field.metrics,
+            partitions: &mut field.partitions,
         }
     }
 }
@@ -816,8 +806,15 @@ pub(super) struct FastNumberHasher(u32);
 
 impl Hasher for FastNumberHasher {
     // This is called sequentially for chunks of bytes in the key
-    fn write(&mut self, _: &[u8]) {
-        unimplemented!();
+    fn write(&mut self, bytes: &[u8]) {
+        debug_assert!(
+            false,
+            "FastNumberHasher should only be used on types with a single primitive"
+        );
+        let mut padded = [0u8; 4];
+        padded[..bytes.len().min(4)]
+            .copy_from_slice(bytes[..bytes.len().min(4)].try_into().unwrap());
+        self.0 = u32::from_le_bytes(padded);
     }
 
     fn write_u16(&mut self, i: u16) {
@@ -834,7 +831,7 @@ impl Hasher for FastNumberHasher {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug)]
 pub(super) struct FastNumberHasherBuilder;
 
 impl BuildHasher for FastNumberHasherBuilder {
@@ -847,6 +844,8 @@ impl BuildHasher for FastNumberHasherBuilder {
 
 /// A known clue cell annotated with its local combinatorial complexity (`solution_count`),
 /// ordered from most constrained (fewest valid mine placements) to least constrained.
+///
+/// TODO: Implement the brute-force solution counting
 #[derive(Debug, Copy, Hash, Clone, PartialEq, Eq)]
 pub(super) struct CellOrdering {
     /// Linear index of the cell on the board.
@@ -1081,38 +1080,38 @@ mod tests {
     #[test]
     fn test_cell_change_value_updates_neighbor_masks() {
         // 3x1 strip, change the middle cell and watch both neighbors
-        let mut cells = Cell::grid(3, 1);
+        let mut field = MineField::new(3, 1, 0).unwrap();
 
         Cell::change_value(
             CellIdx(1),
             CellValue::MINE,
-            &mut FieldArgs::new_basic(&mut cells, 3, &mut 1),
+            &mut FieldArgs::new(&mut field),
         );
-        assert_eq!(cells[1].value(), CellValue::MINE);
-        assert_eq!(cells[0].mine_neighbors(), !!E);
-        assert!(cells[0].unknown_neighbors().is_empty());
-        assert_eq!(cells[2].mine_neighbors(), !!W);
-        assert!(cells[2].unknown_neighbors().is_empty());
+        assert_eq!(field.cells[1].value(), CellValue::MINE);
+        assert_eq!(field.cells[0].mine_neighbors(), !!E);
+        assert!(field.cells[0].unknown_neighbors().is_empty());
+        assert_eq!(field.cells[2].mine_neighbors(), !!W);
+        assert!(field.cells[2].unknown_neighbors().is_empty());
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
         Cell::change_value(
             CellIdx(1),
             CellValue::for_mine_count(1),
-            &mut FieldArgs::new_basic(&mut cells, 3, &mut 2),
+            &mut FieldArgs::new(&mut field),
         );
-        assert!(cells[0].mine_neighbors().is_empty());
-        assert!(cells[0].unknown_neighbors().is_empty());
-        assert_eq!(cells[0].safe_neighbors(), !!E);
+        assert!(field.cells[0].mine_neighbors().is_empty());
+        assert!(field.cells[0].unknown_neighbors().is_empty());
+        assert_eq!(field.cells[0].safe_neighbors(), !!E);
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
         Cell::change_value(
             CellIdx(1),
             CellValue::UNKNOWN,
-            &mut FieldArgs::new_basic(&mut cells, 3, &mut 3),
+            &mut FieldArgs::new(&mut field),
         );
-        assert_eq!(cells[0].unknown_neighbors(), !!E);
-        assert_eq!(cells[2].unknown_neighbors(), !!W);
-        assert!(cells[0].mine_neighbors().is_empty());
+        assert_eq!(field.cells[0].unknown_neighbors(), !!E);
+        assert_eq!(field.cells[2].unknown_neighbors(), !!W);
+        assert!(field.cells[0].mine_neighbors().is_empty());
     }
 
     #[test]
@@ -1197,5 +1196,58 @@ mod tests {
             neighbors.iter().map(|n| n.from).collect::<DirectionSet>(),
             W | N | NW
         );
+    }
+
+    #[test]
+    fn test_cell_flags_and_display() {
+        let mut flags = CellFlags::new();
+        assert!(!flags.is_pending_partition());
+        assert!(!flags.is_solved());
+        assert!(!flags.is_unsolved());
+        assert_eq!(format!("{flags}"), "[]");
+
+        flags.mark_pending_partition();
+        assert!(flags.is_pending_partition());
+        assert_eq!(format!("{flags}"), "[PENDING_PARTITION,]");
+
+        flags.mark_solved();
+        assert!(flags.is_solved());
+        assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,]");
+
+        flags.mark_unsolved();
+        assert!(flags.is_unsolved());
+        assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,UNSOLVED,]");
+
+        flags.clear_pending_partition();
+        assert!(!flags.is_pending_partition());
+        assert!(flags.is_solved());
+        assert!(flags.is_unsolved());
+
+        flags.clear_solved();
+        assert!(!flags.is_solved());
+
+        flags.clear_unsolved();
+        assert!(!flags.is_unsolved());
+        assert_eq!(format!("{flags}"), "[]");
+    }
+
+    #[test]
+    fn test_fast_number_hasher_and_builder() {
+        let builder = FastNumberHasherBuilder;
+        let mut hasher = builder.build_hasher();
+        hasher.write_u16(42);
+        assert_eq!(hasher.finish(), 42);
+
+        hasher.write_u32(100_000);
+        assert_eq!(hasher.finish(), 100_000);
+
+        let mut map: HashMap<CellIdx, usize, FastNumberHasherBuilder> =
+            HashMap::with_hasher(FastNumberHasherBuilder);
+        map.insert(CellIdx(10), 100);
+        map.insert(CellIdx(20), 200);
+
+        assert_eq!(map.get(&CellIdx(10)), Some(&100));
+        assert_eq!(map.get(&CellIdx(20)), Some(&200));
+        assert_eq!(map.get(&CellIdx(30)), None);
     }
 }

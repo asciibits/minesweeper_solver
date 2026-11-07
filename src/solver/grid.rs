@@ -199,7 +199,6 @@ impl DirectionSet {
     }
 
     /// Returns `true` if the set contains no directions.
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }

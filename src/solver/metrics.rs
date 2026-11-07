@@ -275,3 +275,94 @@ impl Display for Metrics {
         write!(f, "Metrics not available in release mode")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solver::grid::{E, N, W};
+
+    #[test]
+    fn test_metrics_defaults_and_increments() {
+        let mut m = Metrics::default();
+        assert_eq!(m.games_played(), 0);
+        assert_eq!(m.solve_passes(), 0);
+        assert_eq!(m.max_partitions(), 0);
+        assert_eq!(m.max_partition_size(), 0);
+        assert_eq!(m.partitions_created(), 0);
+        assert_eq!(m.neighbor_visits(), 0);
+        assert_eq!(m.total_duration(), Duration::ZERO);
+
+        m.inc_solve_passes();
+        assert_eq!(m.solve_passes(), 1);
+
+        m.inc_partitions_created();
+        assert_eq!(m.partitions_created(), 1);
+
+        m.set_max_partitions(3);
+        m.set_max_partitions(2);
+        assert_eq!(m.max_partitions(), 3);
+
+        m.set_max_partition_size(5);
+        m.set_max_partition_size(4);
+        assert_eq!(m.max_partition_size(), 5);
+
+        m.inc_neighbor_visits(N | E | W);
+        assert_eq!(m.neighbor_visits(), 3);
+    }
+
+    #[test]
+    fn test_metrics_durations_and_display() {
+        let mut m = Metrics::default();
+        m.mark_now();
+        m.inc_indexing_duration();
+        m.inc_unsolved_duration();
+        m.inc_basic_solve_duration();
+        m.inc_partition_duration();
+
+        let total = m.total_duration();
+        assert_eq!(
+            total,
+            m.indexing_duration()
+                + m.unsolved_duration()
+                + m.basic_solve_duration()
+                + m.partition_duration()
+        );
+
+        let disp = format!("{}", m);
+        assert!(disp.contains("Metrics {"));
+        assert!(disp.contains("games: 0"));
+    }
+
+    #[test]
+    fn test_metrics_tally_game() {
+        let mut game1 = Metrics::default();
+        game1.inc_solve_passes();
+        game1.inc_partitions_created();
+        game1.set_max_partitions(2);
+        game1.set_max_partition_size(4);
+        game1.inc_neighbor_visits(N | E);
+
+        let mut cumulative = Metrics::default();
+        cumulative.tally_game(&game1);
+        assert_eq!(cumulative.games_played(), 1);
+        assert_eq!(cumulative.solve_passes(), 1);
+        assert_eq!(cumulative.partitions_created(), 1);
+        assert_eq!(cumulative.max_partitions(), 2);
+        assert_eq!(cumulative.max_partition_size(), 4);
+        assert_eq!(cumulative.neighbor_visits(), 2);
+
+        let mut game2 = Metrics::default();
+        game2.inc_solve_passes();
+        game2.set_max_partitions(5);
+        game2.set_max_partition_size(8);
+
+        cumulative.tally_game(&game2);
+        assert_eq!(cumulative.games_played(), 2);
+        assert_eq!(cumulative.solve_passes(), 2);
+        assert_eq!(cumulative.max_partitions(), 5);
+        assert_eq!(cumulative.max_partition_size(), 8);
+
+        let disp = format!("{}", cumulative);
+        assert!(disp.contains("per game"));
+    }
+}
