@@ -1082,11 +1082,7 @@ mod tests {
         // 3x1 strip, change the middle cell and watch both neighbors
         let mut field = MineField::new(3, 1, 0).unwrap();
 
-        Cell::change_value(
-            CellIdx(1),
-            CellValue::MINE,
-            &mut FieldArgs::new(&mut field),
-        );
+        Cell::change_value(CellIdx(1), CellValue::MINE, &mut FieldArgs::new(&mut field));
         assert_eq!(field.cells[1].value(), CellValue::MINE);
         assert_eq!(field.cells[0].mine_neighbors(), !!E);
         assert!(field.cells[0].unknown_neighbors().is_empty());

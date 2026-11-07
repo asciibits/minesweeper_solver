@@ -182,6 +182,89 @@ fn print_footer(field: &MineField, f: &mut Formatter<'_>) -> fmt::Result {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(super) struct DetailMineField<'a>(&'a MineField);
+
+impl<'a> DetailMineField<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn eprintln(field: &'a MineField) {
+        eprintln!("{:#}", DetailMineField(field));
+    }
+}
+
+fn write_comma_separated<I, T, F>(
+    f: &mut fmt::Formatter<'_>,
+    iter: I,
+    mut format_item: F,
+) -> fmt::Result
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(&mut fmt::Formatter<'_>, T) -> fmt::Result,
+{
+    let mut first = true;
+    for item in iter {
+        if !first {
+            write!(f, ",")?;
+        }
+        first = false;
+        format_item(f, item)?;
+    }
+    Ok(())
+}
+
+impl<'a> Display for DetailMineField<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let spacer = if f.alternate() { "\n " } else { " " };
+        write!(
+            f,
+            "MineField ({}x{}, {}*) {{",
+            self.0.width, self.0.height, self.0.mine_count
+        )?;
+        for (idx, cell) in self.0.cells.iter().enumerate() {
+            // Cells no longer carry their own index, so prefix it for debuggability.
+            write!(f, "{spacer}{idx}: ")?;
+            cell.fmt(f)?;
+            write!(f, ",")?;
+        }
+        write!(
+            f,
+            "{spacer}next partition id: {},",
+            self.0.next_partition_id
+        )?;
+        write!(f, "{spacer}pending: [")?;
+        write_comma_separated(f, &self.0.pending, |f, &(i, v)| write!(f, "({i}: {v})"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}unsolved: [")?;
+        write_comma_separated(f, &self.0.unsolved_queue, |f, i| write!(f, "{i}"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}solved: [")?;
+        write_comma_separated(f, &self.0.solved_queue, |f, &(i, v)| write!(f, "({i}:{v})"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}pending partition: [")?;
+        write_comma_separated(f, &self.0.pending_partition_queue, |f, i| write!(f, "{i}"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}recent inferences: [")?;
+        write_comma_separated(f, &self.0.recent_inferred, |f, i| write!(f, "{i}"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}recent invalid cells: [")?;
+        write_comma_separated(f, &self.0.recent_invalid, |f, i| write!(f, "{i}"))?;
+        write!(f, "],")?;
+        write!(f, "{spacer}partitions: [")?;
+        for (&idx, len) in self.0.partitions.iter() {
+            write!(
+                f,
+                "{spacer}  {}: member: {idx}, len: {len}",
+                self.0.cells[idx].partition_id()
+            )?;
+        }
+        write!(f, "]")?;
+        if f.alternate() {
+            writeln!(f)?;
+        }
+        write!(f, "}}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::solver::test_utils::FieldBuilder;
@@ -212,5 +295,14 @@ mod tests {
         println!("{}", ColoredMineField(builder.mine_field()));
         println!("{:#}", builder.mine_field());
         eprintln!("{:#}", DetailMineField(builder.mine_field()));
+    }
+
+    #[test]
+    fn test_detail_minefield_display() {
+        let field = MineField::create("1.\n..", 1);
+        let details = format!("{:#}", DetailMineField(&field));
+        assert!(details.contains("MineField (2x2, 1*)"));
+        assert!(details.contains("pending: ["));
+        assert!(details.contains("partitions: ["));
     }
 }
