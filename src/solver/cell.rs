@@ -338,73 +338,97 @@ pub(super) enum CellValueChangeType {
 pub(super) struct CellFlags(u8);
 
 impl CellFlags {
-    const PENDING_PARTITION_MASK: u8 = 0b1;
-    const SOLVED_QUEUE_MASK: u8 = 0b10;
-    const UNSOLVED_QUEUE_MASK: u8 = 0b100;
-
     pub(super) fn new() -> CellFlags {
         CellFlags(0)
     }
 
     #[inline]
-    pub(super) fn is_pending_partition(&self) -> bool {
-        self.0 & Self::PENDING_PARTITION_MASK != 0
+    pub(super) fn is_marked(&self, mask: FlagMask) -> bool {
+        self.0 & mask.0 != 0
     }
 
     #[inline]
-    pub(super) fn mark_pending_partition(&mut self) {
-        self.0 |= Self::PENDING_PARTITION_MASK
+    pub(super) fn mark(&mut self, mask: FlagMask) -> bool {
+        if !self.is_marked(mask) {
+            self.0 |= mask.0;
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
-    pub(super) fn clear_pending_partition(&mut self) {
-        self.0 &= !Self::PENDING_PARTITION_MASK
-    }
-
-    #[inline]
-    pub(super) fn is_unsolved(&self) -> bool {
-        self.0 & Self::UNSOLVED_QUEUE_MASK != 0
-    }
-
-    #[inline]
-    pub(super) fn mark_unsolved(&mut self) {
-        self.0 |= Self::UNSOLVED_QUEUE_MASK
-    }
-
-    #[inline]
-    pub(super) fn clear_unsolved(&mut self) {
-        self.0 &= !Self::UNSOLVED_QUEUE_MASK;
-    }
-
-    #[inline]
-    pub(super) fn is_solved(&self) -> bool {
-        self.0 & Self::SOLVED_QUEUE_MASK != 0
-    }
-
-    #[inline]
-    pub(super) fn mark_solved(&mut self) {
-        self.0 |= Self::SOLVED_QUEUE_MASK
-    }
-
-    #[inline]
-    pub(super) fn clear_solved(&mut self) {
-        self.0 &= !Self::SOLVED_QUEUE_MASK
+    pub(super) fn clear(&mut self, mask: FlagMask) {
+        self.0 &= !mask.0;
     }
 }
 
 impl Display for CellFlags {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
-        if self.is_pending_partition() {
+        if self.is_marked(FlagMask::PENDING_PARTITION) {
             write!(f, "PENDING_PARTITION,")?;
         }
-        if self.is_solved() {
+        if self.is_marked(FlagMask::SOLVED_QUEUE) {
             write!(f, "SOLVED,")?;
         }
-        if self.is_unsolved() {
+        if self.is_marked(FlagMask::UNSOLVED_QUEUE) {
             write!(f, "UNSOLVED,")?;
         }
         write!(f, "]")
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(super) struct FlagMask(u8);
+
+impl FlagMask {
+    pub(super) const PENDING_PARTITION: FlagMask = FlagMask(0b1);
+    pub(super) const SOLVED_QUEUE: FlagMask = FlagMask(0b10);
+    pub(super) const UNSOLVED_QUEUE: FlagMask = FlagMask(0b100);
+}
+
+/// A queue of CellIdx instances that ensures elements are only added once
+#[derive(Debug, Clone)]
+pub(super) struct GuardedQueue {
+    queue: VecDeque<CellIdx>,
+    mask: FlagMask,
+}
+
+impl GuardedQueue {
+    pub(super) fn with_capacity(capacity: usize, mask: FlagMask) -> GuardedQueue {
+        GuardedQueue {
+            queue: VecDeque::with_capacity(capacity),
+            mask,
+        }
+    }
+
+    pub(super) fn push(&mut self, cells: &mut [Cell], idx: CellIdx) {
+        cells[idx]
+            .flags()
+            .mark(self.mask)
+            .then(|| self.queue.push_back(idx));
+    }
+
+    pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
+        self.queue
+            .pop_front()
+            .inspect(|&i| cells[i].flags().clear(self.mask))
+    }
+
+    #[cfg(test)]
+    pub(super) fn iter(&self) -> impl Iterator<Item = CellIdx> {
+        self.queue.iter().copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&mut self) {
+        self.queue.clear();
     }
 }
 
@@ -540,6 +564,17 @@ impl Cell {
         self.unknown_neighbors.is_empty()
     }
 
+    // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
+    pub(super) fn is_solvaable(&self) -> bool {
+        let unknown_count = self.unknown_neighbors().len() as i8;
+        if let Some(mine_count) = self.value().safe_mine_count() {
+            let remaining = mine_count as i8 - self.mine_neighbors.len() as i8;
+            remaining <= 0 || remaining >= unknown_count
+        } else {
+            false
+        }
+    }
+
     // If the cell is a clue cell that is not yet solved, and the neighbors can be inferred as
     // either a Mine or Safe...
     pub(super) fn infer_neighbors(&self) -> Option<CellValue> {
@@ -594,10 +629,10 @@ impl Cell {
             CellValueChangeType::Breaking => true,
         };
 
-        if !cell.flags.is_pending_partition() {
-            cell.flags.mark_pending_partition();
-            field_args.pending_partition_queue.push_back(idx);
-        }
+        field_args
+            .pending_partition_queue
+            .push(field_args.cells, idx);
+
         Self::check_cell_solve(idx, inference_breaking, field_args);
 
         if !prev_val.types_match(value) {
@@ -636,13 +671,15 @@ impl Cell {
         if field_args.cells[n_idx].value().is_unknown() {
             let safe_neighbors = field_args.cells[n_idx].safe_neighbors();
             for Neighbor {
-                neighbor: clue_idx, ..
+                neighbor: count_idx,
+                ..
             } in Cell::neighbor_iter(n_idx, field_args.width, safe_neighbors)
             {
-                let clue_cell = &mut field_args.cells[clue_idx];
-                if clue_cell.value().has_count() && !clue_cell.flags().is_pending_partition() {
-                    clue_cell.flags().mark_pending_partition();
-                    field_args.pending_partition_queue.push_back(clue_idx);
+                let count_cell = &mut field_args.cells[count_idx];
+                if count_cell.value().has_count() {
+                    field_args
+                        .pending_partition_queue
+                        .push(field_args.cells, count_idx);
                 }
             }
         }
@@ -668,22 +705,16 @@ impl Cell {
 
     fn check_cell_solve(idx: CellIdx, inference_breaking: bool, field_args: &mut FieldArgs) {
         let cell = field_args.cells[idx];
-        let flags = field_args.cells[idx].flags();
-        if inference_breaking && !flags.is_unsolved() {
+        if inference_breaking {
             // Inferences attached to this cell's partition may be invalidated. Reset inferred.
-            field_args.unsolved_queue.push_back(idx);
-            flags.mark_unsolved();
+            field_args.unsolved_queue.push(field_args.cells, idx);
         }
         if cell.value().has_count() {
-            if !flags.is_pending_partition() {
-                flags.mark_pending_partition();
-                field_args.pending_partition_queue.push_back(idx);
-            }
-            if !flags.is_solved()
-                && let Some(inferred_value) = cell.infer_neighbors()
-            {
-                field_args.solved_queue.push_back((idx, inferred_value));
-                flags.mark_solved();
+            field_args
+                .pending_partition_queue
+                .push(field_args.cells, idx);
+            if cell.is_solvaable() {
+                field_args.solved_queue.push(field_args.cells, idx);
             }
         }
     }
@@ -779,9 +810,9 @@ pub(super) struct FieldArgs<'field> {
     pub(super) cells: &'field mut [Cell],
     pub(super) width: u32,
     pub(super) next_partition_id: &'field mut u16,
-    pub(super) unsolved_queue: &'field mut VecDeque<CellIdx>,
-    pub(super) solved_queue: &'field mut VecDeque<(CellIdx, CellValue)>,
-    pub(super) pending_partition_queue: &'field mut VecDeque<CellIdx>,
+    pub(super) unsolved_queue: &'field mut GuardedQueue,
+    pub(super) solved_queue: &'field mut GuardedQueue,
+    pub(super) pending_partition_queue: &'field mut GuardedQueue,
     pub(super) metrics: &'field mut Metrics,
     pub(super) partitions: &'field mut HashMap<CellIdx, usize, FastNumberHasherBuilder>,
 }
@@ -1197,33 +1228,33 @@ mod tests {
     #[test]
     fn test_cell_flags_and_display() {
         let mut flags = CellFlags::new();
-        assert!(!flags.is_pending_partition());
-        assert!(!flags.is_solved());
-        assert!(!flags.is_unsolved());
+        assert!(!flags.is_marked(FlagMask::PENDING_PARTITION));
+        assert!(!flags.is_marked(FlagMask::SOLVED_QUEUE));
+        assert!(!flags.is_marked(FlagMask::UNSOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[]");
 
-        flags.mark_pending_partition();
-        assert!(flags.is_pending_partition());
+        flags.mark(FlagMask::PENDING_PARTITION);
+        assert!(flags.is_marked(FlagMask::PENDING_PARTITION));
         assert_eq!(format!("{flags}"), "[PENDING_PARTITION,]");
 
-        flags.mark_solved();
-        assert!(flags.is_solved());
+        flags.mark(FlagMask::SOLVED_QUEUE);
+        assert!(flags.is_marked(FlagMask::SOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,]");
 
-        flags.mark_unsolved();
-        assert!(flags.is_unsolved());
+        flags.mark(FlagMask::UNSOLVED_QUEUE);
+        assert!(flags.is_marked(FlagMask::UNSOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,UNSOLVED,]");
 
-        flags.clear_pending_partition();
-        assert!(!flags.is_pending_partition());
-        assert!(flags.is_solved());
-        assert!(flags.is_unsolved());
+        flags.clear(FlagMask::PENDING_PARTITION);
+        assert!(!flags.is_marked(FlagMask::PENDING_PARTITION));
+        assert!(flags.is_marked(FlagMask::SOLVED_QUEUE));
+        assert!(flags.is_marked(FlagMask::UNSOLVED_QUEUE));
 
-        flags.clear_solved();
-        assert!(!flags.is_solved());
+        flags.clear(FlagMask::SOLVED_QUEUE);
+        assert!(!flags.is_marked(FlagMask::SOLVED_QUEUE));
 
-        flags.clear_unsolved();
-        assert!(!flags.is_unsolved());
+        flags.clear(FlagMask::UNSOLVED_QUEUE);
+        assert!(!flags.is_marked(FlagMask::UNSOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[]");
     }
 

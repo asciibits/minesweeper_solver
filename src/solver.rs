@@ -12,8 +12,8 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            CellIdx, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs,
-            UserCellWithInference, cell_idx, coordinates,
+            CellIdx, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs, FlagMask,
+            GuardedQueue, UserCellWithInference, cell_idx, coordinates,
         },
         grid::Neighbor,
         metrics::Metrics,
@@ -46,11 +46,11 @@ pub struct MineField {
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
     pending: VecDeque<(CellIdx, CellValue)>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
-    unsolved_queue: VecDeque<CellIdx>,
+    unsolved_queue: GuardedQueue,
     /// Queue of clue cells whose neighbor values have become solvable.
-    solved_queue: VecDeque<(CellIdx, CellValue)>,
+    solved_queue: GuardedQueue,
     /// Queue of seed cells whose connected frontier needs to be partitioned or repartitioned.
-    pending_partition_queue: VecDeque<CellIdx>,
+    pending_partition_queue: GuardedQueue,
     /// Performance and step counters recorded during solving.
     metrics: Metrics,
     /// Cell indices whose inference changed during the most recent solve cycle.
@@ -96,9 +96,12 @@ impl MineField {
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
             next_partition_id: 1,
             pending: VecDeque::with_capacity(area / 4),
-            unsolved_queue: VecDeque::new(),
-            solved_queue: VecDeque::with_capacity(perimeter),
-            pending_partition_queue: VecDeque::with_capacity(area / 4),
+            unsolved_queue: GuardedQueue::with_capacity(0, FlagMask::UNSOLVED_QUEUE),
+            solved_queue: GuardedQueue::with_capacity(perimeter, FlagMask::SOLVED_QUEUE),
+            pending_partition_queue: GuardedQueue::with_capacity(
+                area / 4,
+                FlagMask::PENDING_PARTITION,
+            ),
             metrics: Metrics::default(),
             recent_inferred: Vec::with_capacity(perimeter / 2),
             recent_invalid: Vec::new(),
@@ -385,26 +388,20 @@ impl MineField {
 
     fn process_unsolved(&mut self) {
         let next_partition_id = self.next_partition_id;
-        while let Some(idx) = self.unsolved_queue.pop_front() {
+        while let Some(idx) = self.unsolved_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
-            cell.flags().clear_unsolved();
 
             if cell.partition_id() == next_partition_id {
                 continue;
             }
-            if !cell.flags().is_pending_partition() {
-                cell.flags().mark_pending_partition();
-                self.pending_partition_queue.push_back(idx);
-            }
+            self.pending_partition_queue.push(&mut self.cells, idx);
 
             Self::walk_unsolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
-                let cell = &mut field_args.cells[idx];
-                if !cell.flags().is_pending_partition() {
-                    cell.flags().mark_pending_partition();
-                    field_args.pending_partition_queue.push_back(idx);
-                }
+                field_args
+                    .pending_partition_queue
+                    .push(&mut field_args.cells, idx);
                 field_args.partitions.remove(&idx);
-                if cell.value().is_inferred() {
+                if field_args.cells[idx].value().is_inferred() {
                     Cell::change_value(idx, CellValue::UNKNOWN, field_args);
                 }
             });
@@ -413,13 +410,10 @@ impl MineField {
 
     fn process_solved(&mut self) {
         self.recent_inferred.clear();
-        while let Some((idx, _)) = self.solved_queue.pop_front() {
+        while let Some(idx) = self.solved_queue.pop(&mut self.cells) {
+            self.pending_partition_queue.push(&mut self.cells, idx);
+
             let cell = &mut self.cells[idx];
-            cell.flags().clear_solved();
-            if !cell.flags().is_pending_partition() {
-                self.pending_partition_queue.push_back(idx);
-                cell.flags().mark_pending_partition();
-            }
             if !cell.is_solved()
                 && let Some(value) = cell.infer_neighbors()
             {
@@ -442,9 +436,8 @@ impl MineField {
         }
         let start_partition_id = self.next_partition_id;
         self.recent_invalid.clear();
-        while let Some(idx) = self.pending_partition_queue.pop_front() {
+        while let Some(idx) = self.pending_partition_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
-            cell.flags().clear_pending_partition();
             if cell.is_invalid() {
                 self.recent_invalid.push(idx);
             }
@@ -718,21 +711,23 @@ impl MineField {
             height: self.height,
             mine_count: self.mine_count,
             cells,
-            partitions: HashMap::with_capacity_and_hasher(
-                self.partitions.capacity(),
-                FastNumberHasherBuilder,
-            ),
+            partitions: self.partitions.clone(),
             next_partition_id: 1,
             pending,
-            unsolved_queue: VecDeque::with_capacity(self.unsolved_queue.capacity()),
-            solved_queue: VecDeque::with_capacity(self.solved_queue.capacity()),
-            pending_partition_queue: VecDeque::with_capacity(
-                self.pending_partition_queue.capacity(),
-            ),
+            unsolved_queue: self.unsolved_queue.clone(),
+            solved_queue: self.solved_queue.clone(),
+            pending_partition_queue: self.pending_partition_queue.clone(),
             metrics: Metrics::default(),
-            recent_inferred: Vec::with_capacity(self.recent_inferred.capacity()),
-            recent_invalid: Vec::with_capacity(self.recent_invalid.capacity()),
+            recent_inferred: self.recent_inferred.clone(),
+            recent_invalid: self.recent_invalid.clone(),
         };
+        // clear the cloned collections for the new solve
+        field.partitions.clear();
+        field.unsolved_queue.clear();
+        field.solved_queue.clear();
+        field.pending_partition_queue.clear();
+        field.recent_inferred.clear();
+        field.recent_invalid.clear();
         field.solve();
         field
     }
@@ -1767,7 +1762,6 @@ mod tests {
             .pending_partition_queue
             .iter()
             .chain(field.unsolved_queue.iter())
-            .copied()
             .collect();
         logged.sort();
         logged.dedup();

@@ -235,13 +235,15 @@ impl<'a> Display for DetailMineField<'a> {
         write_comma_separated(f, &self.0.pending, |f, &(i, v)| write!(f, "({i}: {v})"))?;
         write!(f, "],")?;
         write!(f, "{spacer}unsolved: [")?;
-        write_comma_separated(f, &self.0.unsolved_queue, |f, i| write!(f, "{i}"))?;
+        write_comma_separated(f, self.0.unsolved_queue.iter(), |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
         write!(f, "{spacer}solved: [")?;
-        write_comma_separated(f, &self.0.solved_queue, |f, &(i, v)| write!(f, "({i}:{v})"))?;
+        write_comma_separated(f, self.0.solved_queue.iter(), |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
         write!(f, "{spacer}pending partition: [")?;
-        write_comma_separated(f, &self.0.pending_partition_queue, |f, i| write!(f, "{i}"))?;
+        write_comma_separated(f, self.0.pending_partition_queue.iter(), |f, i| {
+            write!(f, "{i}")
+        })?;
         write!(f, "],")?;
         write!(f, "{spacer}recent inferences: [")?;
         write_comma_separated(f, &self.0.recent_inferred, |f, i| write!(f, "{i}"))?;
