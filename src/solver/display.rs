@@ -215,11 +215,11 @@ where
 impl<'a> Display for DetailMineField<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let spacer = if f.alternate() { "\n " } else { " " };
-        write!(
-            f,
-            "MineField ({}x{}, {}*) {{",
-            self.0.width, self.0.height, self.0.mine_count
-        )?;
+        write!(f, "MineField ({}x{}", self.0.width, self.0.height)?;
+        if let Some(mine_count) = self.0.mine_count {
+            write!(f, ", {mine_count}*")?;
+        }
+        write!(f, ") {{")?;
         for (idx, cell) in self.0.cells.iter().enumerate() {
             // Cells no longer carry their own index, so prefix it for debuggability.
             write!(f, "{spacer}{idx}: ")?;
@@ -301,9 +301,9 @@ mod tests {
 
     #[test]
     fn test_detail_minefield_display() {
-        let field = MineField::create("1.\n..", 1);
+        let field = MineField::create("1.\n..");
         let details = format!("{:#}", DetailMineField(&field));
-        assert!(details.contains("MineField (2x2, 1*)"));
+        assert!(details.contains("MineField (2x2)"));
         assert!(details.contains("pending: ["));
         assert!(details.contains("partitions: ["));
     }

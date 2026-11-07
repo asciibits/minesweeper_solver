@@ -3,6 +3,8 @@
         "binom",
         "Deque",
         "leftrightarrow",
+        "rngs",
+        "Seedable",
         "solvaable",
         "subproblems"
     ]

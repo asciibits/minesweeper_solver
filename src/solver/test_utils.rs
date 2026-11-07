@@ -212,7 +212,6 @@ impl FieldBuilder {
     ///
     /// assert_eq!(builder.mine_field().width(), 3);
     /// assert_eq!(builder.mine_field().height(), 2);
-    /// assert_eq!(builder.mine_field().mine_count(), 1);
     ///
     /// // The underlying MineField has (1, 0) revealed as Safe(1):
     /// assert_eq!(
@@ -405,7 +404,7 @@ impl FieldBuilder {
 
         Self {
             mines: field.into_boxed_slice(),
-            field: MineField::new(width, height, mine_count).unwrap(),
+            field: MineField::with_mine_count(width, height, mine_count).unwrap(),
         }
     }
 
@@ -532,7 +531,7 @@ mod tests {
             FieldBuilder::from_points(3, 2, [Point { x: 0, y: 0 }, Point { x: 2, y: 1 }]);
         assert_eq!(builder.mine_field().width(), 3);
         assert_eq!(builder.mine_field().height(), 2);
-        assert_eq!(builder.mine_field().mine_count(), 2);
+        assert_eq!(builder.mine_field().mine_count(), Some(2));
 
         // Initially all cells on the MineField are Unknown
         for y in 0..2 {
@@ -568,7 +567,7 @@ mod tests {
         );
         assert_eq!(builder.mine_field().width(), 3);
         assert_eq!(builder.mine_field().height(), 3);
-        assert_eq!(builder.mine_field().mine_count(), 8);
+        assert_eq!(builder.mine_field().mine_count(), Some(8));
 
         builder.expose_points([Point { x: 1, y: 1 }]);
         assert_eq!(
@@ -668,7 +667,7 @@ mod tests {
         let random_builder = FieldBuilder::random(6, 5, 7, shuffle(&mut rng()));
         assert_eq!(random_builder.field.width(), 6);
         assert_eq!(random_builder.field.height(), 5);
-        assert_eq!(random_builder.field.mine_count(), 7);
+        assert_eq!(random_builder.field.mine_count(), Some(7));
         let actual_mines = random_builder
             .mines
             .iter()
@@ -703,7 +702,7 @@ mod tests {
 
         assert_eq!(builder.field.width(), 4);
         assert_eq!(builder.field.height(), 3);
-        assert_eq!(builder.field.mine_count(), 2);
+        assert_eq!(builder.field.mine_count(), Some(2));
 
         // Ground-truth check
         assert_eq!(builder.mines[0], MineOrCount::MINE); // (0, 0)
@@ -780,7 +779,7 @@ mod tests {
              .2.
              ...",
         );
-        assert_eq!(builder_short_sep.field.mine_count(), 2);
+        assert_eq!(builder_short_sep.field.mine_count(), Some(2));
         assert_eq!(
             builder_short_sep.field.cell(Point { x: 1, y: 0 }).value,
             UserCellValue::Safe(2)
@@ -794,7 +793,7 @@ mod tests {
              x#.
              ...",
         );
-        assert_eq!(builder_inferred.field.mine_count(), 1);
+        assert_eq!(builder_inferred.field.mine_count(), Some(1));
         // 'x' and '#' are parsed as Unknown, leaving them available for solver re-inference
         assert_eq!(
             builder_inferred.field.cell(Point { x: 0, y: 0 }).value,
@@ -816,7 +815,7 @@ mod tests {
         );
         assert_eq!(builder.field.width(), 3);
         assert_eq!(builder.field.height(), 3);
-        assert_eq!(builder.field.mine_count(), 3);
+        assert_eq!(builder.field.mine_count(), Some(3));
         for y in 0..3 {
             for x in 0..3 {
                 assert_eq!(

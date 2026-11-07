@@ -36,7 +36,7 @@ pub struct MineField {
     /// Height of the board in cells.
     height: u32,
     /// Total number of mines on the board.
-    mine_count: u32,
+    mine_count: Option<u32>,
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
     cells: Box<[Cell]>,
     /// Active board partitions, mapping a representative seed cell index to the partition size.
@@ -66,7 +66,8 @@ const MAX_SIZE: usize = if usize::MAX > u32::MAX as usize {
 };
 
 impl MineField {
-    /// Creates a new [`MineField`] with the given dimensions and total `mine_count`.
+    /// Creates a new [`MineField`] with the given dimensions and if provided, the total
+    /// `mine_count`.
     ///
     /// All cells are initialized to [`crate::CellValue::Unknown`].
     ///
@@ -74,13 +75,32 @@ impl MineField {
     ///
     /// * Returns [`SolverError::AreaTooLarge`] if `width * height` exceeds `usize::MAX >> 9`.
     /// * Returns [`SolverError::MineCountTooLarge`] if `mine_count >= width * height`.
-    pub fn new(width: u32, height: u32, mine_count: u32) -> Result<MineField, SolverError> {
+    pub fn new(width: u32, height: u32) -> Result<MineField, SolverError> {
+        Self::new_helper(width, height, None)
+    }
+    pub fn with_mine_count(
+        width: u32,
+        height: u32,
+        mine_count: u32,
+    ) -> Result<MineField, SolverError> {
+        Self::new_helper(width, height, Some(mine_count))
+    }
+    fn new_helper(
+        width: u32,
+        height: u32,
+        mine_count: Option<u32>,
+    ) -> Result<MineField, SolverError> {
         let area = width as usize * height as usize;
         let perimeter = (width as usize + height as usize) * 2;
         if area > MAX_SIZE {
             return Err(SolverError::AreaTooLarge { width, height });
         }
-        if mine_count as usize >= area {
+        if area == 0 {
+            return Err(SolverError::AreaTooSmall);
+        }
+        if let Some(mine_count) = mine_count
+            && mine_count as usize >= area
+        {
             return Err(SolverError::MineCountTooLarge {
                 mine_count,
                 width,
@@ -128,7 +148,6 @@ impl MineField {
     /// let field = MineField::create(
     ///     ".1*.
     ///      ...1",
-    ///     1,
     /// );
     /// assert_eq!(field.width(), 4);
     /// assert_eq!(field.height(), 2);
@@ -144,10 +163,11 @@ impl MineField {
     /// - The inferred board dimensions and `mine_count` fail [`MineField::new`] validation (e.g., an empty
     ///   spec or `mine_count >= width * height`).
     #[track_caller]
-    pub fn create(field_spec: &str, mine_count: u32) -> MineField {
+    pub fn create(field_spec: &str) -> MineField {
         let (width, height, cell_iter) = Self::cells_and_size_from_spec(field_spec);
 
-        let mut field = MineField::new(width, height, mine_count).unwrap();
+        // TODO: implement mine count into the spec
+        let mut field = MineField::new(width, height).unwrap();
         field.pending.extend(cell_iter);
         field.solve();
 
@@ -168,7 +188,7 @@ impl MineField {
 
     /// Returns the total number of mines on the board.
     #[inline]
-    pub fn mine_count(&self) -> u32 {
+    pub fn mine_count(&self) -> Option<u32> {
         self.mine_count
     }
 
@@ -197,7 +217,6 @@ impl MineField {
     /// let mut field = MineField::create(
     ///     "1..1
     ///      ....",
-    ///     2,
     /// );
     ///
     /// // Reveal (1, 0) as Safe(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
@@ -399,7 +418,7 @@ impl MineField {
             Self::walk_unsolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
                 field_args
                     .pending_partition_queue
-                    .push(&mut field_args.cells, idx);
+                    .push(field_args.cells, idx);
                 field_args.partitions.remove(&idx);
                 if field_args.cells[idx].value().is_inferred() {
                     Cell::change_value(idx, CellValue::UNKNOWN, field_args);
@@ -739,6 +758,8 @@ impl MineField {
 pub enum SolverError {
     /// The requested board dimensions exceed the maximum supported cell count.
     AreaTooLarge { width: u32, height: u32 },
+    /// The requested board dimensions include a zero width or height
+    AreaTooSmall,
     /// The requested mine count is greater than or equal to the total number of cells.
     MineCountTooLarge {
         mine_count: u32,
@@ -757,6 +778,7 @@ impl fmt::Display for SolverError {
                 "The mine field area ({width} x {height}) must be below 2^{}.",
                 usize::BITS - 10
             ),
+            SolverError::AreaTooSmall => write!(f, "The width and height must both be >= 1"),
             SolverError::MineCountTooLarge {
                 mine_count,
                 width,
@@ -836,11 +858,10 @@ mod tests {
         let field = MineField::create(
             ".1* 
              .  1",
-            1,
         );
         assert_eq!(field.width(), 4);
         assert_eq!(field.height(), 2);
-        assert_eq!(field.mine_count(), 1);
+        assert_eq!(field.mine_count(), None);
 
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
@@ -895,11 +916,10 @@ mod tests {
             "01234
              5678*
              *x#._",
-            2,
         );
         assert_eq!(field.width(), 5);
         assert_eq!(field.height(), 3);
-        assert_eq!(field.mine_count(), 2);
+        assert_eq!(field.mine_count(), None);
 
         for x in 0..5u32 {
             assert_eq!(
@@ -954,7 +974,6 @@ mod tests {
         let mut field = MineField::create(
             "1.2.
              ....",
-            2,
         );
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
@@ -1013,7 +1032,6 @@ mod tests {
         let ragged = MineField::create(
             "1*
              ....2",
-            1,
         );
         assert_eq!(ragged.width(), 5);
         assert_eq!(ragged.height(), 2);
@@ -1037,7 +1055,6 @@ mod tests {
              .
              *
              1",
-            1,
         );
         assert_eq!(vertical.width(), 1);
         assert_eq!(vertical.height(), 4);
@@ -1062,27 +1079,26 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid field character")]
     fn test_create_minefield_invalid_char_9_panics() {
-        MineField::create("19*", 1);
+        MineField::create("19*");
     }
 
     #[test]
     #[should_panic(expected = "Invalid field character")]
     fn test_create_minefield_invalid_char_letter_panics() {
-        MineField::create("1Z*", 1);
+        MineField::create("1Z*");
     }
 
     #[test]
     #[should_panic]
     fn test_create_minefield_empty_spec_panics() {
-        MineField::create("", 0);
+        MineField::create("");
     }
 
     #[test]
     fn test_new_minefield_validation() {
-        let field = MineField::new(10, 10, 15).expect("valid field");
+        let field = MineField::new(10, 10).expect("valid field");
         assert_eq!(field.width(), 10);
         assert_eq!(field.height(), 10);
-        assert_eq!(field.mine_count(), 15);
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
             UserCellValue::Unknown
@@ -1095,12 +1111,12 @@ mod tests {
         }
 
         // AreaTooLarge
-        let err = MineField::new(u32::MAX, u32::MAX, 10).unwrap_err();
+        let err = MineField::new(u32::MAX, u32::MAX).unwrap_err();
         assert!(matches!(err, SolverError::AreaTooLarge { .. }));
         assert!(err.to_string().contains("must be below"));
 
         // MineCountTooLarge
-        let err = MineField::new(4, 4, 16).unwrap_err();
+        let err = MineField::with_mine_count(4, 4, 16).unwrap_err();
         assert!(matches!(
             err,
             SolverError::MineCountTooLarge {
@@ -1113,14 +1129,14 @@ mod tests {
 
         // 0x0 field rejected as MineCountTooLarge
         assert!(matches!(
-            MineField::new(0, 0, 0),
-            Err(SolverError::MineCountTooLarge { .. })
+            MineField::new(0, 0),
+            Err(SolverError::AreaTooSmall)
         ));
     }
 
     #[test]
     fn test_set_cell_out_of_bounds() {
-        let mut field = MineField::new(3, 3, 1).unwrap();
+        let mut field = MineField::new(3, 3).unwrap();
         let err = field
             .set_cell(UserCell {
                 point: Point { x: 3, y: 0 },
@@ -1157,7 +1173,6 @@ mod tests {
             "2..
              ...
              ...",
-            2,
         );
         let c00 = cell(&field, 0, 0);
         assert_eq!(c00.remaining_mines(), 2);
@@ -1219,7 +1234,6 @@ mod tests {
         let mut field = MineField::create(
             "1...1
              .....",
-            2,
         );
 
         // Two disconnected frontier components:
@@ -1279,7 +1293,6 @@ mod tests {
         let mut field = MineField::create(
             ".1.1.
              .....",
-            2,
         );
         assert_eq!(field.partitions.len(), 1);
         let initial_pid = field.cells[0].partition_id();
@@ -1336,7 +1349,7 @@ mod tests {
     fn test_partition_complete_dissolution() {
         // 3x1 board: [(0,0) = Unknown, (1,0) = Count(1), (2,0) = Unknown]
         // (1,0) has 2 unknown neighbors (choose(2, 1) = 2 > 1), so 1 partition of 3 cells remains.
-        let mut field = MineField::create(".1.", 1);
+        let mut field = MineField::create(".1.");
         assert_eq!(field.partitions.len(), 1);
         assert_eq!(field.cells[1].unknown_neighbors(), W | E);
         assert_eq!(field.cells[0].safe_neighbors(), !!E);
@@ -1367,7 +1380,6 @@ mod tests {
         let mut field = MineField::create(
             ".2.
              ...",
-            2,
         );
         assert_eq!(field.cells[1].remaining_mines(), 2);
 
@@ -1403,7 +1415,7 @@ mod tests {
 
     #[test]
     fn test_repeated_and_reverted_staging_on_same_cell() {
-        let mut field = MineField::create(".1.", 1);
+        let mut field = MineField::create(".1.");
         assert_eq!(field.cells[1].remaining_mines(), 1);
 
         // Stage (0, 0) as Mine -> revert to Unknown -> stage again as Mine in one batch.
@@ -1446,7 +1458,7 @@ mod tests {
         // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Count(1), (3,0)=Unknown]
         // 1. (0,0)=Count(1) has only 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
         // 2. That satisfies (2,0)=Count(1), which then infers (3,0) is Safe!
-        let field = MineField::create("1.1.", 1);
+        let field = MineField::create("1.1.");
 
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_safe());
@@ -1469,7 +1481,7 @@ mod tests {
         // Hop 1: (0,0)=1 has 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
         // Hop 2: (2,0)=2 now has 1 mine at (1,0), so 1 remaining mine for (3,0) -> infers (3,0) is Mine.
         // Hop 3: (4,0)=1 now has 1 mine at (3,0), so 0 remaining mines for (5,0) -> infers (5,0) is Safe.
-        let field = MineField::create("1.2.1.", 2);
+        let field = MineField::create("1.2.1.");
 
         assert!(field.cells[1].value().is_mine() && field.cells[1].value().is_inferred());
         assert!(field.cells[3].value().is_mine() && field.cells[3].value().is_inferred());
@@ -1485,7 +1497,7 @@ mod tests {
         // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
         // (0,0)=Count(0) infers (1,0) is Safe, leaving (2,0)=Count(1) with 0 available cells
         // and 1 remaining mine (solution_count == 0).
-        let field = MineField::create("0.1", 1);
+        let field = MineField::create("0.1");
 
         assert_ne!(field.cells[0].is_invalid(), field.cells[2].is_invalid());
         let invalid: Vec<_> = field.recent_invalid_cells().collect();
@@ -1500,7 +1512,7 @@ mod tests {
         // 4x1 strip: [(0,0)=Count(1), (1,0)=Unknown, (2,0)=Unknown, (3,0)=Unknown]
         // Round 1: Reveal (0,0)=Count(1) -> infers (1,0) is Mine, and updates (2,0)'s
         // inferred_mine_neighbors to include W.
-        let mut field = MineField::create("1...", 1);
+        let mut field = MineField::create("1...");
         assert!(field.cells[1].value().is_mine());
         assert_eq!(field.cells[2].mine_neighbors(), !!W);
 
@@ -1519,7 +1531,7 @@ mod tests {
     fn test_inference_breaking_updates_clear_and_recompute_inferences() {
         // 3x1 strip: [(0,0), (1,0), (2,0)]
         // Round 1: Reveal (1,0) as Count(2) -> both (0,0) and (2,0) are inferred as Mine.
-        let mut field = MineField::create(".2.", 2);
+        let mut field = MineField::create(".2.");
         assert!(field.cells[0].value().is_mine());
         assert!(field.cells[2].value().is_mine());
 
@@ -1567,7 +1579,7 @@ mod tests {
         // Two independent partitions:
         // - Left partition {(0,0), (1,0)} infers (1,0) is Mine.
         // - Right partition {(3,0), (4,0)} infers (3,0) is Mine.
-        let mut field = MineField::create("1...1", 2);
+        let mut field = MineField::create("1...1");
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_mine());
         let right_pid = field.cells[4].partition_id();
@@ -1598,7 +1610,7 @@ mod tests {
         // 3x1 strip: [(0,0)=Count(0), (1,0)=Unknown, (2,0)=Count(1)]
         // (0,0) is visited first (mine_count = 0), inferring (1,0) is Safe.
         // (2,0) is visited last (mine_count = 1), and index 2 is added to `field.invalid`.
-        let mut field = MineField::create("0.1", 1);
+        let mut field = MineField::create("0.1");
         let invalid: Vec<_> = field.recent_invalid_cells().collect();
         // solver is free to mark the center as either  a mine or not
         if field.cells[1].value().is_mine() {
@@ -1645,7 +1657,7 @@ mod tests {
         // Right: [(4,0), (5,0), (6,0)]
         // Step 1: Set (2,0) = Count(1) first (infers (1,0) = Mine),
         // and set (4,0) = Count(0), (6,0) = Count(1) (marks index 6 invalid).
-        let mut field = MineField::create("..1.0.1", 2);
+        let mut field = MineField::create("..1.0.1");
         assert!(field.cells[1].value().is_mine());
         // one of id: 4 or id: 6 is invalid
         assert_ne!(field.cells[4].is_invalid(), field.cells[6].is_invalid());
@@ -1679,7 +1691,6 @@ mod tests {
         let field = MineField::create(
             ".333.
              .....",
-            5,
         );
 
         // (1,1), (2,1), (3,1) are inferred as Mine and removed from partitions (partition_id == 0).
@@ -1739,7 +1750,7 @@ mod tests {
 
     #[test]
     fn test_index_pending_updates_masks_and_logs_neighbors() {
-        let mut field = MineField::new(3, 1, 1).unwrap();
+        let mut field = MineField::new(3, 1).unwrap();
         field
             .set_cell_helper(UserCell {
                 point: Point { x: 1, y: 0 },
@@ -1770,7 +1781,7 @@ mod tests {
 
     #[test]
     fn test_index_pending_routes_breaking_changes_to_breaking_log() {
-        let mut field = MineField::new(3, 1, 1).unwrap();
+        let mut field = MineField::new(3, 1).unwrap();
         // Simulate a previously inferred-safe cell in the middle.
         field.cells[1].set_value(CellValue::INFERRED_SAFE);
 
@@ -1803,7 +1814,6 @@ mod tests {
         let mut field = MineField::create(
             "1...1
              .....",
-            2,
         );
         assert_partition_invariants(&field);
         field.update("..2");
@@ -1818,7 +1828,7 @@ mod tests {
     #[test]
     fn test_partition_split_leaves_no_stale_partition_ids() {
         // Initially one partition {0..=4} bridged through cell 2.
-        let mut field = MineField::create(".1.1.", 2);
+        let mut field = MineField::create(".1.1.");
         assert_eq!(field.partitions.len(), 1);
 
         // Reverting cell 1 to Unknown leaves only {2, 3, 4} connected.
@@ -1830,7 +1840,7 @@ mod tests {
 
     #[test]
     fn test_partition_dissolution_leaves_no_stale_partition_ids() {
-        let mut field = MineField::create(".1.", 1);
+        let mut field = MineField::create(".1.");
         assert_eq!(field.partitions.len(), 1);
 
         field.update("._");
@@ -1845,7 +1855,6 @@ mod tests {
         let mut field = MineField::create(
             "1...1
              .....",
-            2,
         );
         let before: Vec<_> = field.cells.iter().map(|c| c.partition_id()).collect();
 
@@ -1859,14 +1868,13 @@ mod tests {
         let field = MineField::create(
             "2.13
              2.1.",
-            3,
         );
         assert!(field.recent_invalid_cells().next().is_some());
     }
 
     #[test]
     fn test_partition_create_skips_mines_and_isolated_cells() {
-        let mut field = MineField::new(2, 1, 1).unwrap();
+        let mut field = MineField::new(2, 1).unwrap();
         // Cell 0 is Unknown with no safe_neighbors (isolated)
         assert_eq!(
             MineField::walk_solved(CellIdx(0), &mut FieldArgs::new(&mut field), &mut |_, _| {}),
@@ -1887,7 +1895,7 @@ mod tests {
     #[test]
     fn test_partition_create_connected_bipartite_component() {
         // 3x1 board: [Count(1), Unknown, Count(2)]
-        let mut field = MineField::new(3, 1, 1).unwrap();
+        let mut field = MineField::new(3, 1).unwrap();
         field.cells[0].set_value(CellValue::for_mine_count(1));
         field.cells[0].set_unknown(E);
 
@@ -1911,7 +1919,7 @@ mod tests {
     #[test]
     fn test_compact_partition_ids() {
         let spec = "1.1\n...\n1.1";
-        let mut field = MineField::create(spec, 2);
+        let mut field = MineField::create(spec);
         assert!(!field.partitions.is_empty());
         let orig_partition_count = field.partitions.len();
 
@@ -1942,7 +1950,7 @@ mod tests {
     #[test]
     fn test_minefield_clone_and_rebuild_from_scratch() {
         let spec = "111\n1*1\n111";
-        let field = MineField::create(spec, 1);
+        let field = MineField::create(spec);
 
         // Exact clone preserves all internal cell states and partition structures
         let cloned = field.clone();
