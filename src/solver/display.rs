@@ -1,6 +1,6 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::cell::{InferredValue, UserCellValue, UserCellWithInference};
+use crate::solver::cell::{InferredValue, UserCellValue, UserValueWithInference};
 
 use super::MineField;
 use colored::Colorize;
@@ -63,26 +63,26 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
     write!(f, "{:4}", row * field.width)?;
     for col in 0..field.width {
         write!(f, "{}", "│ ".bold())?;
-        let cell = field.cells()[col as usize + row as usize * field.width as usize];
-        let user_value: UserCellWithInference = cell.value().into();
+        let cell = field.cells[col as usize + row as usize * field.width as usize];
+        let user_value: UserValueWithInference = cell.value().into();
         let printable = match user_value {
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::None,
             } => " ".on_bright_black(),
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
             } => " ".on_bright_red(),
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Safe,
             } => " ".on_green(),
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Mine,
                 inferred: _,
             } => " ".on_bright_red(),
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Safe(c),
                 inferred: _,
             } => match c {

@@ -96,9 +96,20 @@ pub enum InferredValue {
 /// `inferred` is only ever non-[`InferredValue::None`] when `value` is
 /// [`UserCellValue::Unknown`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UserCellWithInference {
+pub struct UserValueWithInference {
     /// The value supplied by the user.
     pub value: UserCellValue,
+    /// The solver's deduction for this cell.
+    pub inferred: InferredValue,
+}
+
+/// A user-visible cell paired with whatever the solver has inferred about it.
+///
+/// `inferred` is only ever non-[`InferredValue::None`] when `value` is
+/// [`UserCellValue::Unknown`].
+pub struct UserCellWithInference {
+    /// The value supplied by the user.
+    pub cell: UserCell,
     /// The solver's deduction for this cell.
     pub inferred: InferredValue,
 }
@@ -193,6 +204,7 @@ impl CellValue {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(super) fn is_safe(&self) -> bool {
         self.0 & Self::SAFE_MASK != 0
     }
@@ -255,26 +267,26 @@ impl From<UserCellValue> for CellValue {
     }
 }
 
-impl From<UserCellWithInference> for CellValue {
-    fn from(value: UserCellWithInference) -> Self {
+impl From<UserValueWithInference> for CellValue {
+    fn from(value: UserValueWithInference) -> Self {
         match value {
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Mine,
                 inferred: InferredValue::None,
             } => CellValue::MINE,
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
             } => CellValue::INFERRED_MINE,
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Safe,
             } => CellValue::INFERRED_SAFE,
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::None,
             } => CellValue::UNKNOWN,
-            UserCellWithInference {
+            UserValueWithInference {
                 value: UserCellValue::Safe(c),
                 ..
             } => CellValue::for_mine_count(c),
@@ -283,26 +295,26 @@ impl From<UserCellWithInference> for CellValue {
     }
 }
 
-impl From<CellValue> for UserCellWithInference {
+impl From<CellValue> for UserValueWithInference {
     fn from(value: CellValue) -> Self {
         match value {
-            CellValue::MINE => UserCellWithInference {
+            CellValue::MINE => UserValueWithInference {
                 value: UserCellValue::Mine,
                 inferred: InferredValue::None,
             },
-            CellValue::INFERRED_MINE => UserCellWithInference {
+            CellValue::INFERRED_MINE => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
             },
-            CellValue::INFERRED_SAFE => UserCellWithInference {
+            CellValue::INFERRED_SAFE => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Safe,
             },
-            CellValue::UNKNOWN => UserCellWithInference {
+            CellValue::UNKNOWN => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::None,
             },
-            c => UserCellWithInference {
+            c => UserValueWithInference {
                 value: UserCellValue::Safe(c.0 & 0xf),
                 inferred: InferredValue::None,
             },
@@ -1035,18 +1047,18 @@ mod tests {
             UserCellValue::Safe(8),
         ] {
             let internal: CellValue = user_value.into();
-            let with_inference: UserCellWithInference = internal.into();
+            let with_inference: UserValueWithInference = internal.into();
             assert_eq!(with_inference.value, user_value);
             assert_eq!(with_inference.inferred, InferredValue::None);
             assert_eq!(CellValue::from(with_inference), internal);
         }
 
-        let inferred_mine: UserCellWithInference = CellValue::INFERRED_MINE.into();
+        let inferred_mine: UserValueWithInference = CellValue::INFERRED_MINE.into();
         assert_eq!(inferred_mine.value, UserCellValue::Unknown);
         assert_eq!(inferred_mine.inferred, InferredValue::Mine);
         assert_eq!(CellValue::from(inferred_mine), CellValue::INFERRED_MINE);
 
-        let inferred_safe: UserCellWithInference = CellValue::INFERRED_SAFE.into();
+        let inferred_safe: UserValueWithInference = CellValue::INFERRED_SAFE.into();
         assert_eq!(inferred_safe.value, UserCellValue::Unknown);
         assert_eq!(inferred_safe.inferred, InferredValue::Safe);
         assert_eq!(CellValue::from(inferred_safe), CellValue::INFERRED_SAFE);

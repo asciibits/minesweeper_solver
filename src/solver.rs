@@ -13,7 +13,7 @@ use crate::{
     solver::{
         cell::{
             CellIdx, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs, FlagMask,
-            GuardedQueue, UserCellWithInference, cell_idx, coordinates,
+            GuardedQueue, UserCellWithInference, UserValueWithInference, cell_idx, coordinates,
         },
         grid::Neighbor,
         metrics::Metrics,
@@ -193,13 +193,8 @@ impl MineField {
     }
 
     /// Returns the [`UserCellWithInference`] at the given coordinate `p`.
-    pub fn cell(&self, p: Point) -> UserCellWithInference {
+    pub fn cell(&self, p: Point) -> UserValueWithInference {
         self.cells[self.cell_idx(p)].value().into()
-    }
-
-    #[cfg(test)]
-    fn cells(&self) -> &[Cell] {
-        &self.cells
     }
 
     /// Applies a batch of cell updates to an existing [`MineField`] using the ASCII `field_spec` format.
@@ -297,22 +292,20 @@ impl MineField {
             .map(|(i, &v)| (CellIdx(i as u32), v))
     }
 
-    pub fn inferred_safe(&self) -> impl Iterator<Item = Point> {
-        self.cell_iterator()
-            .filter(|&(_, c)| c.value().is_safe() && c.value().is_inferred())
-            .map(|(i, _)| coordinates(i, self.width))
-    }
-
-    pub fn inferred_mines(&self) -> impl Iterator<Item = Point> {
-        self.cell_iterator()
-            .filter(|&(_, c)| c.value().is_mine() && c.value().is_inferred())
-            .map(|(i, _)| coordinates(i, self.width))
-    }
-
-    pub fn invalid(&self) -> impl Iterator<Item = Point> {
-        self.cell_iterator()
-            .filter(|&(_, c)| c.is_invalid())
-            .map(|(i, _)| coordinates(i, self.width))
+    /// Provide a user view into the cell array. Note: There is no direct, fast access to all
+    /// "inferred" cells. This is intentional; For fast access, refer to `recent_inferred` after
+    /// each solve pass.
+    pub fn cells(&self) -> impl Iterator<Item = UserCellWithInference> {
+        self.cell_iterator().map(|(i, c)| {
+            let v: UserValueWithInference = c.value().into();
+            UserCellWithInference {
+                cell: UserCell {
+                    point: coordinates(i, self.width),
+                    value: v.value,
+                },
+                inferred: v.inferred,
+            }
+        })
     }
 
     pub fn recent_inferred(&self) -> impl Iterator<Item = Point> {
@@ -697,7 +690,7 @@ impl Display for MineField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for y in 0..self.height {
             for x in 0..self.width {
-                let UserCellWithInference { value, inferred } = self.cell(Point { x, y });
+                let UserValueWithInference { value, inferred } = self.cell(Point { x, y });
                 let char = match (value, inferred) {
                     (UserCellValue::Mine, _) => '*',
                     (UserCellValue::Safe(n), _) => n.to_string().chars().next().unwrap(),
@@ -905,7 +898,7 @@ mod tests {
             Point { x: 2, y: 1 },
         ] {
             let idx = pt.to_index(field.width());
-            assert!(field.cells()[idx].value().is_safe());
+            assert!(field.cells[idx].value().is_safe());
         }
     }
 
@@ -1593,11 +1586,17 @@ mod tests {
         assert!(field.cells[3].value().is_mine());
         assert_eq!(field.cells[4].partition_id(), right_pid);
         assert_eq!(
-            field.inferred_safe().collect::<Vec<_>>(),
+            field
+                .cells()
+                .filter_map(|v| (v.inferred == InferredValue::Safe).then_some(v.cell.point))
+                .collect::<Vec<_>>(),
             vec![Point { x: 1, y: 0 }]
         );
         assert_eq!(
-            field.inferred_mines().collect::<Vec<_>>(),
+            field
+                .cells()
+                .filter_map(|v| (v.inferred == InferredValue::Mine).then_some(v.cell.point))
+                .collect::<Vec<_>>(),
             vec![Point { x: 3, y: 0 }]
         );
         for cell in &field.cells {
