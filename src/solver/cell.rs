@@ -229,6 +229,17 @@ impl CellValue {
         self.0 == 0
     }
 
+    pub(super) fn cell_type(&self) -> CellType {
+        match self.0 >> 5 {
+            0b000 => CellType::Unknown,
+            0b010 => CellType::Mine,
+            0b011 => CellType::InferredMine,
+            0b100 => CellType::Safe,
+            0b101 => CellType::InferredSafe,
+            _ => unreachable!(),
+        }
+    }
+
     /// Returns `true` if `other` is the same "type" is this. This means that both will return the
     /// same result for [`CellValue::is_safe`], [`CellValue::is_mine`], and
     /// [`CellValue::is_unknown`]. Note: This wil return `false` if one is an inferred mine and the
@@ -331,6 +342,16 @@ impl Display for CellValue {
             CellValue(c) => write!(f, "{}#", c & 0xf),
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub(super) enum CellType {
+    #[default]
+    Unknown,
+    Safe,
+    InferredSafe,
+    Mine,
+    InferredMine,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -682,12 +703,10 @@ impl Cell {
         Self::check_cell_solve(idx, inference_breaking, field_args);
 
         if !prev_val.types_match(value) {
-            let mark_neighbor = if value.is_unknown() {
-                Self::mark_neighbor_unknown
-            } else if value.is_mine() {
-                Self::mark_neighbor_mine
-            } else {
-                Self::mark_neighbor_safe
+            let mark_neighbor = match value.cell_type() {
+                CellType::Unknown => Self::mark_neighbor_unknown,
+                CellType::Mine | CellType::InferredMine => Self::mark_neighbor_mine,
+                CellType::Safe | CellType::InferredSafe => Self::mark_neighbor_safe,
             };
 
             let neighbors = field_args.cells[idx].neighbors();

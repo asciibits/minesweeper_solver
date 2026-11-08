@@ -527,10 +527,7 @@ impl MineField {
     ) -> usize {
         // process a "known" cell - i.e. a safe cell with a mine count
         let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id
-            || cell.value().is_inferred()
-            || !cell.value().has_count()
-        {
+        if cell.partition_id() == *field_args.next_partition_id || !cell.value().has_count() {
             return 0;
         }
         cell.set_partition_id(*field_args.next_partition_id);
@@ -577,10 +574,7 @@ impl MineField {
     ) -> usize {
         // process a "known" cell - i.e. a safe cell with a mine count
         let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id
-            || cell.value().is_inferred()
-            || !cell.value().has_count()
-        {
+        if cell.partition_id() == *field_args.next_partition_id || !cell.value().has_count() {
             return 0;
         }
 
