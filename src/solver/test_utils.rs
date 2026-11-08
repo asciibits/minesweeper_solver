@@ -826,6 +826,7 @@ mod tests {
         }
     }
 
+    #[cfg(test)]
     fn validate_incremental_field(inc_field: &MineField, validation_metrics: &mut Metrics) {
         let fresh_field = inc_field.rebuild_from_scratch();
         validation_metrics.tally_game(&fresh_field.metrics);
