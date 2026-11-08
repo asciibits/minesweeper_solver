@@ -516,6 +516,8 @@ pub(super) struct Cell {
 
     mine_neighbors: DirectionSet,
 
+    safe_neighbors: DirectionSet,
+
     partition_id: u16,
 
     flags: CellFlags,
@@ -537,6 +539,7 @@ impl Cell {
                     neighbors,
                     unknown_neighbors: neighbors,
                     mine_neighbors: DirectionSet::new(),
+                    safe_neighbors: DirectionSet::new(),
                     partition_id: 0,
                     flags: CellFlags::new(),
                 });
@@ -592,7 +595,7 @@ impl Cell {
     /// Returns the mask of neighbors known or inferred to be safe.
     #[inline]
     pub(super) fn safe_neighbors(&self) -> DirectionSet {
-        self.neighbors - (self.mine_neighbors | self.unknown_neighbors)
+        self.safe_neighbors
     }
 
     /// Returns the mask of neighbors known or inferred to be mines.
@@ -660,16 +663,19 @@ impl Cell {
     pub(super) fn set_unknown(&mut self, direction: Direction) {
         self.unknown_neighbors |= direction;
         self.mine_neighbors -= direction;
+        self.safe_neighbors -= direction;
     }
 
     pub(super) fn set_safe(&mut self, direction: Direction) {
         self.unknown_neighbors -= direction;
         self.mine_neighbors -= direction;
+        self.safe_neighbors |= direction;
     }
 
     pub(super) fn set_mine(&mut self, direction: Direction) {
         self.unknown_neighbors -= direction;
         self.mine_neighbors |= direction;
+        self.safe_neighbors -= direction;
     }
 
     /// Sets `cells[idx]` to `value` and updates the `unknown`/`mine` neighbor masks of every
@@ -829,6 +835,7 @@ impl Cell {
     #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.mine_neighbors = DirectionSet::EMPTY;
+        self.safe_neighbors = DirectionSet::EMPTY;
         self.unknown_neighbors = self.neighbors;
         self.value = CellValue::UNKNOWN;
     }
