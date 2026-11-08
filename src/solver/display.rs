@@ -13,7 +13,6 @@ use std::{
 pub(super) struct ColoredMineField<'a>(&'a MineField);
 
 impl<'a> ColoredMineField<'a> {
-    #[cfg(debug_assertions)]
     #[allow(dead_code)]
     pub(super) fn eprintln(field: &'a MineField) {
         eprintln!("{}", ColoredMineField(field));
@@ -290,7 +289,6 @@ mod tests {
         field_builder
     }
 
-    #[cfg(debug_assertions)]
     #[test]
     fn test_print() {
         let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });

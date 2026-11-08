@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub(crate) mod cell;
-#[cfg(test)]
+#[cfg(any(test, feature = "debug"))]
 mod display;
 pub(crate) mod grid;
 mod metrics;

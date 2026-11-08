@@ -832,7 +832,7 @@ mod tests {
         validation_metrics.tally_game(&fresh_field.metrics);
 
         // validate cells are identical, aside from a partition_id remapping
-        for ((_idx, inc_cell), fresh_cell) in inc_field
+        for ((idx, inc_cell), fresh_cell) in inc_field
             .cells
             .iter()
             .copied()
@@ -847,7 +847,7 @@ mod tests {
                     eprintln!("Fresh:");
                     ColoredMineField::eprintln(&fresh_field);
                 }
-                panic!("Cells don't match: {inc_cell}, {fresh_cell}");
+                panic!("Cells [{idx}] don't match: {inc_cell}, {fresh_cell}");
             }
         }
     }
@@ -906,8 +906,13 @@ mod tests {
 
         let mut loop_count = 0;
         loop {
-            // DetailMineField::eprintln(&builder.field);
-            // ColoredMineField::println(&builder.field);
+            #[cfg(feature = "debug")]
+            {
+                use crate::solver::display::DetailMineField;
+
+                DetailMineField::eprintln(&builder.field);
+                ColoredMineField::println(&builder.field);
+            }
             let inferred: Vec<_> = builder.field.recent_inferred_safe_cells().collect();
             if inferred.is_empty() {
                 let partition = builder

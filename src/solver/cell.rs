@@ -674,7 +674,7 @@ impl Cell {
         neighbor.set_unknown(from);
         Self::check_cell_solve(n_idx, was_solved, field_args);
 
-        // When a clue neighbor reverts to unknown, any other clue cells sharing this unknown
+        // When a count neighbor reverts to unknown, any other count cells sharing this unknown
         // cell may have had their partition split and need to be repartitioned.
         if field_args.cells[n_idx].value().is_unknown() {
             let safe_neighbors = field_args.cells[n_idx].safe_neighbors();
@@ -882,7 +882,7 @@ impl BuildHasher for FastNumberHasherBuilder {
     }
 }
 
-/// A known clue cell annotated with its local combinatorial complexity (`solution_count`),
+/// A known count cell annotated with its local combinatorial complexity (`solution_count`),
 /// ordered from most constrained (fewest valid mine placements) to least constrained.
 ///
 /// TODO: Implement the brute-force solution counting
@@ -890,7 +890,7 @@ impl BuildHasher for FastNumberHasherBuilder {
 pub(super) struct CellOrdering {
     /// Linear index of the cell on the board.
     idx: CellIdx,
-    /// Original clue count on the cell.
+    /// Original count count on the cell.
     mine_count: u8,
     /// Number of mines still unaccounted for among the cell's unknown neighbors.
     remaining_mines: i8,
@@ -902,7 +902,7 @@ pub(super) struct CellOrdering {
 
 #[allow(dead_code)]
 impl CellOrdering {
-    /// Constructs a [`CellOrdering`] if `cell` holds a known clue (`Safe(n)`), or `None` otherwise.
+    /// Constructs a [`CellOrdering`] if `cell` holds a known count (`Safe(n)`), or `None` otherwise.
     pub(super) fn from_cell(idx: CellIdx, cell: &Cell) -> Option<CellOrdering> {
         if let Some(mine_count) = cell.value().safe_mine_count() {
             let available_cells = cell.unknown_neighbors().len();
@@ -1025,7 +1025,7 @@ mod tests {
 
         assert!(CellValue::INFERRED_MINE.is_mine() && CellValue::INFERRED_MINE.is_inferred());
         assert!(CellValue::INFERRED_SAFE.is_safe() && CellValue::INFERRED_SAFE.is_inferred());
-        // inferred-safe cells carry no clue, so they must not look like a Count cell
+        // inferred-safe cells carry no count, so they must not look like a Count cell
         assert_eq!(CellValue::INFERRED_SAFE.safe_mine_count(), None);
 
         let three = CellValue::for_mine_count(3);
@@ -1100,7 +1100,7 @@ mod tests {
             CellValueChangeType::NonBreaking
         );
 
-        // changing a clue invalidates every inference derived from it
+        // changing a count invalidates every inference derived from it
         let mut v = one;
         assert_eq!(v.set_value(two), CellValueChangeType::Breaking);
 
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_is_invalid_detects_unsatisfiable_clues() {
+    fn test_cell_is_invalid_detects_unsatisfiable_counts() {
         // 2x1 strip [Count(2), Unknown]: needs 2 mines but only 1 unknown neighbor -> invalid
         let mut cells = Cell::grid(2, 1);
         cells[0].value_mut().set_value(CellValue::for_mine_count(2));
