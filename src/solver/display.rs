@@ -235,7 +235,7 @@ impl<'a> Display for DetailMineField<'a> {
         write_comma_separated(f, &self.0.pending, |f, &(i, v)| write!(f, "({i}: {v})"))?;
         write!(f, "],")?;
         write!(f, "{spacer}unsolved: [")?;
-        write_comma_separated(f, self.0.unsolved_queue.iter(), |f, i| write!(f, "{i}"))?;
+        write_comma_separated(f, self.0.desolved_queue.iter(), |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
         write!(f, "{spacer}solved: [")?;
         write_comma_separated(f, self.0.solved_queue.iter(), |f, i| write!(f, "{i}"))?;

@@ -90,7 +90,7 @@ impl Metrics {
     pub(super) fn unsolved_duration(&self) -> Duration {
         self.unsolved_duration
     }
-    pub(super) fn inc_unsolved_duration(&mut self) {
+    pub(super) fn inc_desolved_duration(&mut self) {
         let now = Instant::now();
         self.unsolved_duration += now - *self.mark_time.get_or_insert(Instant::now());
         self.mark_time = Some(now);
@@ -315,7 +315,7 @@ mod tests {
         let mut m = Metrics::default();
         m.mark_now();
         m.inc_indexing_duration();
-        m.inc_unsolved_duration();
+        m.inc_desolved_duration();
         m.inc_basic_solve_duration();
         m.inc_partition_duration();
 

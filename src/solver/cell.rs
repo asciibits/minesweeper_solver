@@ -383,8 +383,8 @@ impl Display for CellFlags {
         if self.is_marked(FlagMask::SOLVED_QUEUE) {
             write!(f, "SOLVED,")?;
         }
-        if self.is_marked(FlagMask::UNSOLVED_QUEUE) {
-            write!(f, "UNSOLVED,")?;
+        if self.is_marked(FlagMask::DESOLVED_QUEUE) {
+            write!(f, "DESOLVED,")?;
         }
         write!(f, "]")
     }
@@ -396,7 +396,7 @@ pub(super) struct FlagMask(u8);
 impl FlagMask {
     pub(super) const PENDING_PARTITION: FlagMask = FlagMask(0b1);
     pub(super) const SOLVED_QUEUE: FlagMask = FlagMask(0b10);
-    pub(super) const UNSOLVED_QUEUE: FlagMask = FlagMask(0b100);
+    pub(super) const DESOLVED_QUEUE: FlagMask = FlagMask(0b100);
 }
 
 /// A queue of CellIdx instances that ensures elements are only added once
@@ -715,7 +715,7 @@ impl Cell {
         let cell = field_args.cells[idx];
         if inference_breaking {
             // Inferences attached to this cell's partition may be invalidated. Reset inferred.
-            field_args.unsolved_queue.push(field_args.cells, idx);
+            field_args.desolved_queue.push(field_args.cells, idx);
         }
         if cell.value().has_count() {
             field_args
@@ -819,7 +819,7 @@ pub(super) struct FieldArgs<'field> {
     pub(super) cells: &'field mut [Cell],
     pub(super) width: u32,
     pub(super) next_partition_id: &'field mut u16,
-    pub(super) unsolved_queue: &'field mut GuardedQueue,
+    pub(super) desolved_queue: &'field mut GuardedQueue,
     pub(super) solved_queue: &'field mut GuardedQueue,
     pub(super) pending_partition_queue: &'field mut GuardedQueue,
     pub(super) metrics: &'field mut Metrics,
@@ -832,7 +832,7 @@ impl<'field> FieldArgs<'field> {
             cells: &mut field.cells,
             width: field.width,
             next_partition_id: &mut field.next_partition_id,
-            unsolved_queue: &mut field.unsolved_queue,
+            desolved_queue: &mut field.desolved_queue,
             solved_queue: &mut field.solved_queue,
             pending_partition_queue: &mut field.pending_partition_queue,
             metrics: &mut field.metrics,
@@ -1239,7 +1239,7 @@ mod tests {
         let mut flags = CellFlags::new();
         assert!(!flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(!flags.is_marked(FlagMask::SOLVED_QUEUE));
-        assert!(!flags.is_marked(FlagMask::UNSOLVED_QUEUE));
+        assert!(!flags.is_marked(FlagMask::DESOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[]");
 
         flags.mark(FlagMask::PENDING_PARTITION);
@@ -1250,20 +1250,20 @@ mod tests {
         assert!(flags.is_marked(FlagMask::SOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,]");
 
-        flags.mark(FlagMask::UNSOLVED_QUEUE);
-        assert!(flags.is_marked(FlagMask::UNSOLVED_QUEUE));
-        assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,UNSOLVED,]");
+        flags.mark(FlagMask::DESOLVED_QUEUE);
+        assert!(flags.is_marked(FlagMask::DESOLVED_QUEUE));
+        assert_eq!(format!("{flags}"), "[PENDING_PARTITION,SOLVED,DESOLVED,]");
 
         flags.clear(FlagMask::PENDING_PARTITION);
         assert!(!flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(flags.is_marked(FlagMask::SOLVED_QUEUE));
-        assert!(flags.is_marked(FlagMask::UNSOLVED_QUEUE));
+        assert!(flags.is_marked(FlagMask::DESOLVED_QUEUE));
 
         flags.clear(FlagMask::SOLVED_QUEUE);
         assert!(!flags.is_marked(FlagMask::SOLVED_QUEUE));
 
-        flags.clear(FlagMask::UNSOLVED_QUEUE);
-        assert!(!flags.is_marked(FlagMask::UNSOLVED_QUEUE));
+        flags.clear(FlagMask::DESOLVED_QUEUE);
+        assert!(!flags.is_marked(FlagMask::DESOLVED_QUEUE));
         assert_eq!(format!("{flags}"), "[]");
     }
 

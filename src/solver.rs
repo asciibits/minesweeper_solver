@@ -48,7 +48,7 @@ pub struct MineField {
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
     pending: VecDeque<(CellIdx, CellValue)>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
-    unsolved_queue: GuardedQueue,
+    desolved_queue: GuardedQueue,
     /// Queue of clue cells whose neighbor values have become solvable.
     solved_queue: GuardedQueue,
     /// Queue of seed cells whose connected frontier needs to be partitioned or repartitioned.
@@ -118,7 +118,7 @@ impl MineField {
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
             next_partition_id: 1,
             pending: VecDeque::with_capacity(area / 4),
-            unsolved_queue: GuardedQueue::with_capacity(0, FlagMask::UNSOLVED_QUEUE),
+            desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVED_QUEUE),
             solved_queue: GuardedQueue::with_capacity(perimeter, FlagMask::SOLVED_QUEUE),
             pending_partition_queue: GuardedQueue::with_capacity(
                 area / 4,
@@ -389,19 +389,19 @@ impl MineField {
         self.index_pending();
         self.metrics.inc_indexing_duration();
 
-        // process the "unsolved" queue - i.e. reset all inferences attached to the provided cells
+        // process the "desolved" queue - i.e. reset all inferences attached to the provided cells
         #[cfg(feature = "debug")]
         if debug {
-            eprint!("Post indexing, Pre unsolved.");
+            eprint!("Post indexing, Pre desolved.");
             DetailMineField::eprintln(self);
         }
-        self.process_unsolved();
-        self.metrics.inc_unsolved_duration();
+        self.process_desolved();
+        self.metrics.inc_desolved_duration();
 
         // process the "solved" queue - i.e. find solved cells and mark their neighbors inferred
         #[cfg(feature = "debug")]
         if debug {
-            eprint!("Post unsolved, Pre solved.");
+            eprint!("Post desolved, Pre solved.");
             DetailMineField::eprintln(self);
         }
         self.process_solved();
@@ -429,9 +429,9 @@ impl MineField {
         }
     }
 
-    fn process_unsolved(&mut self) {
+    fn process_desolved(&mut self) {
         let next_partition_id = self.next_partition_id;
-        while let Some(idx) = self.unsolved_queue.pop(&mut self.cells) {
+        while let Some(idx) = self.desolved_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
 
             if cell.partition_id() == next_partition_id {
@@ -439,7 +439,7 @@ impl MineField {
             }
             self.pending_partition_queue.push(&mut self.cells, idx);
 
-            Self::walk_unsolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
+            Self::walk_desolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
                 field_args
                     .pending_partition_queue
                     .push(field_args.cells, idx);
@@ -498,7 +498,7 @@ impl MineField {
         }
     }
 
-    fn walk_known_unsolved(
+    fn walk_known_desolved(
         idx: CellIdx,
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
@@ -519,12 +519,12 @@ impl MineField {
         visit(idx, field_args);
         field_args.metrics.inc_neighbor_visits(neighbors);
         for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_unknown_unsolved(neighbor, field_args, visit);
+            len += Self::walk_unknown_desolved(neighbor, field_args, visit);
         }
         len
     }
 
-    fn walk_unknown_unsolved(
+    fn walk_unknown_desolved(
         idx: CellIdx,
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
@@ -543,7 +543,7 @@ impl MineField {
         let mut len = 1;
         visit(idx, field_args);
         for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_known_unsolved(neighbor, field_args, visit);
+            len += Self::walk_known_desolved(neighbor, field_args, visit);
         }
         len
     }
@@ -601,13 +601,13 @@ impl MineField {
     // Step through the cells of a partition. Note: This function scans assuming the starting cell
     // has been mutated, and is unknown whether it was originally a known vs unknown. So, the
     // starting cell looks for *all* unknown + mine neighbors.
-    fn walk_unsolved(
+    fn walk_desolved(
         idx: CellIdx,
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
     ) -> usize {
-        let mut len = Self::walk_known_unsolved(idx, field_args, visit);
-        len += Self::walk_unknown_unsolved(idx, field_args, visit);
+        let mut len = Self::walk_known_desolved(idx, field_args, visit);
+        len += Self::walk_unknown_desolved(idx, field_args, visit);
         if len <= 1 {
             field_args.cells[idx].set_partition_id(0);
         } else if len > 1 {
@@ -756,7 +756,7 @@ impl MineField {
             partitions: self.partitions.clone(),
             next_partition_id: 1,
             pending,
-            unsolved_queue: self.unsolved_queue.clone(),
+            desolved_queue: self.desolved_queue.clone(),
             solved_queue: self.solved_queue.clone(),
             pending_partition_queue: self.pending_partition_queue.clone(),
             metrics: Metrics::default(),
@@ -765,7 +765,7 @@ impl MineField {
         };
         // clear the cloned collections for the new solve
         field.partitions.clear();
-        field.unsolved_queue.clear();
+        field.desolved_queue.clear();
         field.solved_queue.clear();
         field.pending_partition_queue.clear();
         field.recent_inferred.clear();
@@ -1801,7 +1801,7 @@ mod tests {
         let mut logged: Vec<CellIdx> = field
             .pending_partition_queue
             .iter()
-            .chain(field.unsolved_queue.iter())
+            .chain(field.desolved_queue.iter())
             .collect();
         logged.sort();
         logged.dedup();
@@ -1822,7 +1822,7 @@ mod tests {
             })
             .unwrap();
         field.index_pending();
-        assert!(field.unsolved_queue.is_empty());
+        assert!(field.desolved_queue.is_empty());
         assert!(!field.pending_partition_queue.is_empty());
         field.pending_partition_queue.clear();
 
@@ -1835,7 +1835,7 @@ mod tests {
             })
             .unwrap();
         field.index_pending();
-        assert!(!field.unsolved_queue.is_empty());
+        assert!(!field.desolved_queue.is_empty());
     }
 
     #[test]
@@ -1848,10 +1848,10 @@ mod tests {
         field.update("..2");
         assert_eq!(field.partitions.len(), 1);
         assert_partition_invariants(&field);
-        // pending/unsolved queues are fully drained after a solve pass
+        // pending/desolved queues are fully drained after a solve pass
         assert!(field.pending.is_empty());
         assert!(field.pending_partition_queue.is_empty());
-        assert!(field.unsolved_queue.is_empty());
+        assert!(field.desolved_queue.is_empty());
     }
 
     #[test]
