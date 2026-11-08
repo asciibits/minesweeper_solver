@@ -673,9 +673,11 @@ impl Cell {
             CellValueChangeType::Breaking => true,
         };
 
-        field_args
-            .pending_partition_queue
-            .push(field_args.cells, idx);
+        if cell.value().has_count() {
+            field_args
+                .pending_partition_queue
+                .push(field_args.cells, idx);
+        }
 
         Self::check_cell_solve(idx, inference_breaking, field_args);
 

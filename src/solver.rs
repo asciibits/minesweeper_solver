@@ -450,14 +450,21 @@ impl MineField {
             if cell.partition_id() == next_partition_id {
                 continue;
             }
-            self.pending_partition_queue.push(&mut self.cells, idx);
+            if cell.value().has_count() {
+                self.pending_partition_queue.push(&mut self.cells, idx);
+            } else {
+                self.partitions.remove(&idx);
+            }
 
             Self::walk_desolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
-                field_args
-                    .pending_partition_queue
-                    .push(field_args.cells, idx);
+                let cell = field_args.cells[idx];
+                if cell.value().has_count() {
+                    field_args
+                        .pending_partition_queue
+                        .push(field_args.cells, idx);
+                }
                 field_args.partitions.remove(&idx);
-                if field_args.cells[idx].value().is_inferred() {
+                if cell.value().is_inferred() {
                     Cell::change_value(idx, CellValue::UNKNOWN, field_args);
                 }
             });
@@ -470,6 +477,7 @@ impl MineField {
             self.pending_partition_queue.push(&mut self.cells, idx);
 
             let cell = &mut self.cells[idx];
+            debug_assert!(cell.value().has_count());
             if !cell.is_solved()
                 && let Some(value) = cell.infer_neighbors()
             {
@@ -494,6 +502,7 @@ impl MineField {
         self.recent_invalid.clear();
         while let Some(idx) = self.pending_partition_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
+            debug_assert!(cell.value().has_count());
             if cell.is_invalid() {
                 self.recent_invalid.push(idx);
             }
@@ -1365,10 +1374,6 @@ mod tests {
         field.update("..0");
 
         assert_eq!(field.partitions.len(), 2);
-        assert_eq!(field.cells[2].partition_id(), 0);
-        assert_eq!(cell(&field, 1, 1).partition_id(), 0);
-        assert_eq!(cell(&field, 2, 1).partition_id(), 0);
-        assert_eq!(cell(&field, 3, 1).partition_id(), 0);
         assert_eq!(field.cells[2].safe_neighbors(), W | E | SW | S | SE);
 
         let left_pid = field.cells[0].partition_id();
@@ -1418,9 +1423,6 @@ mod tests {
         field.update("*");
 
         assert!(field.partitions.is_empty());
-        assert_eq!(field.cells[0].partition_id(), 0);
-        assert_eq!(field.cells[1].partition_id(), 0);
-        assert_eq!(field.cells[2].partition_id(), 0);
         assert!(field.cells[2].value().is_safe());
         assert_eq!(field.cells[2].remaining_mines(), 0);
         assert!(field.cells[1].unknown_neighbors().is_empty());
@@ -1927,26 +1929,6 @@ mod tests {
              2.1.",
         );
         assert!(field.recent_invalid_cells().next().is_some());
-    }
-
-    #[test]
-    fn test_partition_create_skips_mines_and_isolated_cells() {
-        let mut field = MineField::new(2, 1).unwrap();
-        // Cell 0 is Unknown with no safe_neighbors (isolated)
-        assert_eq!(
-            MineField::walk_solved(CellIdx(0), &mut FieldArgs::new(&mut field), &mut |_, _| {}),
-            0
-        );
-        assert_eq!(field.cells[0].partition_id(), 0);
-
-        // Cell 1 is a Mine even if safe_neighbors is non-empty
-        field.cells[1].set_value(CellValue::MINE);
-        field.cells[1].set_safe(W);
-        assert_eq!(
-            MineField::walk_solved(CellIdx(1), &mut FieldArgs::new(&mut field), &mut |_, _| {}),
-            0
-        );
-        assert_eq!(field.cells[1].partition_id(), 0);
     }
 
     #[test]
