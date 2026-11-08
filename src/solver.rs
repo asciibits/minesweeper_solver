@@ -3,7 +3,7 @@ use cell::{Cell, UserCell, UserCellValue};
 use grid::Point;
 use std::{
     cmp::max,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     error::Error,
     fmt::{self, Display},
 };
@@ -15,7 +15,8 @@ use crate::{
     solver::{
         cell::{
             CellIdx, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs, FlagMask,
-            GuardedQueue, UserCellWithInference, UserValueWithInference, cell_idx, coordinates,
+            GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference, cell_idx,
+            coordinates,
         },
         grid::Neighbor,
         metrics::Metrics,
@@ -46,7 +47,7 @@ pub struct MineField {
     /// Next unique ID to assign to a newly walked partition.
     next_partition_id: u16,
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
-    pending: VecDeque<(CellIdx, CellValue)>,
+    pending: Vec<IdxAndCell>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
     desolved_queue: GuardedQueue,
     /// Queue of clue cells whose neighbor values have become solvable.
@@ -117,7 +118,7 @@ impl MineField {
             cells: Cell::grid(width, height),
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
             next_partition_id: 1,
-            pending: VecDeque::with_capacity(area / 4),
+            pending: Vec::with_capacity(area / 4),
             desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVED_QUEUE),
             solved_queue: GuardedQueue::with_capacity(perimeter, FlagMask::SOLVED_QUEUE),
             pending_partition_queue: GuardedQueue::with_capacity(
@@ -242,33 +243,14 @@ impl MineField {
         self.solve();
     }
 
-    /// Queues a single cell update in `self.pending` without running the solver.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SolverError::CoordinatesOutOfBounds`] if `p.x >= self.width` or `p.y >= self.height`.
-    fn set_cell_helper(&mut self, cell: UserCell) -> Result<(), SolverError> {
-        if cell.point.x >= self.width || cell.point.y >= self.height {
-            return Err(SolverError::CoordinatesOutOfBounds {
-                p: cell.point,
-                width: self.width,
-                height: self.height,
-            });
-        }
-        self.pending
-            .push_back((self.cell_idx(cell.point), cell.value.into()));
-        Ok(())
-    }
-
     /// Updates the board with the given [`crate::Cell`] and triggers a solver pass.
     ///
     /// # Errors
     ///
     /// Returns [`SolverError::CoordinatesOutOfBounds`] if `cell.point` is outside the board dimensions.
+    #[track_caller]
     pub fn set_cell(&mut self, cell: UserCell) -> Result<(), SolverError> {
-        self.set_cell_helper(cell)?;
-        self.solve();
-        Ok(())
+        self.set_cells([cell])
     }
 
     /// Updates a batch of [`crate::Cell`]s and runs a single solver pass after all updates are applied.
@@ -281,8 +263,21 @@ impl MineField {
         cells: impl IntoIterator<Item = UserCell>,
     ) -> Result<(), SolverError> {
         for cell in cells.into_iter() {
-            self.set_cell_helper(cell)?;
+            if cell.point.x >= self.width || cell.point.y >= self.height {
+                return Err(SolverError::CoordinatesOutOfBounds {
+                    p: cell.point,
+                    width: self.width,
+                    height: self.height,
+                });
+            }
+            self.pending.push(IdxAndCell {
+                idx: self.cell_idx(cell.point),
+                value: cell.value.into(),
+            });
         }
+
+        self.pending.sort();
+        self.pending.dedup();
         self.solve();
         Ok(())
     }
@@ -424,9 +419,27 @@ impl MineField {
     }
 
     fn index_pending(&mut self) {
-        while let Some((idx, new_value)) = self.pending.pop_front() {
-            self.change_cell_value(idx, new_value);
+        let mut has_breaking = false;
+        for i in 0..self.pending.len() {
+            let IdxAndCell { idx, value } = self.pending[i];
+            has_breaking |= matches!(
+                self.change_cell_value(idx, value),
+                CellValueChangeType::Breaking
+            );
         }
+        if has_breaking {
+            // There is a chance that an item landed in the solved queue that was later updated to a
+            // non-count cell. Clean up here to keep branching logic off the hot paths
+            for i in 0..self.pending.len() {
+                let IdxAndCell { idx, .. } = self.pending[i];
+                let cell = &mut self.cells[idx];
+                if !cell.value().has_count() {
+                    self.solved_queue.remove(&mut self.cells, idx);
+                    self.pending_partition_queue.remove(&mut self.cells, idx);
+                }
+            }
+        }
+        self.pending.clear();
     }
 
     fn process_desolved(&mut self) {
@@ -652,7 +665,7 @@ impl MineField {
     }
 
     /// Parses `field_spec` into an iterator of [`Cell`] updates, omitting skipped (`'.'` and `' '`) positions.
-    fn cells_from_spec(field_spec: &str, width: u32) -> impl Iterator<Item = (CellIdx, CellValue)> {
+    fn cells_from_spec(field_spec: &str, width: u32) -> impl Iterator<Item = IdxAndCell> {
         Self::to_cell_iter(Self::spec_to_iter(field_spec), width)
     }
 
@@ -660,7 +673,7 @@ impl MineField {
     /// iterator of [`Cell`] updates for all non-skipped positions.
     pub(self) fn cells_and_size_from_spec(
         field_spec: &str,
-    ) -> (u32, u32, impl Iterator<Item = (CellIdx, CellValue)>) {
+    ) -> (u32, u32, impl Iterator<Item = IdxAndCell>) {
         let cells: Vec<_> = Self::spec_to_iter(field_spec).collect();
 
         let size = cells
@@ -677,9 +690,13 @@ impl MineField {
     fn to_cell_iter(
         iter: impl IntoIterator<Item = (Point, Option<CellValue>)>,
         width: u32,
-    ) -> impl Iterator<Item = (CellIdx, CellValue)> {
-        iter.into_iter()
-            .filter_map(move |(p, v)| v.map(|value| (cell_idx(p, width), value)))
+    ) -> impl Iterator<Item = IdxAndCell> {
+        iter.into_iter().filter_map(move |(p, v)| {
+            v.map(|value| IdxAndCell {
+                idx: cell_idx(p, width),
+                value,
+            })
+        })
     }
 
     /// Parses `field_spec` into `(x, y, Option<CellValue>)` tuples for every character position in the spec.
@@ -741,10 +758,13 @@ impl MineField {
     /// Rebuilds a fresh [`MineField`] from the non-inferred known cells of this field and solves it from scratch.
     pub(super) fn rebuild_from_scratch(&self) -> Self {
         let mut cells = self.cells.clone();
-        let mut pending = VecDeque::with_capacity(self.pending.capacity());
+        let mut pending = Vec::with_capacity(self.pending.capacity());
         for (idx, cell) in cells.iter_mut().enumerate() {
             if !cell.value().is_inferred() && cell.value() != CellValue::UNKNOWN {
-                pending.push_back((CellIdx(idx as u32), cell.value()));
+                pending.push(IdxAndCell {
+                    idx: CellIdx(idx as u32),
+                    value: cell.value(),
+                });
             }
             cell.reset();
         }
@@ -981,15 +1001,30 @@ mod tests {
     fn test_cells_from_spec_and_update_minefield() {
         // Verify ' ' and '.' are filtered out while '_', 'x', '#', '*', and digits emit Cells.
         // Leading unspecified cell must use '.' because leading spaces are trimmed.
-        let cells: Vec<(CellIdx, CellValue)> = MineField::cells_from_spec(". 1_x#*", 7).collect();
+        let cells: Vec<IdxAndCell> = MineField::cells_from_spec(". 1_x#*", 7).collect();
         assert_eq!(
             cells,
             vec![
-                (CellIdx(2), CellValue::for_mine_count(1)),
-                (CellIdx(3), CellValue::UNKNOWN),
-                (CellIdx(4), CellValue::UNKNOWN),
-                (CellIdx(5), CellValue::UNKNOWN),
-                (CellIdx(6), CellValue::MINE),
+                IdxAndCell {
+                    idx: CellIdx(2),
+                    value: CellValue::for_mine_count(1)
+                },
+                IdxAndCell {
+                    idx: CellIdx(3),
+                    value: CellValue::UNKNOWN
+                },
+                IdxAndCell {
+                    idx: CellIdx(4),
+                    value: CellValue::UNKNOWN
+                },
+                IdxAndCell {
+                    idx: CellIdx(5),
+                    value: CellValue::UNKNOWN
+                },
+                IdxAndCell {
+                    idx: CellIdx(6),
+                    value: CellValue::MINE
+                },
             ]
         );
 
@@ -1780,13 +1815,10 @@ mod tests {
     #[test]
     fn test_index_pending_updates_masks_and_logs_neighbors() {
         let mut field = MineField::new(3, 1).unwrap();
-        field
-            .set_cell_helper(UserCell {
-                point: Point { x: 1, y: 0 },
-                value: UserCellValue::Safe(1),
-            })
-            .unwrap();
-        assert_eq!(field.pending.len(), 1);
+        field.pending.push(IdxAndCell {
+            idx: CellIdx(1),
+            value: CellValue::for_mine_count(1),
+        });
 
         field.index_pending();
 
@@ -1815,12 +1847,10 @@ mod tests {
         field.cells[1].set_value(CellValue::INFERRED_SAFE);
 
         // Confirming the inference (Safe(n)) is non-breaking...
-        field
-            .set_cell_helper(UserCell {
-                point: Point { x: 1, y: 0 },
-                value: UserCellValue::Safe(1),
-            })
-            .unwrap();
+        field.pending.push(IdxAndCell {
+            idx: CellIdx(1),
+            value: CellValue::for_mine_count(1),
+        });
         field.index_pending();
         assert!(field.desolved_queue.is_empty());
         assert!(!field.pending_partition_queue.is_empty());
@@ -1828,12 +1858,10 @@ mod tests {
 
         // ...whereas contradicting it (Mine) is breaking.
         field.cells[1].set_value(CellValue::INFERRED_SAFE);
-        field
-            .set_cell_helper(UserCell {
-                point: Point { x: 1, y: 0 },
-                value: UserCellValue::Mine,
-            })
-            .unwrap();
+        field.pending.push(IdxAndCell {
+            idx: CellIdx(1),
+            value: CellValue::MINE,
+        });
         field.index_pending();
         assert!(!field.desolved_queue.is_empty());
     }

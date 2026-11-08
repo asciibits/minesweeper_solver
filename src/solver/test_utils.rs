@@ -23,7 +23,7 @@
 use crate::{
     MineField, Point,
     solver::{
-        Cell, CellIdx, CellValue, FastNumberHasherBuilder,
+        Cell, CellIdx, CellValue, FastNumberHasherBuilder, IdxAndCell,
         cell::{UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
     },
@@ -250,7 +250,7 @@ impl FieldBuilder {
         let (width, height, cell_iter) = MineField::cells_and_size_from_spec(mine_spec);
         let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
         let mut user_checks = Vec::new();
-        for (idx, value) in cell_iter {
+        for IdxAndCell { idx, value } in cell_iter {
             if value.is_mine() {
                 field[idx] = MineOrCount::MINE;
             } else if value.has_count() {
@@ -422,7 +422,10 @@ impl FieldBuilder {
     pub(super) fn expose_cells(&mut self, points: impl IntoIterator<Item = CellIdx>) -> &mut Self {
         self.field
             .pending
-            .extend(points.into_iter().map(|idx| (idx, self.mines[idx].into())));
+            .extend(points.into_iter().map(|idx| IdxAndCell {
+                idx,
+                value: self.mines[idx].into(),
+            }));
         self.field.solve();
         self
     }

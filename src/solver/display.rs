@@ -231,7 +231,9 @@ impl<'a> Display for DetailMineField<'a> {
             self.0.next_partition_id
         )?;
         write!(f, "{spacer}pending: [")?;
-        write_comma_separated(f, &self.0.pending, |f, &(i, v)| write!(f, "({i}: {v})"))?;
+        write_comma_separated(f, &self.0.pending, |f, c| {
+            write!(f, "({}: {})", c.idx, c.value)
+        })?;
         write!(f, "],")?;
         write!(f, "{spacer}unsolved: [")?;
         write_comma_separated(f, self.0.desolved_queue.iter(), |f, i| write!(f, "{i}"))?;

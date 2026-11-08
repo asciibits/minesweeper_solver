@@ -333,6 +333,32 @@ impl Display for CellValue {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(super) struct IdxAndCell {
+    pub(super) idx: CellIdx,
+    pub(super) value: CellValue,
+}
+
+impl PartialEq for IdxAndCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.idx == other.idx
+    }
+}
+
+impl Eq for IdxAndCell {}
+
+impl PartialOrd for IdxAndCell {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IdxAndCell {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.idx.cmp(&other.idx)
+    }
+}
+
 /// How a [`CellValue::set_value`] call changed a cell.
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CellValueChangeType {
@@ -425,6 +451,16 @@ impl GuardedQueue {
         self.queue
             .pop_front()
             .inspect(|&i| cells[i].flags().clear(self.mask))
+    }
+
+    // Super slow mechanism to remove elements from the associated Vec - try not to use this
+    pub(super) fn remove(&mut self, cells: &mut [Cell], idx: CellIdx) {
+        if cells[idx].flags().is_marked(self.mask) {
+            cells[idx].flags().clear(self.mask);
+            if let Some(i) = self.queue.iter().position(|&i| i == idx) {
+                self.queue.remove(i);
+            }
+        }
     }
 
     #[cfg(test)]
