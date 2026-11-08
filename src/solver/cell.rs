@@ -555,15 +555,15 @@ impl Cell {
 
     #[allow(dead_code)]
     pub(super) fn remaining_mines(&self) -> i8 {
-        self.value.mine_count() as i8 - self.mine_neighbors.len() as i8
+        self.value.mine_count() as i8 - self.mine_neighbors().len() as i8
     }
 
     /// Returns `true` if this cell's clue cannot be satisfied by its neighbors, i.e. it needs
     /// more mines than it has unknown neighbors left to hold, or it has more
     /// mines than remaining spaces
     pub(super) fn is_invalid(&self) -> bool {
-        let mine_neighbors = self.mine_neighbors.len() as i8;
-        let unknown_neighbors = self.unknown_neighbors.len() as i8;
+        let mine_neighbors = self.mine_neighbors().len() as i8;
+        let unknown_neighbors = self.unknown_neighbors().len() as i8;
         self.value().safe_mine_count().is_some_and(|mine_count| {
             let mines_remaining = mine_count as i8 - mine_neighbors;
             mines_remaining < 0 || mines_remaining > unknown_neighbors
@@ -573,14 +573,14 @@ impl Cell {
     // A fully solved cell is one with no neighbors. Note, this is distinct from a "solvable" cell,
     // which has all of its mines accounted for, but still has unknown neighbors to be set.
     pub(super) fn is_solved(&self) -> bool {
-        self.unknown_neighbors.is_empty()
+        self.unknown_neighbors().is_empty()
     }
 
     // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
     pub(super) fn is_solvaable(&self) -> bool {
         let unknown_count = self.unknown_neighbors().len() as i8;
         if let Some(mine_count) = self.value().safe_mine_count() {
-            let remaining = mine_count as i8 - self.mine_neighbors.len() as i8;
+            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
             remaining <= 0 || remaining >= unknown_count
         } else {
             false
@@ -593,7 +593,7 @@ impl Cell {
         let unknown_count = self.unknown_neighbors().len() as i8;
 
         self.value().safe_mine_count().and_then(|mine_count| {
-            let remaining = mine_count as i8 - self.mine_neighbors.len() as i8;
+            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
             if remaining <= 0 {
                 Some(CellValue::INFERRED_SAFE)
             } else if remaining >= unknown_count {
@@ -786,11 +786,12 @@ impl Display for Cell {
         let spacer = if f.alternate() { "\n    " } else { " " };
         write!(
             f,
-            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}partition_id: {},{spacer}flags: {}",
+            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}safe_neighbors: {},{spacer}partition_id: {},{spacer}flags: {}",
             self.value,
             self.neighbors,
-            self.unknown_neighbors,
-            self.mine_neighbors,
+            self.unknown_neighbors(),
+            self.mine_neighbors(),
+            self.safe_neighbors(),
             self.partition_id,
             self.flags
         )?;
@@ -995,8 +996,8 @@ mod tests {
         let mut pc = grid[0];
         assert_eq!(pc.value, CellValue::UNKNOWN);
         assert_eq!(pc.neighbors, E | S | SE);
-        assert_eq!(pc.unknown_neighbors, E | S | SE);
-        assert_eq!(pc.mine_neighbors, DirectionSet::new());
+        assert_eq!(pc.unknown_neighbors(), E | S | SE);
+        assert_eq!(pc.mine_neighbors(), DirectionSet::new());
 
         pc.value = CellValue::for_mine_count(2);
 
