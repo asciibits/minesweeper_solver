@@ -147,11 +147,11 @@ impl Display for CellIdx {
 /// - `S` (`SAFE_MASK`): the cell is known (or inferred) to be safe.
 /// - `M` (`MINE_MASK`): the cell is known (or inferred) to be a mine.
 /// - `I` (`INFERRED_MASK`): the `S`/`M` bit was deduced by the solver rather than supplied.
-/// - `NNNN`: for user-supplied safe cells, the clue (adjacent mine count, `0..=8`).
+/// - `NNNN`: for user-supplied safe cells, the count (adjacent mine count, `0..=8`).
 ///
 /// An all-zero value is [`CellValue::UNKNOWN`]. Note that [`CellValue::is_safe`] and
 /// [`CellValue::is_mine`] are `true` for inferred values too; use
-/// [`CellValue::safe_mine_count`] to identify true clue cells.
+/// [`CellValue::safe_mine_count`] to identify true count cells.
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CellValue(u8);
 
@@ -171,7 +171,7 @@ impl CellValue {
     /// The solver deduced the cell is safe.
     pub(super) const INFERRED_SAFE: Self = Self(Self::SAFE_MASK | Self::INFERRED_MASK);
 
-    /// Creates the value of a revealed, user-supplied clue cell.
+    /// Creates the value of a revealed, user-supplied count cell.
     pub(super) fn for_mine_count(mine_count: u8) -> CellValue {
         debug_assert!(mine_count <= 8);
         CellValue(Self::SAFE_MASK | mine_count)
@@ -210,7 +210,6 @@ impl CellValue {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub(super) fn has_count(&self) -> bool {
         self.0 & Self::META_MASK == Self::SAFE_MASK
     }
@@ -523,7 +522,6 @@ impl Cell {
 
     /// Returns the mask of all valid board neighbors for this cell.
     #[inline]
-    #[allow(dead_code)]
     pub(super) fn neighbors(&self) -> DirectionSet {
         self.neighbors
     }
@@ -542,7 +540,6 @@ impl Cell {
 
     /// Returns the mask of neighbors known or inferred to be mines.
     #[inline]
-    #[allow(dead_code)]
     pub(super) fn mine_neighbors(&self) -> DirectionSet {
         self.mine_neighbors
     }
@@ -553,12 +550,11 @@ impl Cell {
         &mut self.flags
     }
 
-    #[allow(dead_code)]
     pub(super) fn remaining_mines(&self) -> i8 {
         self.value.mine_count() as i8 - self.mine_neighbors().len() as i8
     }
 
-    /// Returns `true` if this cell's clue cannot be satisfied by its neighbors, i.e. it needs
+    /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
     /// more mines than it has unknown neighbors left to hold, or it has more
     /// mines than remaining spaces
     pub(super) fn is_invalid(&self) -> bool {
@@ -587,7 +583,7 @@ impl Cell {
         }
     }
 
-    // If the cell is a clue cell that is not yet solved, and the neighbors can be inferred as
+    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
     // either a Mine or Safe...
     pub(super) fn infer_neighbors(&self) -> Option<CellValue> {
         let unknown_count = self.unknown_neighbors().len() as i8;

@@ -8,6 +8,8 @@ use std::{
     fmt::{self, Display},
 };
 
+#[cfg(feature = "debug")]
+use crate::solver::display::DetailMineField;
 use crate::{
     InferredValue,
     solver::{
@@ -368,6 +370,9 @@ impl MineField {
     }
 
     fn solve(&mut self) {
+        #[cfg(feature = "debug")]
+        let debug = true;
+
         self.metrics.inc_solve_passes();
         self.metrics.mark_now();
 
@@ -376,20 +381,46 @@ impl MineField {
         }
 
         // index the new pending changes
+        #[cfg(feature = "debug")]
+        if debug {
+            eprint!("Pre indexing.");
+            DetailMineField::eprintln(self);
+        }
         self.index_pending();
         self.metrics.inc_indexing_duration();
 
         // process the "unsolved" queue - i.e. reset all inferences attached to the provided cells
+        #[cfg(feature = "debug")]
+        if debug {
+            eprint!("Post indexing, Pre unsolved.");
+            DetailMineField::eprintln(self);
+        }
         self.process_unsolved();
         self.metrics.inc_unsolved_duration();
 
         // process the "solved" queue - i.e. find solved cells and mark their neighbors inferred
+        #[cfg(feature = "debug")]
+        if debug {
+            eprint!("Post unsolved, Pre solved.");
+            DetailMineField::eprintln(self);
+        }
         self.process_solved();
         self.metrics.inc_basic_solve_duration();
 
         // Create final partitions
+        #[cfg(feature = "debug")]
+        if debug {
+            eprint!("Post solved, Pre partition.");
+            DetailMineField::eprintln(self);
+        }
         self.partition();
         self.metrics.inc_partition_duration();
+
+        #[cfg(feature = "debug")]
+        if debug {
+            eprint!("Post partition.");
+            DetailMineField::eprintln(self);
+        }
     }
 
     fn index_pending(&mut self) {
@@ -549,7 +580,7 @@ impl MineField {
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
     ) -> usize {
-        // process an "inferred" cell
+        // process an "unknown" cell
         let cell = &mut field_args.cells[idx];
         if cell.partition_id() == *field_args.next_partition_id {
             return 0;
@@ -559,7 +590,6 @@ impl MineField {
         let neighbors = cell.safe_neighbors();
         field_args.metrics.inc_neighbor_visits(neighbors);
 
-        // scan neighbors for known cells
         let mut len = 1;
         visit(idx, field_args);
         for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
