@@ -14,11 +14,11 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            CellIdx, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs, FlagMask,
-            GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference, cell_idx,
-            coordinates,
+            CellIdx, CellType, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs,
+            FlagMask, GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference,
+            cell_idx, coordinates,
         },
-        grid::Neighbor,
+        grid::{DirectionSet, Neighbor},
         metrics::Metrics,
     },
 };
@@ -456,18 +456,7 @@ impl MineField {
                 self.partitions.remove(&idx);
             }
 
-            Self::walk_desolved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
-                let cell = field_args.cells[idx];
-                if cell.value().has_count() {
-                    field_args
-                        .pending_partition_queue
-                        .push(field_args.cells, idx);
-                }
-                field_args.partitions.remove(&idx);
-                if cell.value().is_inferred() {
-                    Cell::change_value(idx, CellValue::UNKNOWN, field_args);
-                }
-            });
+            self.desolve_partition(idx);
         }
     }
 
@@ -508,10 +497,9 @@ impl MineField {
             }
             if cell.partition_id() < start_partition_id {
                 self.partitions.remove(&idx);
-                let len =
-                    Self::walk_solved(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
-                        field_args.partitions.remove(&idx);
-                    });
+                let len = self.visit_partition(idx, &mut |idx, field_args| {
+                    field_args.partitions.remove(&idx);
+                });
                 if len > 1 {
                     self.partitions.insert(idx, len);
                     self.metrics.set_max_partitions(self.partitions.len());
@@ -520,146 +508,110 @@ impl MineField {
         }
     }
 
-    fn walk_known_desolved(
+    fn visit_neighbors_helper(
         idx: CellIdx,
         field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
+        visit: &mut impl FnMut(CellIdx, &mut FieldArgs) -> Option<DirectionSet>,
     ) -> usize {
         // process a "known" cell - i.e. a safe cell with a mine count
-        let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id || !cell.value().has_count() {
+        if field_args.cells[idx].partition_id() == *field_args.next_partition_id {
             return 0;
         }
-        cell.set_partition_id(*field_args.next_partition_id);
+        let Some(neighbors) = visit(idx, field_args) else {
+            return 0;
+        };
+        field_args.cells[idx].set_partition_id(*field_args.next_partition_id);
 
-        // scan neighbors for inferred cells - both inferred mines and inferred safe
-        let neighbors = cell.neighbors();
         let mut len = 1;
-        visit(idx, field_args);
         field_args.metrics.inc_neighbor_visits(neighbors);
         for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_unknown_desolved(neighbor, field_args, visit);
+            len += Self::visit_neighbors_helper(neighbor, field_args, visit);
         }
         len
     }
 
-    fn walk_unknown_desolved(
+    fn visit_partition_helper(
         idx: CellIdx,
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
     ) -> usize {
-        // process an "inferred" or "unknown" cell
-        let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id
-            || !(cell.value().is_inferred() || cell.value().is_unknown())
-        {
-            return 0;
-        }
-        cell.set_partition_id(*field_args.next_partition_id);
-
-        let neighbors = cell.safe_neighbors();
-        field_args.metrics.inc_neighbor_visits(neighbors);
-
-        // scan neighbors for known cells
-        let mut len = 1;
-        visit(idx, field_args);
-        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_known_desolved(neighbor, field_args, visit);
-        }
-        len
-    }
-
-    fn walk_known_solved(
-        idx: CellIdx,
-        field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
-    ) -> usize {
-        // process a "known" cell - i.e. a safe cell with a mine count
-        let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id || !cell.value().has_count() {
-            return 0;
-        }
-
-        cell.set_partition_id(*field_args.next_partition_id);
-
-        // scan neighbors for inferred cells - both inferred mines and inferred safe
-        let neighbors = cell.unknown_neighbors();
-        let mut len = 1;
-        visit(idx, field_args);
-        field_args.metrics.inc_neighbor_visits(neighbors);
-        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_unknown_solved(neighbor, field_args, visit);
-        }
-        len
-    }
-
-    fn walk_unknown_solved(
-        idx: CellIdx,
-        field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
-    ) -> usize {
-        // process an "unknown" cell
-        let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id {
-            return 0;
-        }
-        cell.set_partition_id(*field_args.next_partition_id);
-
-        let neighbors = cell.safe_neighbors();
-        field_args.metrics.inc_neighbor_visits(neighbors);
-
-        let mut len = 1;
-        visit(idx, field_args);
-        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::walk_known_solved(neighbor, field_args, visit);
-        }
-        len
+        Self::visit_neighbors_helper(idx, field_args, &mut |idx, field_args| {
+            let cell = field_args.cells[idx];
+            match cell.value().cell_type() {
+                CellType::Unknown => {
+                    visit(idx, field_args);
+                    Some(cell.safe_neighbors())
+                }
+                CellType::Safe => {
+                    visit(idx, field_args);
+                    Some(cell.unknown_neighbors())
+                }
+                CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
+            }
+        })
     }
 
     // Step through the cells of a partition. Note: This function scans assuming the starting cell
     // has been mutated, and is unknown whether it was originally a known vs unknown. So, the
     // starting cell looks for *all* unknown + mine neighbors.
-    fn walk_desolved(
-        idx: CellIdx,
-        field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
-    ) -> usize {
-        let mut len = Self::walk_known_desolved(idx, field_args, visit);
-        len += Self::walk_unknown_desolved(idx, field_args, visit);
+    fn desolve_partition(&mut self, idx: CellIdx) -> usize {
+        let len =
+            Self::visit_neighbors_helper(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
+                let cell = field_args.cells[idx];
+                match cell.value().cell_type() {
+                    CellType::Unknown => {
+                        field_args.partitions.remove(&idx);
+                        Some(cell.safe_neighbors())
+                    }
+                    CellType::InferredSafe | CellType::InferredMine => {
+                        field_args.partitions.remove(&idx);
+                        Cell::change_value(idx, CellValue::UNKNOWN, field_args);
+                        Some(cell.safe_neighbors())
+                    }
+                    CellType::Safe => {
+                        field_args.partitions.remove(&idx);
+                        field_args
+                            .pending_partition_queue
+                            .push(field_args.cells, idx);
+                        Some(cell.neighbors())
+                    }
+                    CellType::Mine => None,
+                }
+            });
         if len <= 1 {
-            field_args.cells[idx].set_partition_id(0);
+            self.cells[idx].set_partition_id(0);
         } else if len > 1 {
-            *field_args.next_partition_id += 1;
-            field_args.metrics.inc_partitions_created();
-            field_args.metrics.set_max_partition_size(len);
+            self.next_partition_id += 1;
+            self.metrics.inc_partitions_created();
+            self.metrics.set_max_partition_size(len);
         }
         len
     }
 
-    fn walk_solved(
+    fn visit_partition(
+        &mut self,
         member: CellIdx,
-        field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
     ) -> usize {
-        let len = Self::walk_known_solved(member, field_args, visit);
+        let len = Self::visit_partition_helper(member, &mut FieldArgs::new(self), visit);
         if len <= 1 {
-            field_args.cells[member].set_partition_id(0);
+            self.cells[member].set_partition_id(0);
         } else if len > 1 {
-            *field_args.next_partition_id += 1;
-            field_args.metrics.inc_partitions_created();
-            field_args.metrics.set_max_partition_size(len);
+            self.next_partition_id += 1;
+            self.metrics.inc_partitions_created();
+            self.metrics.set_max_partition_size(len);
         }
         len
     }
 
     /// Returns the slice of linear cell indices belonging to this partition.
     #[cfg(test)]
-    fn members(member: CellIdx, capacity: usize, field_args: &mut FieldArgs) -> Vec<CellIdx> {
+    fn members(&mut self, member: CellIdx, capacity: usize) -> Vec<CellIdx> {
         let mut members = Vec::with_capacity(capacity);
         let members_ref = &mut members;
 
-        Self::walk_solved(member, field_args, &mut |i, _| {
-            members_ref.push(i);
+        self.visit_partition(member, &mut |idx, _| {
+            members_ref.push(idx);
         });
         members
     }
@@ -1941,7 +1893,7 @@ mod tests {
         field.cells[2].set_value(CellValue::for_mine_count(2));
         field.cells[2].set_unknown(W);
 
-        let members = MineField::members(CellIdx(0), 3, &mut FieldArgs::new(&mut field));
+        let members = field.members(CellIdx(0), 3);
         assert_eq!(members.len(), 3);
         assert_eq!(members, vec![CellIdx(0), CellIdx(1), CellIdx(2)]);
         let id = field.cells[0].partition_id();

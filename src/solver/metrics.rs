@@ -17,7 +17,7 @@ pub(super) struct Metrics {
     partitions_created: usize,
     neighbor_visits: usize,
     indexing_duration: Duration,
-    unsolved_duration: Duration,
+    desolved_duration: Duration,
     basic_solve_duration: Duration,
     partition_duration: Duration,
     mark_time: Option<Instant>,
@@ -38,7 +38,7 @@ impl Metrics {
         self.partitions_created += other.partitions_created();
         self.neighbor_visits += other.neighbor_visits();
         self.indexing_duration += other.indexing_duration();
-        self.unsolved_duration += other.unsolved_duration();
+        self.desolved_duration += other.desolved_duration();
         self.basic_solve_duration += other.basic_solve_duration();
         self.partition_duration += other.partition_duration();
     }
@@ -87,12 +87,12 @@ impl Metrics {
         self.mark_time = Some(now);
     }
 
-    pub(super) fn unsolved_duration(&self) -> Duration {
-        self.unsolved_duration
+    pub(super) fn desolved_duration(&self) -> Duration {
+        self.desolved_duration
     }
     pub(super) fn inc_desolved_duration(&mut self) {
         let now = Instant::now();
-        self.unsolved_duration += now - *self.mark_time.get_or_insert(Instant::now());
+        self.desolved_duration += now - *self.mark_time.get_or_insert(Instant::now());
         self.mark_time = Some(now);
     }
 
@@ -119,7 +119,7 @@ impl Metrics {
     }
 
     pub(super) fn total_duration(&self) -> Duration {
-        self.unsolved_duration()
+        self.desolved_duration()
             + self.indexing_duration()
             + self.partition_duration()
             + self.basic_solve_duration()
@@ -207,7 +207,7 @@ impl Display for Metrics {
         write_duration_field(
             f,
             "Time spent on resetting prior inferences",
-            self.unsolved_duration(),
+            self.desolved_duration(),
             games,
             solves,
         )?;
@@ -257,7 +257,7 @@ impl Metrics {
     pub(super) fn inc_indexing_duration(&mut self) {}
 
     #[inline(always)]
-    pub(super) fn inc_unsolved_duration(&mut self) {}
+    pub(super) fn inc_desolved_duration(&mut self) {}
 
     #[inline(always)]
     pub(super) fn inc_basic_solve_duration(&mut self) {}
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(
             total,
             m.indexing_duration()
-                + m.unsolved_duration()
+                + m.desolved_duration()
                 + m.basic_solve_duration()
                 + m.partition_duration()
         );

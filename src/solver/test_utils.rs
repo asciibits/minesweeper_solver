@@ -510,9 +510,9 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::solver::Metrics;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use crate::solver::{FieldArgs, Metrics};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -925,8 +925,7 @@ mod tests {
                     .map(|(&idx, &len)| (idx, len))
                     .choose(rng);
                 if let Some((member, len)) = partition {
-                    let members =
-                        MineField::members(member, len, &mut FieldArgs::new(&mut builder.field));
+                    let members = builder.field.members(member, len);
                     let idx = builder.hint(&members, selector(rng)).unwrap_or_else(|| {
                         panic!(
                             "Didn't get a hint from members: {:?}",

@@ -220,6 +220,7 @@ impl CellValue {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(super) fn is_inferred(&self) -> bool {
         self.0 & Self::INFERRED_MASK != 0
     }
@@ -1073,7 +1074,10 @@ mod tests {
         assert_ne!(CellValue::for_mine_count(0), CellValue::UNKNOWN);
         assert!(CellValue::for_mine_count(0).is_safe());
         assert!(!CellValue::for_mine_count(0).is_unknown());
-        assert!(std::panic::catch_unwind(|| CellValue::for_mine_count(9)).is_err());
+        #[cfg(debug_assertions)]
+        {
+            assert!(std::panic::catch_unwind(|| CellValue::for_mine_count(9)).is_err());
+        }
     }
 
     #[test]
