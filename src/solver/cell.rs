@@ -527,23 +527,39 @@ const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
 
 impl Cell {
     pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
+        let width = width as usize;
+        let height = height as usize;
         let len = width as usize * height as usize;
-        let mut grid: Vec<Cell> = Vec::with_capacity(len);
-
-        for y in 0..height {
-            for x in 0..width {
-                let point = Point { x, y };
-                let neighbors = DirectionSet::all_neighbors(point, width, height);
-                grid.push(Cell {
-                    value: CellValue::UNKNOWN,
-                    neighbors,
-                    unknown_neighbors: neighbors,
-                    mine_neighbors: DirectionSet::new(),
-                    safe_neighbors: DirectionSet::new(),
-                    partition_id: 0,
-                    flags: CellFlags::new(),
-                });
-            }
+        let inner_cell = Cell {
+            value: CellValue::UNKNOWN,
+            neighbors: !DirectionSet::EMPTY,
+            unknown_neighbors: !DirectionSet::EMPTY,
+            mine_neighbors: DirectionSet::EMPTY,
+            safe_neighbors: DirectionSet::EMPTY,
+            partition_id: 0,
+            flags: CellFlags::new(),
+        };
+        let mut grid: Vec<Cell> = vec![inner_cell; len];
+        // fix up the edge neighbors
+        for i in 0..width {
+            // top row - strip out the N* neighbors
+            grid[i].neighbors &= DirectionSet::N_MASK;
+            grid[i].unknown_neighbors = grid[i].neighbors;
+        }
+        for i in len - width..len {
+            // bottom row - strip out the S* neighbors
+            grid[i].neighbors &= DirectionSet::S_MASK;
+            grid[i].unknown_neighbors = grid[i].neighbors;
+        }
+        for i in (0..len).step_by(width) {
+            // left row - strip out the *W neighbors
+            grid[i].neighbors &= DirectionSet::W_MASK;
+            grid[i].unknown_neighbors = grid[i].neighbors;
+        }
+        for i in (width - 1..len).step_by(width) {
+            // right row - strip out the *E neighbors
+            grid[i].neighbors &= DirectionSet::E_MASK;
+            grid[i].unknown_neighbors = grid[i].neighbors;
         }
 
         grid.into_boxed_slice()

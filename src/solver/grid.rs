@@ -162,12 +162,17 @@ pub const S: Direction = ALL_DIRECTIONS[6];
 pub const SE: Direction = ALL_DIRECTIONS[7];
 
 /// A compact 8-bit set of [`Direction`]s representing a subset of a cell's 8 neighbors.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirectionSet(u8);
 
 impl DirectionSet {
     pub const EMPTY: DirectionSet = DirectionSet(0);
     pub const ALL: DirectionSet = DirectionSet(0xff);
+
+    pub const N_MASK: DirectionSet = DirectionSet(!(NW.0 | N.0 | NE.0));
+    pub const S_MASK: DirectionSet = DirectionSet(!(SW.0 | S.0 | SE.0));
+    pub const W_MASK: DirectionSet = DirectionSet(!(NW.0 | W.0 | SW.0));
+    pub const E_MASK: DirectionSet = DirectionSet(!(NE.0 | E.0 | SE.0));
 
     /// Creates an empty [`DirectionSet`].
     pub fn new() -> DirectionSet {
@@ -179,16 +184,16 @@ impl DirectionSet {
     pub fn all_neighbors(p: Point, width: u32, height: u32) -> DirectionSet {
         let mut neighbors = Self::ALL;
         if p.x == 0 {
-            neighbors.0 &= const { !(NW.0 | W.0 | SW.0) };
+            neighbors &= Self::W_MASK;
         }
         if p.x >= width - 1 {
-            neighbors.0 &= const { !(NE.0 | E.0 | SE.0) };
+            neighbors &= Self::E_MASK;
         }
         if p.y == 0 {
-            neighbors.0 &= const { !(NW.0 | N.0 | NE.0) };
+            neighbors &= Self::N_MASK;
         }
         if p.y >= height - 1 {
-            neighbors.0 &= const { !(SW.0 | S.0 | SE.0) };
+            neighbors &= Self::S_MASK;
         }
         neighbors
     }
