@@ -529,7 +529,7 @@ impl Cell {
     pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
         let width = width as usize;
         let height = height as usize;
-        let len = width as usize * height as usize;
+        let len = width * height;
         let inner_cell = Cell {
             value: CellValue::UNKNOWN,
             neighbors: !DirectionSet::EMPTY,
@@ -541,25 +541,25 @@ impl Cell {
         };
         let mut grid: Vec<Cell> = vec![inner_cell; len];
         // fix up the edge neighbors
-        for i in 0..width {
+        for cell in grid.iter_mut().take(width) {
             // top row - strip out the N* neighbors
-            grid[i].neighbors &= DirectionSet::N_MASK;
-            grid[i].unknown_neighbors = grid[i].neighbors;
+            cell.neighbors &= DirectionSet::N_MASK;
+            cell.unknown_neighbors = cell.neighbors;
         }
-        for i in len - width..len {
+        for cell in grid.iter_mut().skip(len - width) {
             // bottom row - strip out the S* neighbors
-            grid[i].neighbors &= DirectionSet::S_MASK;
-            grid[i].unknown_neighbors = grid[i].neighbors;
+            cell.neighbors &= DirectionSet::S_MASK;
+            cell.unknown_neighbors = cell.neighbors;
         }
-        for i in (0..len).step_by(width) {
+        for cell in grid.iter_mut().step_by(width) {
             // left row - strip out the *W neighbors
-            grid[i].neighbors &= DirectionSet::W_MASK;
-            grid[i].unknown_neighbors = grid[i].neighbors;
+            cell.neighbors &= DirectionSet::W_MASK;
+            cell.unknown_neighbors = cell.neighbors;
         }
-        for i in (width - 1..len).step_by(width) {
+        for cell in grid.iter_mut().skip(width - 1).step_by(width) {
             // right row - strip out the *E neighbors
-            grid[i].neighbors &= DirectionSet::E_MASK;
-            grid[i].unknown_neighbors = grid[i].neighbors;
+            cell.neighbors &= DirectionSet::E_MASK;
+            cell.unknown_neighbors = cell.neighbors;
         }
 
         grid.into_boxed_slice()
@@ -752,24 +752,6 @@ impl Cell {
         let was_solved = neighbor.is_solved();
         neighbor.set_unknown(from);
         Self::check_cell_solve(n_idx, was_solved, field_args);
-
-        // When a count neighbor reverts to unknown, any other count cells sharing this unknown
-        // cell may have had their partition split and need to be repartitioned.
-        if field_args.cells[n_idx].value().is_unknown() {
-            let safe_neighbors = field_args.cells[n_idx].safe_neighbors();
-            for Neighbor {
-                neighbor: count_idx,
-                ..
-            } in Cell::neighbor_iter(n_idx, field_args.width, safe_neighbors)
-            {
-                let count_cell = &mut field_args.cells[count_idx];
-                if count_cell.value().has_count() {
-                    field_args
-                        .pending_partition_queue
-                        .push(field_args.cells, count_idx);
-                }
-            }
-        }
     }
 
     fn mark_neighbor_mine(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {

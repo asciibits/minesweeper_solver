@@ -533,7 +533,7 @@ impl MineField {
         cell.set_partition_id(*field_args.next_partition_id);
 
         // scan neighbors for inferred cells - both inferred mines and inferred safe
-        let neighbors = cell.neighbors() - cell.unknown_neighbors();
+        let neighbors = cell.neighbors();
         let mut len = 1;
         visit(idx, field_args);
         field_args.metrics.inc_neighbor_visits(neighbors);
@@ -548,9 +548,11 @@ impl MineField {
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
     ) -> usize {
-        // process an "inferred" cell
+        // process an "inferred" or "unknown" cell
         let cell = &mut field_args.cells[idx];
-        if cell.partition_id() == *field_args.next_partition_id || !cell.value().is_inferred() {
+        if cell.partition_id() == *field_args.next_partition_id
+            || !(cell.value().is_inferred() || cell.value().is_unknown())
+        {
             return 0;
         }
         cell.set_partition_id(*field_args.next_partition_id);
