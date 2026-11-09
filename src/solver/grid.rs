@@ -169,9 +169,13 @@ impl DirectionSet {
     pub const EMPTY: DirectionSet = DirectionSet(0);
     pub const ALL: DirectionSet = DirectionSet(0xff);
 
+    /// Bitmask stripping all Northern directions (`NW`, `N`, `NE`).
     pub const N_MASK: DirectionSet = DirectionSet(!(NW.0 | N.0 | NE.0));
+    /// Bitmask stripping all Southern directions (`SW`, `S`, `SE`).
     pub const S_MASK: DirectionSet = DirectionSet(!(SW.0 | S.0 | SE.0));
+    /// Bitmask stripping all Western directions (`NW`, `W`, `SW`).
     pub const W_MASK: DirectionSet = DirectionSet(!(NW.0 | W.0 | SW.0));
+    /// Bitmask stripping all Eastern directions (`NE`, `E`, `SE`).
     pub const E_MASK: DirectionSet = DirectionSet(!(NE.0 | E.0 | SE.0));
 
     /// Creates an empty [`DirectionSet`].
@@ -665,5 +669,13 @@ mod tests {
         assert_eq!(s, NW | E | S);
         s -= E | S;
         assert_eq!(s, !!NW);
+    }
+
+    #[test]
+    fn test_direction_set_directional_masks() {
+        assert_eq!(DirectionSet::ALL & DirectionSet::N_MASK, W | SW | S | SE | E);
+        assert_eq!(DirectionSet::ALL & DirectionSet::S_MASK, NW | N | NE | E | W);
+        assert_eq!(DirectionSet::ALL & DirectionSet::W_MASK, N | NE | E | SE | S);
+        assert_eq!(DirectionSet::ALL & DirectionSet::E_MASK, NW | N | S | SW | W);
     }
 }

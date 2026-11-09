@@ -345,13 +345,21 @@ impl Display for CellValue {
     }
 }
 
+/// High-level classification of a cell's value used to simplify traversal and neighbor updates.
+///
+/// Note: [`CellType::Safe`] represents a user-provided count cell that has an adjacent mine count.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub(super) enum CellType {
+    /// Cell whose state is unknown.
     #[default]
     Unknown,
+    /// User-provided safe cell with an adjacent mine count (`has_count() == true`).
     Safe,
+    /// Cell deduced by the solver to be safe.
     InferredSafe,
+    /// User-provided mine.
     Mine,
+    /// Cell deduced by the solver to be a mine.
     InferredMine,
 }
 
@@ -447,7 +455,11 @@ impl FlagMask {
     pub(super) const DESOLVED_QUEUE: FlagMask = FlagMask(0b100);
 }
 
-/// A queue of CellIdx instances that ensures elements are only added once
+/// A queue of [`CellIdx`] instances backed by a [`VecDeque`] and guarded by a [`FlagMask`] in each cell's [`CellFlags`].
+///
+/// Ensures elements are added at most once without linear duplicate scans. When an element is pushed,
+/// its corresponding flag bit is marked; pushing an already-marked cell is a no-op. When popped, the flag
+/// bit is automatically cleared.
 #[derive(Debug, Clone)]
 pub(super) struct GuardedQueue {
     queue: VecDeque<CellIdx>,
@@ -455,6 +467,7 @@ pub(super) struct GuardedQueue {
 }
 
 impl GuardedQueue {
+    /// Creates a new [`GuardedQueue`] with the specified initial capacity and guarding [`FlagMask`].
     pub(super) fn with_capacity(capacity: usize, mask: FlagMask) -> GuardedQueue {
         GuardedQueue {
             queue: VecDeque::with_capacity(capacity),
@@ -462,6 +475,7 @@ impl GuardedQueue {
         }
     }
 
+    /// Pushes `idx` to the back of the queue if not already marked with this queue's mask.
     pub(super) fn push(&mut self, cells: &mut [Cell], idx: CellIdx) {
         cells[idx]
             .flags()
@@ -469,13 +483,14 @@ impl GuardedQueue {
             .then(|| self.queue.push_back(idx));
     }
 
+    /// Pops the front index from the queue and clears its corresponding flag mask.
     pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
         self.queue
             .pop_front()
             .inspect(|&i| cells[i].flags().clear(self.mask))
     }
 
-    // Super slow mechanism to remove elements from the associated Vec - try not to use this
+    /// Removes `idx` from the queue if present and clears its flag mask.
     pub(super) fn remove(&mut self, cells: &mut [Cell], idx: CellIdx) {
         if cells[idx].flags().is_marked(self.mask) {
             cells[idx].flags().clear(self.mask);
@@ -650,7 +665,7 @@ impl Cell {
     }
 
     // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
-    pub(super) fn is_solvaable(&self) -> bool {
+    pub(super) fn is_solvable(&self) -> bool {
         let unknown_count = self.unknown_neighbors().len() as i8;
         if let Some(mine_count) = self.value().safe_mine_count() {
             let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
@@ -717,12 +732,6 @@ impl Cell {
             CellValueChangeType::Breaking => true,
         };
 
-        if cell.value().has_count() {
-            field_args
-                .pending_partition_queue
-                .push(field_args.cells, idx);
-        }
-
         Self::check_cell_solve(idx, inference_breaking, field_args);
 
         if !prev_val.types_match(value) {
@@ -783,7 +792,7 @@ impl Cell {
             field_args
                 .pending_partition_queue
                 .push(field_args.cells, idx);
-            if cell.is_solvaable() {
+            if !cell.is_solved() && cell.is_solvable() {
                 field_args.solved_queue.push(field_args.cells, idx);
             }
         }
@@ -1351,5 +1360,76 @@ mod tests {
         assert_eq!(map.get(&CellIdx(10)), Some(&100));
         assert_eq!(map.get(&CellIdx(20)), Some(&200));
         assert_eq!(map.get(&CellIdx(30)), None);
+    }
+
+    #[test]
+    fn test_cell_type_mapping() {
+        assert_eq!(CellValue::UNKNOWN.cell_type(), CellType::Unknown);
+        assert_eq!(CellValue::MINE.cell_type(), CellType::Mine);
+        assert_eq!(CellValue::INFERRED_MINE.cell_type(), CellType::InferredMine);
+        assert_eq!(CellValue::INFERRED_SAFE.cell_type(), CellType::InferredSafe);
+
+        for count in 0..=8 {
+            assert_eq!(
+                CellValue::for_mine_count(count).cell_type(),
+                CellType::Safe,
+                "Count {count} must map to CellType::Safe"
+            );
+        }
+    }
+
+    #[test]
+    fn test_guarded_queue_push_pop_remove_dedup() {
+        let mut cells = Cell::grid(4, 1);
+        let mut queue = GuardedQueue::with_capacity(4, FlagMask::PENDING_PARTITION);
+        assert!(queue.is_empty());
+
+        // First push succeeds
+        queue.push(&mut cells, CellIdx(1));
+        assert!(!queue.is_empty());
+        assert!(cells[1].flags().is_marked(FlagMask::PENDING_PARTITION));
+
+        // Duplicate push of the same index is ignored
+        queue.push(&mut cells, CellIdx(1));
+        let items: Vec<_> = queue.iter().collect();
+        assert_eq!(items, vec![CellIdx(1)]);
+
+        // Push another index
+        queue.push(&mut cells, CellIdx(3));
+        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(1), CellIdx(3)]);
+
+        // Remove CellIdx(1)
+        queue.remove(&mut cells, CellIdx(1));
+        assert!(!cells[1].flags().is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
+
+        // Removing non-existent or already removed element is safe no-op
+        queue.remove(&mut cells, CellIdx(1));
+        queue.remove(&mut cells, CellIdx(0));
+
+        // Pop remaining item
+        assert_eq!(queue.pop(&mut cells), Some(CellIdx(3)));
+        assert!(!cells[3].flags().is_marked(FlagMask::PENDING_PARTITION));
+        assert!(queue.is_empty());
+        assert_eq!(queue.pop(&mut cells), None);
+    }
+
+    #[test]
+    fn test_cell_is_solvable() {
+        let mut cells = Cell::grid(3, 1);
+        // Cell 0 is safe count 1 with unknown neighbor East (1)
+        cells[0].set_value(CellValue::for_mine_count(1));
+        assert!(cells[0].is_solvable(), "needs 1 mine with 1 unknown neighbor -> solvable");
+
+        // Cell 0 with count 2 and 1 unknown neighbor -> over-constrained (solvable in the sense remaining >= unknown)
+        cells[0].set_value(CellValue::for_mine_count(2));
+        assert!(cells[0].is_solvable());
+
+        // Cell 0 with 0 unknown neighbors (solved)
+        cells[0].set_mine(E);
+        assert_eq!(cells[0].unknown_neighbors().len(), 0);
+        assert!(cells[0].is_solved());
+        // Cell with no safe_mine_count (e.g. Unknown or Mine) is not solvable
+        assert!(!cells[1].is_solvable());
     }
 }

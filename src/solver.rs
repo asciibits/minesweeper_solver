@@ -50,15 +50,15 @@ pub struct MineField {
     pending: Vec<IdxAndCell>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
     desolved_queue: GuardedQueue,
-    /// Queue of clue cells whose neighbor values have become solvable.
+    /// Queue of "count" cells (guaranteed to satisfy [`CellValue::has_count`]) whose neighbor values have become solvable.
     solved_queue: GuardedQueue,
-    /// Queue of seed cells whose connected frontier needs to be partitioned or repartitioned.
+    /// Queue of "count" cells (guaranteed to satisfy [`CellValue::has_count`]) whose connected frontier needs to be partitioned or repartitioned.
     pending_partition_queue: GuardedQueue,
     /// Performance and step counters recorded during solving.
     metrics: Metrics,
     /// Cell indices whose inference changed during the most recent solve cycle.
     recent_inferred: Vec<CellIdx>,
-    /// Contradictory clue cells discovered during the most recent solve cycle.
+    /// Contradictory "count" cells discovered during the most recent solve cycle.
     recent_invalid: Vec<CellIdx>,
 }
 
@@ -195,7 +195,7 @@ impl MineField {
         self.mine_count
     }
 
-    /// Returns the [`UserCellWithInference`] at the given coordinate `p`.
+    /// Returns the [`crate::CellWithInference`] at the given coordinate `p`.
     pub fn cell(&self, p: Point) -> UserValueWithInference {
         self.cells[self.cell_idx(p)].value().into()
     }
@@ -443,11 +443,11 @@ impl MineField {
     }
 
     fn process_desolved(&mut self) {
-        let next_partition_id = self.next_partition_id;
+        let start_desolved_id = self.next_partition_id;
         while let Some(idx) = self.desolved_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
 
-            if cell.partition_id() == next_partition_id {
+            if cell.partition_id() >= start_desolved_id {
                 continue;
             }
             if cell.value().has_count() {
@@ -513,7 +513,6 @@ impl MineField {
         field_args: &mut FieldArgs,
         visit: &mut impl FnMut(CellIdx, &mut FieldArgs) -> Option<DirectionSet>,
     ) -> usize {
-        // process a "known" cell - i.e. a safe cell with a mine count
         if field_args.cells[idx].partition_id() == *field_args.next_partition_id {
             return 0;
         }
@@ -582,8 +581,6 @@ impl MineField {
             self.cells[idx].set_partition_id(0);
         } else if len > 1 {
             self.next_partition_id += 1;
-            self.metrics.inc_partitions_created();
-            self.metrics.set_max_partition_size(len);
         }
         len
     }
@@ -1958,5 +1955,41 @@ mod tests {
         for (c1, c2) in field.cells.iter().zip(rebuilt.cells.iter()) {
             assert_eq!(c1.value(), c2.value());
         }
+    }
+
+    #[test]
+    fn test_queue_has_count_invariants() {
+        // Create a board with counts, unknowns, and mines
+        let spec = "1.1\n...\n1.1";
+        let mut field = MineField::create(spec);
+        for idx in field.pending_partition_queue.iter() {
+            assert!(field.cells[idx].value().has_count(), "pending_partition_queue must only contain cells with has_count");
+        }
+        for idx in field.solved_queue.iter() {
+            assert!(field.cells[idx].value().has_count(), "solved_queue must only contain cells with has_count");
+        }
+
+        // Apply a breaking update changing a count cell into an unknown and another into a mine
+        field.update("._*\n...\n1.1");
+        for idx in field.pending_partition_queue.iter() {
+            assert!(field.cells[idx].value().has_count(), "pending_partition_queue must strictly maintain has_count after updates");
+        }
+        for idx in field.solved_queue.iter() {
+            assert!(field.cells[idx].value().has_count(), "solved_queue must strictly maintain has_count after updates");
+        }
+    }
+
+    #[test]
+    fn test_process_desolved_multiple_partitions_avoids_redundant_walks() {
+        // Two independent partitions: left (0,0) and right (4,0)
+        let mut field = MineField::create("1...1\n.....");
+        assert_eq!(field.partitions.len(), 2);
+        let pid_before = field.next_partition_id;
+
+        // Break both partitions in the same cycle by reverting both back to unknown
+        field.update("_..._\n.....");
+        assert!(field.desolved_queue.is_empty());
+        // next_partition_id should not experience runaway increments
+        assert!(field.next_partition_id <= pid_before + 4);
     }
 }
