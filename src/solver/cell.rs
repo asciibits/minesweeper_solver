@@ -243,6 +243,27 @@ impl Cell {
         self.mine_neighbors
     }
 
+    #[inline]
+    pub(super) fn mine_neighbors_mut(&mut self) -> &mut DirectionSet {
+        // not valid for mine cells
+        debug_assert!(!self.value.is_mine());
+        &mut self.mine_neighbors
+    }
+
+    #[inline]
+    pub(super) fn alt_neighbors_mut(&mut self) -> &mut DirectionSet {
+        // not valid for mine cells
+        debug_assert!(!self.value.is_mine());
+        &mut self.alt_neighbors
+    }
+
+    #[inline]
+    pub(super) fn safe_neighbors_mut(&mut self) -> &mut DirectionSet {
+        // only valid for unknown cells
+        debug_assert!(self.value.is_unknown());
+        &mut self.safe_neighbors
+    }
+
     /// Returns mutable reference to the cell's status flags.
     #[inline]
     pub(super) fn flags(&mut self) -> &mut CellFlags {
@@ -321,38 +342,38 @@ impl Cell {
         idx: CellIdx,
         width: u32,
         directions: DirectionSet,
-    ) -> impl Iterator<Item = Neighbor<CellIdx>> {
+    ) -> impl Iterator<Item = Neighbor> {
         DirectionSetIterator::new(directions).map(move |d| match d.index() {
             0 => Neighbor {
-                neighbor: CellIdx(idx.0 - width - 1),
+                idx: CellIdx(idx.0 - width - 1),
                 from: SE,
             },
             1 => Neighbor {
-                neighbor: CellIdx(idx.0 - width),
+                idx: CellIdx(idx.0 - width),
                 from: S,
             },
             2 => Neighbor {
-                neighbor: CellIdx(idx.0 - width + 1),
+                idx: CellIdx(idx.0 - width + 1),
                 from: SW,
             },
             3 => Neighbor {
-                neighbor: CellIdx(idx.0 - 1),
+                idx: CellIdx(idx.0 - 1),
                 from: E,
             },
             4 => Neighbor {
-                neighbor: CellIdx(idx.0 + 1),
+                idx: CellIdx(idx.0 + 1),
                 from: W,
             },
             5 => Neighbor {
-                neighbor: CellIdx(idx.0 + width - 1),
+                idx: CellIdx(idx.0 + width - 1),
                 from: NE,
             },
             6 => Neighbor {
-                neighbor: CellIdx(idx.0 + width),
+                idx: CellIdx(idx.0 + width),
                 from: N,
             },
             7 => Neighbor {
-                neighbor: CellIdx(idx.0 + width + 1),
+                idx: CellIdx(idx.0 + width + 1),
                 from: NW,
             },
             _ => unreachable!(),
@@ -1129,7 +1150,7 @@ mod tests {
         // use a 3x3 grid, indices going from 0..=8, center 4
         let neighbors: Vec<_> = Cell::neighbor_iter(CellIdx(4), 3, E | S | SE).collect();
         assert_eq!(
-            neighbors.iter().map(|n| n.neighbor.0).collect::<Vec<_>>(),
+            neighbors.iter().map(|n| n.idx.0).collect::<Vec<_>>(),
             vec![5, 7, 8]
         );
         assert_eq!(

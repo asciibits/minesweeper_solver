@@ -334,12 +334,16 @@ impl FieldBuilder {
             width,
             height,
             mine_count,
-            zero_cell
-                .neighbors(DirectionSet::all_neighbors(zero_cell, width, height))
-                .map(|n| n.neighbor)
-                .chain([zero_cell]),
+            Cell::neighbor_iter(
+                cell_idx(zero_cell, width),
+                width,
+                DirectionSet::all_neighbors(zero_cell, width, height),
+            )
+            .map(|n| n.idx)
+            .chain([cell_idx(zero_cell, width)]),
             shuffle,
-        )
+        );
+        unimplemented!()
     }
 
     /// Places `mine_count` mines randomly across a `width` × `height` board while keeping all
@@ -348,15 +352,12 @@ impl FieldBuilder {
         width: u32,
         height: u32,
         mine_count: u32,
-        reserved_points: impl IntoIterator<Item = Point>,
+        reserved_points: impl IntoIterator<Item = CellIdx>,
         mut shuffle: impl FnMut(&mut [i8]),
     ) -> Self {
         let len = width as usize * height as usize;
         let mut field = vec![MineOrCount::ZERO; len];
-        let mut reserved_indices: Vec<_> = reserved_points
-            .into_iter()
-            .map(|pt| cell_idx(pt, width))
-            .collect();
+        let mut reserved_indices: Vec<_> = reserved_points.into_iter().collect();
         reserved_indices.sort_unstable();
         reserved_indices.dedup();
         let end_shuffle = len - reserved_indices.len();
@@ -392,7 +393,7 @@ impl FieldBuilder {
                 let idx = CellIdx(idx as u32);
                 mine_count += 1;
                 let pt = coordinates(idx, width);
-                for Neighbor { neighbor, .. } in
+                for Neighbor { idx: neighbor, .. } in
                     Cell::neighbor_iter(idx, width, DirectionSet::all_neighbors(pt, width, height))
                 {
                     if !field[neighbor].is_mine() {
@@ -450,7 +451,7 @@ impl FieldBuilder {
         }
         while let Some(idx) = zero_queue.pop() {
             let cell = self.field.cells[idx];
-            for Neighbor { neighbor, .. } in
+            for Neighbor { idx: neighbor, .. } in
                 Cell::neighbor_iter(idx, self.field.width, cell.neighbors())
             {
                 if all_ids.insert(neighbor) && self.mines[neighbor].count() == 0 {
@@ -510,9 +511,9 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::Metrics;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
+    use crate::solver::{CellType, Metrics};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -679,15 +680,19 @@ mod tests {
         assert_eq!(actual_mines, 7);
 
         let zero_pt = Point { x: 2, y: 2 };
+        let zero_cell_idx = cell_idx(zero_pt, 6);
         let mut zero_builder =
             FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt, shuffle(&mut rng()));
         zero_builder.expand_points([zero_pt]);
         let field = zero_builder.into_mine_field();
         assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));
-        for Neighbor { neighbor, .. } in
-            zero_pt.neighbors(DirectionSet::all_neighbors(zero_pt, 6, 5))
+        for Neighbor { idx, .. } in
+            Cell::neighbor_iter(zero_cell_idx, 6, DirectionSet::all_neighbors(zero_pt, 6, 5))
         {
-            assert!(matches!(field.cell(neighbor).value, UserCellValue::Safe(_)));
+            assert!(matches!(
+                field.cells[idx].value().cell_type(),
+                CellType::Safe
+            ));
         }
     }
 

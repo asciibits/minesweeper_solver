@@ -33,73 +33,6 @@ impl Point {
     pub(super) const fn to_index(self, width: u32) -> CellIdx {
         CellIdx(self.x + self.y * width)
     }
-
-    /// Returns an iterator over the neighboring [`Point`]s specified by `directions`.
-    pub(super) fn neighbors(
-        &self,
-        directions: DirectionSet,
-    ) -> impl Iterator<Item = Neighbor<Point>> {
-        let pt = *self;
-        DirectionSetIterator::new(directions).map(move |d| match d.index() {
-            0 => Neighbor {
-                neighbor: Point {
-                    x: pt.x - 1,
-                    y: pt.y - 1,
-                },
-                from: SE,
-            },
-            1 => Neighbor {
-                neighbor: Point {
-                    x: pt.x,
-                    y: pt.y - 1,
-                },
-                from: S,
-            },
-            2 => Neighbor {
-                neighbor: Point {
-                    x: pt.x + 1,
-                    y: pt.y - 1,
-                },
-                from: SW,
-            },
-            3 => Neighbor {
-                neighbor: Point {
-                    x: pt.x - 1,
-                    y: pt.y,
-                },
-                from: E,
-            },
-            4 => Neighbor {
-                neighbor: Point {
-                    x: pt.x + 1,
-                    y: pt.y,
-                },
-                from: W,
-            },
-            5 => Neighbor {
-                neighbor: Point {
-                    x: pt.x - 1,
-                    y: pt.y + 1,
-                },
-                from: NE,
-            },
-            6 => Neighbor {
-                neighbor: Point {
-                    x: pt.x,
-                    y: pt.y + 1,
-                },
-                from: N,
-            },
-            7 => Neighbor {
-                neighbor: Point {
-                    x: pt.x + 1,
-                    y: pt.y + 1,
-                },
-                from: NW,
-            },
-            _ => unreachable!(),
-        })
-    }
 }
 
 impl Display for Point {
@@ -111,9 +44,9 @@ impl Display for Point {
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
 /// [`Direction`] pointing from that neighbor back to the origin cell.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Neighbor<T: Copy> {
+pub struct Neighbor {
     /// The neighboring value or coordinate.
-    pub neighbor: T,
+    pub idx: CellIdx,
     /// The direction from `neighbor` back to the origin cell.
     pub from: Direction,
 }

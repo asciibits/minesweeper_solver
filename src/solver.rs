@@ -361,16 +361,64 @@ impl MineField {
                     CellType::InferredMine | CellType::Mine => {
                         // all non-mine neighbors to be updated with mine. Test solved for alt, and
                         // queue for alt.
+                        let neighbors = self.cells[idx].alt_neighbors();
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.mine_neighbors_mut() -= neighbor.from;
+                            self.solved_queue.push(&mut self.cells, neighbor.idx);
+                        }
+                        let cell = &self.cells[idx];
+                        let neighbors =
+                            cell.neighbors() - (cell.mine_neighbors() | cell.alt_neighbors());
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.mine_neighbors_mut() -= neighbor.from;
+                        }
                     }
                     CellType::InferredSafe => {
                         // all safe neighbors to have cell removed from alt. All alt neighbors
-                        // tested for solve and queued for partition. All unknown neighbors
-                        // to have cell added to safe. alt = neighbors - (mine | safe)
+                        // tested for solve. All unknown neighbors to have cell added to safe. alt =
+                        // neighbors - (mine | safe)
+                        let neighbors = self.cells[idx].alt_neighbors();
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.alt_neighbors_mut() -= neighbor.from;
+                            self.solved_queue.push(&mut self.cells, neighbor.idx);
+                        }
+                        let neighbors = self.cells[idx].safe_neighbors();
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.alt_neighbors_mut() -= neighbor.from;
+                        }
+                        let cell = &mut self.cells[idx];
+                        *cell.alt_neighbors_mut() = cell.neighbors()
+                            - (cell.mine_neighbors()
+                                | cell.alt_neighbors()
+                                | cell.safe_neighbors());
+                        for neighbor in Cell::neighbor_iter(idx, self.width, cell.alt_neighbors()) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.safe_neighbors_mut() -= neighbor.from;
+                        }
                     }
                     CellType::Safe => {
                         // all safe neighbors to have cell removed from alt. alt neighbors tested
                         // for solve, and queued for partition. All unknown neighbors
                         // to have cell added to alt. alt = neighbors - (mine | safe). Solve self.
+                        let neighbors = self.cells[idx].alt_neighbors();
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.alt_neighbors_mut() -= neighbor.from;
+                            self.solved_queue.push(&mut self.cells, neighbor.idx);
+                        }
+                        let cell = &self.cells[idx];
+                        let neighbors = cell.neighbors()
+                            - (cell.mine_neighbors()
+                                | cell.alt_neighbors()
+                                | cell.safe_neighbors());
+                        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+                            let cell = &mut self.cells[neighbor.idx];
+                            *cell.safe_neighbors_mut() -= neighbor.from;
+                        }
                     }
                 };
             }
@@ -519,10 +567,7 @@ impl MineField {
         let mut has_breaking = false;
         for i in 0..self.pending.len() {
             let IdxAndCell { idx, value } = self.pending[i];
-            has_breaking |= matches!(
-                self.change_cell_value(idx, value),
-                ChangeStatus::Breaking
-            );
+            has_breaking |= matches!(self.change_cell_value(idx, value), ChangeStatus::Breaking);
         }
         if has_breaking {
             // There is a chance that an item landed in the solved queue that was later updated to a
@@ -568,7 +613,7 @@ impl MineField {
                 && let Some(value) = cell.infer_neighbors()
             {
                 self.metrics.inc_neighbor_visits(cell.unknown_neighbors());
-                for Neighbor { neighbor, .. } in
+                for Neighbor { idx: neighbor, .. } in
                     Cell::neighbor_iter(idx, self.width, cell.unknown_neighbors())
                 {
                     let change_type = self.change_cell_value(neighbor, value);
@@ -577,6 +622,7 @@ impl MineField {
                     }
                 }
             }
+            self.pending_partition_queue.push(&mut self.cells, idx);
         }
     }
 
@@ -620,7 +666,7 @@ impl MineField {
 
         let mut len = 1;
         self.metrics.inc_neighbor_visits(neighbors);
-        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, self.width, neighbors) {
+        for Neighbor { idx: neighbor, .. } in Cell::neighbor_iter(idx, self.width, neighbors) {
             len += self.visit_neighbors_helper(neighbor, visit);
         }
         len
