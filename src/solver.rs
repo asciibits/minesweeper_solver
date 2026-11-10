@@ -14,9 +14,9 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            CellIdx, CellType, CellValue, CellValueChangeType, FastNumberHasherBuilder, FlagMask,
-            GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference, cell_idx,
-            coordinates,
+            CellIdx, CellType, CellValue, CellValueChangeType, ChangeStatus,
+            FastNumberHasherBuilder, FlagMask, GuardedQueue, IdxAndCell, UserCellWithInference,
+            UserValueWithInference, cell_idx, coordinates,
         },
         grid::{Direction, DirectionSet, Neighbor},
         metrics::Metrics,
@@ -333,33 +333,6 @@ impl MineField {
             .filter(|&i| self.cells[i].value().is_safe())
     }
 
-    fn mark_neighbor_unknown(&mut self, n_idx: CellIdx, from: Direction) {
-        // if the cell starts out as solved, the transition of a neighbor to unknown changes its
-        // solved state (unless it was invalid and over-mined)
-        let neighbor = &mut self.cells[n_idx];
-        let was_solved = neighbor.is_solved();
-        neighbor.set_unknown(from);
-        self.check_cell_solve(n_idx, was_solved);
-    }
-
-    fn mark_neighbor_mine(&mut self, n_idx: CellIdx, from: Direction) {
-        // if the cell starts out as a solved given cell, the transition of a neighbor
-        // to unknown changes its solved state
-        let neighbor = &mut self.cells[n_idx];
-        let was_known = !neighbor.unknown_neighbors().contains(from);
-        neighbor.set_mine(from);
-        self.check_cell_solve(n_idx, was_known);
-    }
-
-    fn mark_neighbor_safe(&mut self, n_idx: CellIdx, from: Direction) {
-        // if the cell starts out as a solved given cell, the transition of a neighbor
-        // to unknown changes its solved state
-        let neighbor = &mut self.cells[n_idx];
-        let was_known = !neighbor.unknown_neighbors().contains(from);
-        neighbor.set_safe(from);
-        self.check_cell_solve(n_idx, was_known);
-    }
-
     fn check_cell_solve(&mut self, idx: CellIdx, inference_breaking: bool) {
         let cell = self.cells[idx];
         if inference_breaking {
@@ -374,39 +347,91 @@ impl MineField {
         }
     }
 
-    fn change_cell_value(&mut self, idx: CellIdx, value: CellValue) -> CellValueChangeType {
+    fn change_cell_value(&mut self, idx: CellIdx, value: CellValue) -> ChangeStatus {
         let cell = &mut self.cells[idx];
 
         let prev_val = cell.value();
-        let change_type = cell.value_mut().set_value(value);
+        cell.set_value(value);
 
-        let inference_breaking = match change_type {
-            CellValueChangeType::NoChange => return CellValueChangeType::NoChange,
-            CellValueChangeType::NonBreaking => false,
-            CellValueChangeType::Breaking => true,
+        // handle non-breaking changes first - this is the fast path, optimized for live play
+        match prev_val.cell_type() {
+            CellType::Unknown => {
+                match value.cell_type() {
+                    CellType::Unknown => return ChangeStatus::NoChange,
+                    CellType::InferredMine | CellType::Mine => {
+                        // all non-mine neighbors to be updated with mine. Test solved for alt, and
+                        // queue for alt.
+                    }
+                    CellType::InferredSafe => {
+                        // all safe neighbors to have cell removed from alt. All alt neighbors
+                        // tested for solve and queued for partition. All unknown neighbors
+                        // to have cell added to safe. alt = neighbors - (mine | safe)
+                    }
+                    CellType::Safe => {
+                        // all safe neighbors to have cell removed from alt. alt neighbors tested
+                        // for solve, and queued for partition. All unknown neighbors
+                        // to have cell added to alt. alt = neighbors - (mine | safe). Solve self.
+                    }
+                };
+            }
+            CellType::InferredMine | CellType::Mine => {
+                match value.cell_type() {
+                    CellType::InferredMine | CellType::Mine => return ChangeStatus::NoChange,
+                    CellType::Unknown => {
+                        // scan all neighbors. mines left unchanged. Others have cell removed from
+                        // mine. Safe has cell added to alt. build up alt/mine/safe. De-solve safe
+                    }
+                    CellType::InferredSafe => {
+                        // scan all neighbors. mines left unchanged. Others have cell removed from
+                        // mine. Unknown has cell added to safe. build up alt/mine. De-solve safe,
+                        // solve safe
+                    }
+                    CellType::Safe => {
+                        // scan all neighbors. mines left unchanged. Others have cell removed from
+                        // mine. Unknown has cell added to alt. build up alt/mine. De solve safe,
+                        // solve safe. Solve self.
+                    }
+                };
+            }
+            CellType::InferredSafe => {
+                match value.cell_type() {
+                    CellType::InferredSafe => return ChangeStatus::NoChange,
+                    CellType::Safe => {
+                        // all alt neighbors remove cell from safe (keep in alt). No solve checks.
+                        // no alt changes. Solve self.
+                    }
+                    CellType::InferredMine | CellType::Mine => {
+                        // scan non-mines, all have cell added to mines. Unknown remove cell from
+                        // Safe. De solve safe. Solve safe.
+                    }
+                    CellType::Unknown => {
+                        // scan non-mines. Safe have cell added to alt. Unknown have cell removed
+                        // from Safe. build up alt/safe. De solve safe
+                    }
+                };
+            }
+            CellType::Safe => {
+                match value.cell_type() {
+                    CellType::InferredSafe => {
+                        // all alt neighbors remove cell from alt (keep in safe). No solve checks.
+                        // no alt changes. De solve self.
+                    }
+                    CellType::Safe => {
+                        // solve self
+                    }
+                    CellType::InferredMine | CellType::Mine => {
+                        // scan non-mines, all have cell added to mines. Unknown remove cell from
+                        // Safe. De solve safe. Solve safe. De solve self.
+                    }
+                    CellType::Unknown => {
+                        // scan non-mines. Safe have cell added to alt. Unknown have cell removed
+                        // from Safe. build up alt/safe. De solve safe. De solve self.
+                    }
+                };
+            }
         };
 
-        self.check_cell_solve(idx, inference_breaking);
-
-        if !prev_val.types_match(value) {
-            let mark_neighbor = match value.cell_type() {
-                CellType::Unknown => Self::mark_neighbor_unknown,
-                CellType::Mine | CellType::InferredMine => Self::mark_neighbor_mine,
-                CellType::Safe | CellType::InferredSafe => Self::mark_neighbor_safe,
-            };
-
-            let neighbors = self.cells[idx].neighbors();
-            self.metrics.inc_neighbor_visits(neighbors);
-
-            for Neighbor {
-                neighbor: neighbor_idx,
-                from,
-            } in Cell::neighbor_iter(idx, self.width, neighbors)
-            {
-                mark_neighbor(self, neighbor_idx, from);
-            }
-        }
-        change_type
+        unimplemented!()
     }
 
     /// Compacts partition IDs when `next_partition_id` approaches `u16::MAX`.
@@ -496,7 +521,7 @@ impl MineField {
             let IdxAndCell { idx, value } = self.pending[i];
             has_breaking |= matches!(
                 self.change_cell_value(idx, value),
-                CellValueChangeType::Breaking
+                ChangeStatus::Breaking
             );
         }
         if has_breaking {
@@ -547,7 +572,7 @@ impl MineField {
                     Cell::neighbor_iter(idx, self.width, cell.unknown_neighbors())
                 {
                     let change_type = self.change_cell_value(neighbor, value);
-                    if !matches!(change_type, CellValueChangeType::NoChange) {
+                    if !matches!(change_type, ChangeStatus::NoChange) {
                         self.recent_inferred.push(neighbor);
                     }
                 }
