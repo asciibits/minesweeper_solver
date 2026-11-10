@@ -109,6 +109,288 @@ pub struct UserCellWithInference {
     pub inferred: InferredValue,
 }
 
+/// Internal solver representation of a board cell, caching neighbor masks and partition membership.
+///
+/// A cell does not store its own index; callers identify a cell by its row-major position in the
+/// `cells` slice (see [`coordinates`] / [`cell_idx`]).
+// Note: Kept at 8 bytes so 8 cells fit in a single 64-byte cache line (enforced below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cell {
+    /// Inline the contents of Cell
+    value: CellValue,
+
+    neighbors: DirectionSet,
+
+    unknown_neighbors: DirectionSet,
+
+    mine_neighbors: DirectionSet,
+
+    safe_neighbors: DirectionSet,
+
+    partition_id: u16,
+
+    flags: CellFlags,
+}
+
+const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
+
+impl Cell {
+    pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
+        let width = width as usize;
+        let height = height as usize;
+        let len = width * height;
+        let inner_cell = Cell {
+            value: CellValue::UNKNOWN,
+            neighbors: !DirectionSet::EMPTY,
+            unknown_neighbors: !DirectionSet::EMPTY,
+            mine_neighbors: DirectionSet::EMPTY,
+            safe_neighbors: DirectionSet::EMPTY,
+            partition_id: 0,
+            flags: CellFlags::new(),
+        };
+        let mut grid: Vec<Cell> = vec![inner_cell; len];
+        // fix up the edge neighbors
+        for cell in grid.iter_mut().take(width) {
+            // top row - strip out the N* neighbors
+            cell.neighbors &= DirectionSet::N_MASK;
+            cell.unknown_neighbors = cell.neighbors;
+        }
+        for cell in grid.iter_mut().skip(len - width) {
+            // bottom row - strip out the S* neighbors
+            cell.neighbors &= DirectionSet::S_MASK;
+            cell.unknown_neighbors = cell.neighbors;
+        }
+        for cell in grid.iter_mut().step_by(width) {
+            // left row - strip out the *W neighbors
+            cell.neighbors &= DirectionSet::W_MASK;
+            cell.unknown_neighbors = cell.neighbors;
+        }
+        for cell in grid.iter_mut().skip(width - 1).step_by(width) {
+            // right row - strip out the *E neighbors
+            cell.neighbors &= DirectionSet::E_MASK;
+            cell.unknown_neighbors = cell.neighbors;
+        }
+
+        grid.into_boxed_slice()
+    }
+
+    /// Returns the cell's current [`CellValue`].
+    #[inline]
+    pub(super) fn value(&self) -> CellValue {
+        self.value
+    }
+
+    /// Returns the cell's current [`CellValue`] as a mutable reference.
+    #[inline]
+    pub(super) fn value_mut(&mut self) -> &mut CellValue {
+        &mut self.value
+    }
+
+    /// Sets the cell's [`CellValue`].
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn set_value(&mut self, value: CellValue) {
+        self.value = value;
+    }
+
+    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
+    #[inline]
+    pub(super) fn partition_id(&self) -> u16 {
+        self.partition_id
+    }
+
+    /// Sets the ID of the partition this cell belongs to (`0` if unpartitioned).
+    #[inline]
+    pub(super) fn set_partition_id(&mut self, partition_id: u16) {
+        self.partition_id = partition_id;
+    }
+
+    /// Returns the mask of all valid board neighbors for this cell.
+    #[inline]
+    pub(super) fn neighbors(&self) -> DirectionSet {
+        self.neighbors
+    }
+
+    /// Returns the mask of neighbors still unknown after applying solver inferences.
+    #[inline]
+    pub(super) fn unknown_neighbors(&self) -> DirectionSet {
+        self.unknown_neighbors
+    }
+
+    /// Returns the mask of neighbors known or inferred to be safe.
+    #[inline]
+    pub(super) fn safe_neighbors(&self) -> DirectionSet {
+        self.safe_neighbors
+    }
+
+    /// Returns the mask of neighbors known or inferred to be mines.
+    #[inline]
+    pub(super) fn mine_neighbors(&self) -> DirectionSet {
+        self.mine_neighbors
+    }
+
+    /// Returns mutable reference to the cell's status flags.
+    #[inline]
+    pub(super) fn flags(&mut self) -> &mut CellFlags {
+        &mut self.flags
+    }
+
+    pub(super) fn remaining_mines(&self) -> i8 {
+        self.value.mine_count() as i8 - self.mine_neighbors().len() as i8
+    }
+
+    /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
+    /// more mines than it has unknown neighbors left to hold, or it has more
+    /// mines than remaining spaces
+    pub(super) fn is_invalid(&self) -> bool {
+        let mine_neighbors = self.mine_neighbors().len() as i8;
+        let unknown_neighbors = self.unknown_neighbors().len() as i8;
+        self.value().safe_mine_count().is_some_and(|mine_count| {
+            let mines_remaining = mine_count as i8 - mine_neighbors;
+            mines_remaining < 0 || mines_remaining > unknown_neighbors
+        })
+    }
+
+    // A fully solved cell is one with no neighbors. Note, this is distinct from a "solvable" cell,
+    // which has all of its mines accounted for, but still has unknown neighbors to be set.
+    pub(super) fn is_solved(&self) -> bool {
+        self.unknown_neighbors().is_empty()
+    }
+
+    // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
+    pub(super) fn is_solvable(&self) -> bool {
+        let unknown_count = self.unknown_neighbors().len() as i8;
+        if let Some(mine_count) = self.value().safe_mine_count() {
+            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
+            remaining <= 0 || remaining >= unknown_count
+        } else {
+            false
+        }
+    }
+
+    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
+    // either a Mine or Safe...
+    pub(super) fn infer_neighbors(&self) -> Option<CellValue> {
+        let unknown_count = self.unknown_neighbors().len() as i8;
+
+        self.value().safe_mine_count().and_then(|mine_count| {
+            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
+            if remaining <= 0 {
+                Some(CellValue::INFERRED_SAFE)
+            } else if remaining >= unknown_count {
+                Some(CellValue::INFERRED_MINE)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(super) fn set_unknown(&mut self, direction: Direction) {
+        self.unknown_neighbors |= direction;
+        self.mine_neighbors -= direction;
+        self.safe_neighbors -= direction;
+    }
+
+    pub(super) fn set_safe(&mut self, direction: Direction) {
+        self.unknown_neighbors -= direction;
+        self.mine_neighbors -= direction;
+        self.safe_neighbors |= direction;
+    }
+
+    pub(super) fn set_mine(&mut self, direction: Direction) {
+        self.unknown_neighbors -= direction;
+        self.mine_neighbors |= direction;
+        self.safe_neighbors -= direction;
+    }
+
+    pub(super) fn neighbor_iter(
+        idx: CellIdx,
+        width: u32,
+        directions: DirectionSet,
+    ) -> impl Iterator<Item = Neighbor<CellIdx>> {
+        DirectionSetIterator::new(directions).map(move |d| match d.index() {
+            0 => Neighbor {
+                neighbor: CellIdx(idx.0 - width - 1),
+                from: SE,
+            },
+            1 => Neighbor {
+                neighbor: CellIdx(idx.0 - width),
+                from: S,
+            },
+            2 => Neighbor {
+                neighbor: CellIdx(idx.0 - width + 1),
+                from: SW,
+            },
+            3 => Neighbor {
+                neighbor: CellIdx(idx.0 - 1),
+                from: E,
+            },
+            4 => Neighbor {
+                neighbor: CellIdx(idx.0 + 1),
+                from: W,
+            },
+            5 => Neighbor {
+                neighbor: CellIdx(idx.0 + width - 1),
+                from: NE,
+            },
+            6 => Neighbor {
+                neighbor: CellIdx(idx.0 + width),
+                from: N,
+            },
+            7 => Neighbor {
+                neighbor: CellIdx(idx.0 + width + 1),
+                from: NW,
+            },
+            _ => unreachable!(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset(&mut self) {
+        self.mine_neighbors = DirectionSet::EMPTY;
+        self.safe_neighbors = DirectionSet::EMPTY;
+        self.unknown_neighbors = self.neighbors;
+        self.value = CellValue::UNKNOWN;
+    }
+}
+
+impl Display for Cell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let spacer = if f.alternate() { "\n    " } else { " " };
+        write!(
+            f,
+            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}safe_neighbors: {},{spacer}partition_id: {},{spacer}flags: {}",
+            self.value,
+            self.neighbors,
+            self.unknown_neighbors(),
+            self.mine_neighbors(),
+            self.safe_neighbors(),
+            self.partition_id,
+            self.flags
+        )?;
+        if f.alternate() {
+            writeln!(f)?;
+        }
+        write!(f, " }}")
+    }
+}
+
+impl Index<CellIdx> for [Cell] {
+    type Output = Cell;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [Cell] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
+    }
+}
+
 #[derive(Debug, Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct CellIdx(pub(super) u32);
 
@@ -508,288 +790,6 @@ impl GuardedQueue {
     #[cfg(test)]
     pub(super) fn clear(&mut self) {
         self.queue.clear();
-    }
-}
-
-/// Internal solver representation of a board cell, caching neighbor masks and partition membership.
-///
-/// A cell does not store its own index; callers identify a cell by its row-major position in the
-/// `cells` slice (see [`coordinates`] / [`cell_idx`]).
-// Note: Kept at 8 bytes so 8 cells fit in a single 64-byte cache line (enforced below).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Cell {
-    /// Inline the contents of Cell
-    value: CellValue,
-
-    neighbors: DirectionSet,
-
-    unknown_neighbors: DirectionSet,
-
-    mine_neighbors: DirectionSet,
-
-    safe_neighbors: DirectionSet,
-
-    partition_id: u16,
-
-    flags: CellFlags,
-}
-
-const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
-
-impl Cell {
-    pub(super) fn grid(width: u32, height: u32) -> Box<[Cell]> {
-        let width = width as usize;
-        let height = height as usize;
-        let len = width * height;
-        let inner_cell = Cell {
-            value: CellValue::UNKNOWN,
-            neighbors: !DirectionSet::EMPTY,
-            unknown_neighbors: !DirectionSet::EMPTY,
-            mine_neighbors: DirectionSet::EMPTY,
-            safe_neighbors: DirectionSet::EMPTY,
-            partition_id: 0,
-            flags: CellFlags::new(),
-        };
-        let mut grid: Vec<Cell> = vec![inner_cell; len];
-        // fix up the edge neighbors
-        for cell in grid.iter_mut().take(width) {
-            // top row - strip out the N* neighbors
-            cell.neighbors &= DirectionSet::N_MASK;
-            cell.unknown_neighbors = cell.neighbors;
-        }
-        for cell in grid.iter_mut().skip(len - width) {
-            // bottom row - strip out the S* neighbors
-            cell.neighbors &= DirectionSet::S_MASK;
-            cell.unknown_neighbors = cell.neighbors;
-        }
-        for cell in grid.iter_mut().step_by(width) {
-            // left row - strip out the *W neighbors
-            cell.neighbors &= DirectionSet::W_MASK;
-            cell.unknown_neighbors = cell.neighbors;
-        }
-        for cell in grid.iter_mut().skip(width - 1).step_by(width) {
-            // right row - strip out the *E neighbors
-            cell.neighbors &= DirectionSet::E_MASK;
-            cell.unknown_neighbors = cell.neighbors;
-        }
-
-        grid.into_boxed_slice()
-    }
-
-    /// Returns the cell's current [`CellValue`].
-    #[inline]
-    pub(super) fn value(&self) -> CellValue {
-        self.value
-    }
-
-    /// Returns the cell's current [`CellValue`] as a mutable reference.
-    #[inline]
-    pub(super) fn value_mut(&mut self) -> &mut CellValue {
-        &mut self.value
-    }
-
-    /// Sets the cell's [`CellValue`].
-    #[inline]
-    #[cfg(test)]
-    pub(super) fn set_value(&mut self, value: CellValue) {
-        self.value = value;
-    }
-
-    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
-    #[inline]
-    pub(super) fn partition_id(&self) -> u16 {
-        self.partition_id
-    }
-
-    /// Sets the ID of the partition this cell belongs to (`0` if unpartitioned).
-    #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: u16) {
-        self.partition_id = partition_id;
-    }
-
-    /// Returns the mask of all valid board neighbors for this cell.
-    #[inline]
-    pub(super) fn neighbors(&self) -> DirectionSet {
-        self.neighbors
-    }
-
-    /// Returns the mask of neighbors still unknown after applying solver inferences.
-    #[inline]
-    pub(super) fn unknown_neighbors(&self) -> DirectionSet {
-        self.unknown_neighbors
-    }
-
-    /// Returns the mask of neighbors known or inferred to be safe.
-    #[inline]
-    pub(super) fn safe_neighbors(&self) -> DirectionSet {
-        self.safe_neighbors
-    }
-
-    /// Returns the mask of neighbors known or inferred to be mines.
-    #[inline]
-    pub(super) fn mine_neighbors(&self) -> DirectionSet {
-        self.mine_neighbors
-    }
-
-    /// Returns mutable reference to the cell's status flags.
-    #[inline]
-    pub(super) fn flags(&mut self) -> &mut CellFlags {
-        &mut self.flags
-    }
-
-    pub(super) fn remaining_mines(&self) -> i8 {
-        self.value.mine_count() as i8 - self.mine_neighbors().len() as i8
-    }
-
-    /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
-    /// more mines than it has unknown neighbors left to hold, or it has more
-    /// mines than remaining spaces
-    pub(super) fn is_invalid(&self) -> bool {
-        let mine_neighbors = self.mine_neighbors().len() as i8;
-        let unknown_neighbors = self.unknown_neighbors().len() as i8;
-        self.value().safe_mine_count().is_some_and(|mine_count| {
-            let mines_remaining = mine_count as i8 - mine_neighbors;
-            mines_remaining < 0 || mines_remaining > unknown_neighbors
-        })
-    }
-
-    // A fully solved cell is one with no neighbors. Note, this is distinct from a "solvable" cell,
-    // which has all of its mines accounted for, but still has unknown neighbors to be set.
-    pub(super) fn is_solved(&self) -> bool {
-        self.unknown_neighbors().is_empty()
-    }
-
-    // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
-    pub(super) fn is_solvable(&self) -> bool {
-        let unknown_count = self.unknown_neighbors().len() as i8;
-        if let Some(mine_count) = self.value().safe_mine_count() {
-            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
-            remaining <= 0 || remaining >= unknown_count
-        } else {
-            false
-        }
-    }
-
-    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
-    // either a Mine or Safe...
-    pub(super) fn infer_neighbors(&self) -> Option<CellValue> {
-        let unknown_count = self.unknown_neighbors().len() as i8;
-
-        self.value().safe_mine_count().and_then(|mine_count| {
-            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
-            if remaining <= 0 {
-                Some(CellValue::INFERRED_SAFE)
-            } else if remaining >= unknown_count {
-                Some(CellValue::INFERRED_MINE)
-            } else {
-                None
-            }
-        })
-    }
-
-    pub(super) fn set_unknown(&mut self, direction: Direction) {
-        self.unknown_neighbors |= direction;
-        self.mine_neighbors -= direction;
-        self.safe_neighbors -= direction;
-    }
-
-    pub(super) fn set_safe(&mut self, direction: Direction) {
-        self.unknown_neighbors -= direction;
-        self.mine_neighbors -= direction;
-        self.safe_neighbors |= direction;
-    }
-
-    pub(super) fn set_mine(&mut self, direction: Direction) {
-        self.unknown_neighbors -= direction;
-        self.mine_neighbors |= direction;
-        self.safe_neighbors -= direction;
-    }
-
-    pub(super) fn neighbor_iter(
-        idx: CellIdx,
-        width: u32,
-        directions: DirectionSet,
-    ) -> impl Iterator<Item = Neighbor<CellIdx>> {
-        DirectionSetIterator::new(directions).map(move |d| match d.index() {
-            0 => Neighbor {
-                neighbor: CellIdx(idx.0 - width - 1),
-                from: SE,
-            },
-            1 => Neighbor {
-                neighbor: CellIdx(idx.0 - width),
-                from: S,
-            },
-            2 => Neighbor {
-                neighbor: CellIdx(idx.0 - width + 1),
-                from: SW,
-            },
-            3 => Neighbor {
-                neighbor: CellIdx(idx.0 - 1),
-                from: E,
-            },
-            4 => Neighbor {
-                neighbor: CellIdx(idx.0 + 1),
-                from: W,
-            },
-            5 => Neighbor {
-                neighbor: CellIdx(idx.0 + width - 1),
-                from: NE,
-            },
-            6 => Neighbor {
-                neighbor: CellIdx(idx.0 + width),
-                from: N,
-            },
-            7 => Neighbor {
-                neighbor: CellIdx(idx.0 + width + 1),
-                from: NW,
-            },
-            _ => unreachable!(),
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn reset(&mut self) {
-        self.mine_neighbors = DirectionSet::EMPTY;
-        self.safe_neighbors = DirectionSet::EMPTY;
-        self.unknown_neighbors = self.neighbors;
-        self.value = CellValue::UNKNOWN;
-    }
-}
-
-impl Display for Cell {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let spacer = if f.alternate() { "\n    " } else { " " };
-        write!(
-            f,
-            "Cell{{{spacer}value: {},{spacer}neighbors: {},{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},{spacer}safe_neighbors: {},{spacer}partition_id: {},{spacer}flags: {}",
-            self.value,
-            self.neighbors,
-            self.unknown_neighbors(),
-            self.mine_neighbors(),
-            self.safe_neighbors(),
-            self.partition_id,
-            self.flags
-        )?;
-        if f.alternate() {
-            writeln!(f)?;
-        }
-        write!(f, " }}")
-    }
-}
-
-impl Index<CellIdx> for [Cell] {
-    type Output = Cell;
-
-    #[inline]
-    fn index(&self, index: CellIdx) -> &Self::Output {
-        &self[index.0 as usize]
-    }
-}
-
-impl IndexMut<CellIdx> for [Cell] {
-    #[inline]
-    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
-        &mut self[index.0 as usize]
     }
 }
 
