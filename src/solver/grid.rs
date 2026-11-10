@@ -673,9 +673,21 @@ mod tests {
 
     #[test]
     fn test_direction_set_directional_masks() {
-        assert_eq!(DirectionSet::ALL & DirectionSet::N_MASK, W | SW | S | SE | E);
-        assert_eq!(DirectionSet::ALL & DirectionSet::S_MASK, NW | N | NE | E | W);
-        assert_eq!(DirectionSet::ALL & DirectionSet::W_MASK, N | NE | E | SE | S);
-        assert_eq!(DirectionSet::ALL & DirectionSet::E_MASK, NW | N | S | SW | W);
+        assert_eq!(
+            DirectionSet::ALL & DirectionSet::N_MASK,
+            W | SW | S | SE | E
+        );
+        assert_eq!(
+            DirectionSet::ALL & DirectionSet::S_MASK,
+            NW | N | NE | E | W
+        );
+        assert_eq!(
+            DirectionSet::ALL & DirectionSet::W_MASK,
+            N | NE | E | SE | S
+        );
+        assert_eq!(
+            DirectionSet::ALL & DirectionSet::E_MASK,
+            NW | N | S | SW | W
+        );
     }
 }

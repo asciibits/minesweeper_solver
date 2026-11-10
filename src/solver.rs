@@ -14,11 +14,11 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            CellIdx, CellType, CellValue, CellValueChangeType, FastNumberHasherBuilder, FieldArgs,
-            FlagMask, GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference,
-            cell_idx, coordinates,
+            CellIdx, CellType, CellValue, CellValueChangeType, FastNumberHasherBuilder, FlagMask,
+            GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference, cell_idx,
+            coordinates,
         },
-        grid::{DirectionSet, Neighbor},
+        grid::{Direction, DirectionSet, Neighbor},
         metrics::Metrics,
     },
 };
@@ -333,8 +333,80 @@ impl MineField {
             .filter(|&i| self.cells[i].value().is_safe())
     }
 
+    fn mark_neighbor_unknown(&mut self, n_idx: CellIdx, from: Direction) {
+        // if the cell starts out as solved, the transition of a neighbor to unknown changes its
+        // solved state (unless it was invalid and over-mined)
+        let neighbor = &mut self.cells[n_idx];
+        let was_solved = neighbor.is_solved();
+        neighbor.set_unknown(from);
+        self.check_cell_solve(n_idx, was_solved);
+    }
+
+    fn mark_neighbor_mine(&mut self, n_idx: CellIdx, from: Direction) {
+        // if the cell starts out as a solved given cell, the transition of a neighbor
+        // to unknown changes its solved state
+        let neighbor = &mut self.cells[n_idx];
+        let was_known = !neighbor.unknown_neighbors().contains(from);
+        neighbor.set_mine(from);
+        self.check_cell_solve(n_idx, was_known);
+    }
+
+    fn mark_neighbor_safe(&mut self, n_idx: CellIdx, from: Direction) {
+        // if the cell starts out as a solved given cell, the transition of a neighbor
+        // to unknown changes its solved state
+        let neighbor = &mut self.cells[n_idx];
+        let was_known = !neighbor.unknown_neighbors().contains(from);
+        neighbor.set_safe(from);
+        self.check_cell_solve(n_idx, was_known);
+    }
+
+    fn check_cell_solve(&mut self, idx: CellIdx, inference_breaking: bool) {
+        let cell = self.cells[idx];
+        if inference_breaking {
+            // Inferences attached to this cell's partition may be invalidated. Reset inferred.
+            self.desolved_queue.push(&mut self.cells, idx);
+        }
+        if cell.value().has_count() {
+            self.pending_partition_queue.push(&mut self.cells, idx);
+            if !cell.is_solved() && cell.is_solvable() {
+                self.solved_queue.push(&mut self.cells, idx);
+            }
+        }
+    }
+
     fn change_cell_value(&mut self, idx: CellIdx, value: CellValue) -> CellValueChangeType {
-        Cell::change_value(idx, value, &mut FieldArgs::new(self))
+        let cell = &mut self.cells[idx];
+
+        let prev_val = cell.value();
+        let change_type = cell.value_mut().set_value(value);
+
+        let inference_breaking = match change_type {
+            CellValueChangeType::NoChange => return CellValueChangeType::NoChange,
+            CellValueChangeType::NonBreaking => false,
+            CellValueChangeType::Breaking => true,
+        };
+
+        self.check_cell_solve(idx, inference_breaking);
+
+        if !prev_val.types_match(value) {
+            let mark_neighbor = match value.cell_type() {
+                CellType::Unknown => Self::mark_neighbor_unknown,
+                CellType::Mine | CellType::InferredMine => Self::mark_neighbor_mine,
+                CellType::Safe | CellType::InferredSafe => Self::mark_neighbor_safe,
+            };
+
+            let neighbors = self.cells[idx].neighbors();
+            self.metrics.inc_neighbor_visits(neighbors);
+
+            for Neighbor {
+                neighbor: neighbor_idx,
+                from,
+            } in Cell::neighbor_iter(idx, self.width, neighbors)
+            {
+                mark_neighbor(self, neighbor_idx, from);
+            }
+        }
+        change_type
     }
 
     /// Compacts partition IDs when `next_partition_id` approaches `u16::MAX`.
@@ -497,8 +569,8 @@ impl MineField {
             }
             if cell.partition_id() < start_partition_id {
                 self.partitions.remove(&idx);
-                let len = self.visit_partition(idx, &mut |idx, field_args| {
-                    field_args.partitions.remove(&idx);
+                let len = self.visit_partition(idx, &mut |field, idx| {
+                    field.partitions.remove(&idx);
                 });
                 if len > 1 {
                     self.partitions.insert(idx, len);
@@ -509,40 +581,40 @@ impl MineField {
     }
 
     fn visit_neighbors_helper(
+        &mut self,
         idx: CellIdx,
-        field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs) -> Option<DirectionSet>,
+        visit: &mut impl FnMut(&mut MineField, CellIdx) -> Option<DirectionSet>,
     ) -> usize {
-        if field_args.cells[idx].partition_id() == *field_args.next_partition_id {
+        if self.cells[idx].partition_id() == self.next_partition_id {
             return 0;
         }
-        let Some(neighbors) = visit(idx, field_args) else {
+        let Some(neighbors) = visit(self, idx) else {
             return 0;
         };
-        field_args.cells[idx].set_partition_id(*field_args.next_partition_id);
+        self.cells[idx].set_partition_id(self.next_partition_id);
 
         let mut len = 1;
-        field_args.metrics.inc_neighbor_visits(neighbors);
-        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, field_args.width, neighbors) {
-            len += Self::visit_neighbors_helper(neighbor, field_args, visit);
+        self.metrics.inc_neighbor_visits(neighbors);
+        for Neighbor { neighbor, .. } in Cell::neighbor_iter(idx, self.width, neighbors) {
+            len += self.visit_neighbors_helper(neighbor, visit);
         }
         len
     }
 
     fn visit_partition_helper(
+        &mut self,
         idx: CellIdx,
-        field_args: &mut FieldArgs,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
+        visit: &mut impl FnMut(&mut MineField, CellIdx),
     ) -> usize {
-        Self::visit_neighbors_helper(idx, field_args, &mut |idx, field_args| {
-            let cell = field_args.cells[idx];
+        self.visit_neighbors_helper(idx, &mut |field, idx| {
+            let cell = field.cells[idx];
             match cell.value().cell_type() {
                 CellType::Unknown => {
-                    visit(idx, field_args);
+                    visit(field, idx);
                     Some(cell.safe_neighbors())
                 }
                 CellType::Safe => {
-                    visit(idx, field_args);
+                    visit(field, idx);
                     Some(cell.unknown_neighbors())
                 }
                 CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
@@ -554,29 +626,26 @@ impl MineField {
     // has been mutated, and is unknown whether it was originally a known vs unknown. So, the
     // starting cell looks for *all* unknown + mine neighbors.
     fn desolve_partition(&mut self, idx: CellIdx) -> usize {
-        let len =
-            Self::visit_neighbors_helper(idx, &mut FieldArgs::new(self), &mut |idx, field_args| {
-                let cell = field_args.cells[idx];
-                match cell.value().cell_type() {
-                    CellType::Unknown => {
-                        field_args.partitions.remove(&idx);
-                        Some(cell.safe_neighbors())
-                    }
-                    CellType::InferredSafe | CellType::InferredMine => {
-                        field_args.partitions.remove(&idx);
-                        Cell::change_value(idx, CellValue::UNKNOWN, field_args);
-                        Some(cell.safe_neighbors())
-                    }
-                    CellType::Safe => {
-                        field_args.partitions.remove(&idx);
-                        field_args
-                            .pending_partition_queue
-                            .push(field_args.cells, idx);
-                        Some(cell.neighbors())
-                    }
-                    CellType::Mine => None,
+        let len = self.visit_neighbors_helper(idx, &mut |field, idx| {
+            let cell = field.cells[idx];
+            match cell.value().cell_type() {
+                CellType::Unknown => {
+                    field.partitions.remove(&idx);
+                    Some(cell.safe_neighbors())
                 }
-            });
+                CellType::InferredSafe | CellType::InferredMine => {
+                    field.partitions.remove(&idx);
+                    field.change_cell_value(idx, CellValue::UNKNOWN);
+                    Some(cell.safe_neighbors())
+                }
+                CellType::Safe => {
+                    field.partitions.remove(&idx);
+                    field.pending_partition_queue.push(&mut field.cells, idx);
+                    Some(cell.neighbors())
+                }
+                CellType::Mine => None,
+            }
+        });
         if len <= 1 {
             self.cells[idx].set_partition_id(0);
         } else if len > 1 {
@@ -588,9 +657,9 @@ impl MineField {
     fn visit_partition(
         &mut self,
         member: CellIdx,
-        visit: &mut impl FnMut(CellIdx, &mut FieldArgs),
+        visit: &mut impl FnMut(&mut MineField, CellIdx),
     ) -> usize {
-        let len = Self::visit_partition_helper(member, &mut FieldArgs::new(self), visit);
+        let len = self.visit_partition_helper(member, visit);
         if len <= 1 {
             self.cells[member].set_partition_id(0);
         } else if len > 1 {
@@ -607,7 +676,7 @@ impl MineField {
         let mut members = Vec::with_capacity(capacity);
         let members_ref = &mut members;
 
-        self.visit_partition(member, &mut |idx, _| {
+        self.visit_partition(member, &mut |_, idx| {
             members_ref.push(idx);
         });
         members
@@ -844,6 +913,31 @@ mod tests {
             cell.mine_neighbors() | cell.mine_neighbors(),
             cell.mine_neighbors()
         );
+    }
+
+    #[test]
+    fn test_cell_change_value_updates_neighbor_masks() {
+        // 3x1 strip, change the middle cell and watch both neighbors
+        let mut field = MineField::new(3, 1).unwrap();
+
+        field.change_cell_value(CellIdx(1), CellValue::MINE);
+        assert_eq!(field.cells[1].value(), CellValue::MINE);
+        assert_eq!(field.cells[0].mine_neighbors(), !!E);
+        assert!(field.cells[0].unknown_neighbors().is_empty());
+        assert_eq!(field.cells[2].mine_neighbors(), !!W);
+        assert!(field.cells[2].unknown_neighbors().is_empty());
+
+        // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
+        field.change_cell_value(CellIdx(1), CellValue::for_mine_count(1));
+        assert!(field.cells[0].mine_neighbors().is_empty());
+        assert!(field.cells[0].unknown_neighbors().is_empty());
+        assert_eq!(field.cells[0].safe_neighbors(), !!E);
+
+        // Safe(1) -> Unknown: neighbors regain an unknown neighbor
+        field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
+        assert_eq!(field.cells[0].unknown_neighbors(), !!E);
+        assert_eq!(field.cells[2].unknown_neighbors(), !!W);
+        assert!(field.cells[0].mine_neighbors().is_empty());
     }
 
     #[test]
@@ -1963,19 +2057,31 @@ mod tests {
         let spec = "1.1\n...\n1.1";
         let mut field = MineField::create(spec);
         for idx in field.pending_partition_queue.iter() {
-            assert!(field.cells[idx].value().has_count(), "pending_partition_queue must only contain cells with has_count");
+            assert!(
+                field.cells[idx].value().has_count(),
+                "pending_partition_queue must only contain cells with has_count"
+            );
         }
         for idx in field.solved_queue.iter() {
-            assert!(field.cells[idx].value().has_count(), "solved_queue must only contain cells with has_count");
+            assert!(
+                field.cells[idx].value().has_count(),
+                "solved_queue must only contain cells with has_count"
+            );
         }
 
         // Apply a breaking update changing a count cell into an unknown and another into a mine
         field.update("._*\n...\n1.1");
         for idx in field.pending_partition_queue.iter() {
-            assert!(field.cells[idx].value().has_count(), "pending_partition_queue must strictly maintain has_count after updates");
+            assert!(
+                field.cells[idx].value().has_count(),
+                "pending_partition_queue must strictly maintain has_count after updates"
+            );
         }
         for idx in field.solved_queue.iter() {
-            assert!(field.cells[idx].value().has_count(), "solved_queue must strictly maintain has_count after updates");
+            assert!(
+                field.cells[idx].value().has_count(),
+                "solved_queue must strictly maintain has_count after updates"
+            );
         }
     }
 

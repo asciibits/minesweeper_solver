@@ -3,22 +3,17 @@
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
 };
 
-use crate::{
-    MineField,
-    solver::{
-        Metrics,
-        grid::{
-            Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE,
-            SW, W,
-        },
-        stats,
+use crate::solver::{
+    grid::{
+        Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE, SW, W,
     },
+    stats,
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
@@ -183,7 +178,7 @@ impl CellValue {
     /// - [`CellValueChangeType::NonBreaking`]: previous inferences remain valid.
     /// - [`CellValueChangeType::Breaking`]: previous inferences may be invalid, so affected
     ///   partitions must be reset and re-solved.
-    fn set_value(&mut self, value: CellValue) -> CellValueChangeType {
+    pub(super) fn set_value(&mut self, value: CellValue) -> CellValueChangeType {
         if *self == value {
             return CellValueChangeType::NoChange;
         }
@@ -710,94 +705,6 @@ impl Cell {
         self.safe_neighbors -= direction;
     }
 
-    /// Sets `cells[idx]` to `value` and updates the `unknown`/`mine` neighbor masks of every
-    /// adjacent cell to match, then calls `visit_function` with each neighbor's index and its
-    /// already-updated state. `visit_function` is not called if the value did not change.
-    ///
-    /// Returns how the cell's value changed. The caller is responsible for deciding which
-    /// partitions need rebuilding based on the returned [`CellValueChangeType`].
-    pub(super) fn change_value(
-        idx: CellIdx,
-        value: CellValue,
-        field_args: &mut FieldArgs,
-    ) -> CellValueChangeType {
-        let cell = &mut field_args.cells[idx];
-
-        let prev_val = cell.value();
-        let change_type = cell.value_mut().set_value(value);
-
-        let inference_breaking = match change_type {
-            CellValueChangeType::NoChange => return CellValueChangeType::NoChange,
-            CellValueChangeType::NonBreaking => false,
-            CellValueChangeType::Breaking => true,
-        };
-
-        Self::check_cell_solve(idx, inference_breaking, field_args);
-
-        if !prev_val.types_match(value) {
-            let mark_neighbor = match value.cell_type() {
-                CellType::Unknown => Self::mark_neighbor_unknown,
-                CellType::Mine | CellType::InferredMine => Self::mark_neighbor_mine,
-                CellType::Safe | CellType::InferredSafe => Self::mark_neighbor_safe,
-            };
-
-            let neighbors = field_args.cells[idx].neighbors();
-            field_args.metrics.inc_neighbor_visits(neighbors);
-
-            for Neighbor {
-                neighbor: neighbor_idx,
-                from,
-            } in Cell::neighbor_iter(idx, field_args.width, neighbors)
-            {
-                mark_neighbor(neighbor_idx, from, field_args);
-            }
-        }
-        change_type
-    }
-
-    fn mark_neighbor_unknown(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
-        // if the cell starts out as solved, the transition of a neighbor to unknown changes its
-        // solved state (unless it was invalid and over-mined)
-        let neighbor = &mut field_args.cells[n_idx];
-        let was_solved = neighbor.is_solved();
-        neighbor.set_unknown(from);
-        Self::check_cell_solve(n_idx, was_solved, field_args);
-    }
-
-    fn mark_neighbor_mine(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
-        // if the cell starts out as a solved given cell, the transition of a neighbor
-        // to unknown changes its solved state
-        let neighbor = &mut field_args.cells[n_idx];
-        let was_known = !neighbor.unknown_neighbors().contains(from);
-        neighbor.set_mine(from);
-        Self::check_cell_solve(n_idx, was_known, field_args);
-    }
-
-    fn mark_neighbor_safe(n_idx: CellIdx, from: Direction, field_args: &mut FieldArgs) {
-        // if the cell starts out as a solved given cell, the transition of a neighbor
-        // to unknown changes its solved state
-        let neighbor = &mut field_args.cells[n_idx];
-        let was_known = !neighbor.unknown_neighbors().contains(from);
-        neighbor.set_safe(from);
-        Self::check_cell_solve(n_idx, was_known, field_args);
-    }
-
-    fn check_cell_solve(idx: CellIdx, inference_breaking: bool, field_args: &mut FieldArgs) {
-        let cell = field_args.cells[idx];
-        if inference_breaking {
-            // Inferences attached to this cell's partition may be invalidated. Reset inferred.
-            field_args.desolved_queue.push(field_args.cells, idx);
-        }
-        if cell.value().has_count() {
-            field_args
-                .pending_partition_queue
-                .push(field_args.cells, idx);
-            if !cell.is_solved() && cell.is_solvable() {
-                field_args.solved_queue.push(field_args.cells, idx);
-            }
-        }
-    }
-
     pub(super) fn neighbor_iter(
         idx: CellIdx,
         width: u32,
@@ -883,33 +790,6 @@ impl IndexMut<CellIdx> for [Cell] {
     #[inline]
     fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
         &mut self[index.0 as usize]
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct FieldArgs<'field> {
-    pub(super) cells: &'field mut [Cell],
-    pub(super) width: u32,
-    pub(super) next_partition_id: &'field mut u16,
-    pub(super) desolved_queue: &'field mut GuardedQueue,
-    pub(super) solved_queue: &'field mut GuardedQueue,
-    pub(super) pending_partition_queue: &'field mut GuardedQueue,
-    pub(super) metrics: &'field mut Metrics,
-    pub(super) partitions: &'field mut HashMap<CellIdx, usize, FastNumberHasherBuilder>,
-}
-
-impl<'field> FieldArgs<'field> {
-    pub(super) fn new(field: &'field mut MineField) -> Self {
-        FieldArgs {
-            cells: &mut field.cells,
-            width: field.width,
-            next_partition_id: &mut field.next_partition_id,
-            desolved_queue: &mut field.desolved_queue,
-            solved_queue: &mut field.solved_queue,
-            pending_partition_queue: &mut field.pending_partition_queue,
-            metrics: &mut field.metrics,
-            partitions: &mut field.partitions,
-        }
     }
 }
 
@@ -1038,6 +918,8 @@ impl Ord for CellOrdering {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::solver::grid::{E, N, NW, S, SE, W};
 
@@ -1190,39 +1072,6 @@ mod tests {
             v.set_value(CellValue::UNKNOWN),
             CellValueChangeType::Breaking
         );
-    }
-
-    #[test]
-    fn test_cell_change_value_updates_neighbor_masks() {
-        // 3x1 strip, change the middle cell and watch both neighbors
-        let mut field = MineField::new(3, 1).unwrap();
-
-        Cell::change_value(CellIdx(1), CellValue::MINE, &mut FieldArgs::new(&mut field));
-        assert_eq!(field.cells[1].value(), CellValue::MINE);
-        assert_eq!(field.cells[0].mine_neighbors(), !!E);
-        assert!(field.cells[0].unknown_neighbors().is_empty());
-        assert_eq!(field.cells[2].mine_neighbors(), !!W);
-        assert!(field.cells[2].unknown_neighbors().is_empty());
-
-        // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
-        Cell::change_value(
-            CellIdx(1),
-            CellValue::for_mine_count(1),
-            &mut FieldArgs::new(&mut field),
-        );
-        assert!(field.cells[0].mine_neighbors().is_empty());
-        assert!(field.cells[0].unknown_neighbors().is_empty());
-        assert_eq!(field.cells[0].safe_neighbors(), !!E);
-
-        // Safe(1) -> Unknown: neighbors regain an unknown neighbor
-        Cell::change_value(
-            CellIdx(1),
-            CellValue::UNKNOWN,
-            &mut FieldArgs::new(&mut field),
-        );
-        assert_eq!(field.cells[0].unknown_neighbors(), !!E);
-        assert_eq!(field.cells[2].unknown_neighbors(), !!W);
-        assert!(field.cells[0].mine_neighbors().is_empty());
     }
 
     #[test]
@@ -1396,7 +1245,10 @@ mod tests {
 
         // Push another index
         queue.push(&mut cells, CellIdx(3));
-        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(1), CellIdx(3)]);
+        assert_eq!(
+            queue.iter().collect::<Vec<_>>(),
+            vec![CellIdx(1), CellIdx(3)]
+        );
 
         // Remove CellIdx(1)
         queue.remove(&mut cells, CellIdx(1));
@@ -1419,7 +1271,10 @@ mod tests {
         let mut cells = Cell::grid(3, 1);
         // Cell 0 is safe count 1 with unknown neighbor East (1)
         cells[0].set_value(CellValue::for_mine_count(1));
-        assert!(cells[0].is_solvable(), "needs 1 mine with 1 unknown neighbor -> solvable");
+        assert!(
+            cells[0].is_solvable(),
+            "needs 1 mine with 1 unknown neighbor -> solvable"
+        );
 
         // Cell 0 with count 2 and 1 unknown neighbor -> over-constrained (solvable in the sense remaining >= unknown)
         cells[0].set_value(CellValue::for_mine_count(2));
