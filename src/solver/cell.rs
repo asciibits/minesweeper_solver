@@ -121,17 +121,17 @@ pub(super) struct Cell {
     /// is the set of valid neighbors.
     neighbors: DirectionSet,
 
-    /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. Maintained for all
-    /// non-mine cells; unspecified for mine cells ([`CellType::Mine`] and [`CellType::InferredMine`]).
-    mine_neighbors: DirectionSet,
-
     /// For [`CellType::Unknown`] cells, this points to all [`CellType::Count`] neighbors.
     /// Conversely, for [`CellType::Count`] and [`CellType::InferredSafe`] cells, this points to
     /// neighbors of type [`CellType::Unknown`]. Unspecified for mine type cells.
     alt_neighbors: DirectionSet,
 
+    /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. Maintained for all
+    /// non-mine cells; unspecified for mine cells ([`CellType::Mine`] and [`CellType::InferredMine`]).
+    mine_neighbors: DirectionSet,
+
     /// For [`CellType::Unknown`] cells, this points to all [`CellType::InferredSafe`] neighbors.
-    /// For all other cell types, this is left to drift / unspecified.
+    /// For all other cell types, this is unspecified.
     safe_neighbors: DirectionSet,
 
     /// A unique id for all members of a partition. Zero values are always un-partitioned; non-zero
@@ -151,7 +151,7 @@ impl Cell {
         let len = width * height;
         let inner_cell = Cell {
             value: CellValue::UNKNOWN,
-            neighbors: !DirectionSet::EMPTY,
+            neighbors: DirectionSet::ALL,
             alt_neighbors: DirectionSet::EMPTY,
             mine_neighbors: DirectionSet::EMPTY,
             safe_neighbors: DirectionSet::EMPTY,
@@ -161,20 +161,20 @@ impl Cell {
         let mut grid: Vec<Cell> = vec![inner_cell; len];
         // fix up the edge neighbors
         for cell in grid.iter_mut().take(width) {
-            // top row - strip out the N* neighbors
-            cell.neighbors &= DirectionSet::N_MASK;
+            // top row
+            cell.neighbors -= DirectionSet::N_DIRECTIONS;
         }
         for cell in grid.iter_mut().skip(len - width) {
-            // bottom row - strip out the S* neighbors
-            cell.neighbors &= DirectionSet::S_MASK;
+            // bottom row
+            cell.neighbors -= DirectionSet::S_DIRECTIONS;
         }
         for cell in grid.iter_mut().step_by(width) {
-            // left row - strip out the *W neighbors
-            cell.neighbors &= DirectionSet::W_MASK;
+            // left col
+            cell.neighbors -= DirectionSet::W_DIRECTIONS;
         }
         for cell in grid.iter_mut().skip(width - 1).step_by(width) {
-            // right row - strip out the *E neighbors
-            cell.neighbors &= DirectionSet::E_MASK;
+            // right col
+            cell.neighbors -= DirectionSet::E_DIRECTIONS;
         }
 
         grid.into_boxed_slice()
@@ -222,16 +222,6 @@ impl Cell {
         self.alt_neighbors
     }
 
-    /// Returns inferred safe neighbors.
-    ///
-    /// Only valid for [`CellType::Unknown`] cells.
-    #[inline]
-    pub(super) fn safe_neighbors(&self) -> DirectionSet {
-        // only valid for unknown cells
-        debug_assert!(self.value.is_unknown());
-        self.safe_neighbors
-    }
-
     /// Returns neighbors known or inferred to be mines.
     ///
     /// Valid for all non-mine cells; unspecified for mine cells.
@@ -242,12 +232,14 @@ impl Cell {
         self.mine_neighbors
     }
 
-    /// Returns a mutable reference to the cell's mine neighbor set.
+    /// Returns inferred safe neighbors.
+    ///
+    /// Only valid for [`CellType::Unknown`] cells.
     #[inline]
-    pub(super) fn mine_neighbors_mut(&mut self) -> &mut DirectionSet {
-        // not valid for mine cells
-        debug_assert!(!self.value.is_mine());
-        &mut self.mine_neighbors
+    pub(super) fn safe_neighbors(&self) -> DirectionSet {
+        // only valid for unknown cells
+        debug_assert!(self.value.is_unknown());
+        self.safe_neighbors
     }
 
     /// Returns a mutable reference to the cell's alternate neighbor set.
@@ -256,6 +248,14 @@ impl Cell {
         // not valid for mine cells
         debug_assert!(!self.value.is_mine());
         &mut self.alt_neighbors
+    }
+
+    /// Returns a mutable reference to the cell's mine neighbor set.
+    #[inline]
+    pub(super) fn mine_neighbors_mut(&mut self) -> &mut DirectionSet {
+        // not valid for mine cells
+        debug_assert!(!self.value.is_mine());
+        &mut self.mine_neighbors
     }
 
     /// Returns a mutable reference to the cell's safe neighbor set.
@@ -391,32 +391,6 @@ impl PartialEq for Cell {
         }
 
         true
-        // /// Inline the contents of Cell
-        // value: CellValue,
-
-        // /// All neighbors to this cell. For inner cells this is DirectionSet::ALL, for border cells it
-        // /// is the set of valid neighbors.
-        // neighbors: DirectionSet,
-
-        // /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. This is not kept in sync
-        // /// for non-mine type cells.
-        // mine_neighbors: DirectionSet,
-
-        // /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] neighbors. Conversely, for
-        // /// [`CellType::Count`] and [`CellType::InferredSafe`] cells, this is all neighbors of type
-        // /// [`CellType::Unknown`]. This value is unspecified for mine type cells.
-        // alt_neighbors: DirectionSet,
-
-        // /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] and
-        // /// [`CellType::InferredSafe`] neighbors. For all other types, this is unspecified.
-        // safe_neighbors: DirectionSet,
-
-        // /// A unique id for all members of a partition. Zero values are always un-partitioned; non-zero
-        // /// values may or may not be partitioned.
-        // partition_id: u16,
-
-        // /// A set of bit flags used when executing a solve pass.
-        // flags: CellFlags,
     }
 }
 
@@ -441,7 +415,7 @@ impl Display for Cell {
             CellType::InferredSafe | CellType::Count => {
                 write!(
                     f,
-                    "{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},",
+                    "{spacer}alt_neighbors (unknown): {},{spacer}mine_neighbors: {},",
                     self.alt_neighbors(),
                     self.mine_neighbors(),
                 )?;
@@ -576,6 +550,7 @@ impl CellValue {
     /// For all other types, returns 0.
     #[inline]
     pub(super) fn mine_count(&self) -> u8 {
+        debug_assert!(self.has_count());
         self.0
     }
 
@@ -998,7 +973,7 @@ mod tests {
         let grid = Cell::grid(3, 3);
         let mut pc = grid[0];
         assert_eq!(pc.value, CellValue::UNKNOWN);
-        assert_eq!(pc.neighbors, E | S | SE);
+        assert_eq!(pc.neighbors(), E | S | SE);
         assert_eq!(pc.alt_neighbors(), DirectionSet::EMPTY);
         assert_eq!(pc.mine_neighbors(), DirectionSet::EMPTY);
 

@@ -102,14 +102,14 @@ impl DirectionSet {
     pub const EMPTY: DirectionSet = DirectionSet(0);
     pub const ALL: DirectionSet = DirectionSet(0xff);
 
-    /// Bitmask stripping all Northern directions (`NW`, `N`, `NE`).
-    pub const N_MASK: DirectionSet = DirectionSet(!(NW.0 | N.0 | NE.0));
-    /// Bitmask stripping all Southern directions (`SW`, `S`, `SE`).
-    pub const S_MASK: DirectionSet = DirectionSet(!(SW.0 | S.0 | SE.0));
-    /// Bitmask stripping all Western directions (`NW`, `W`, `SW`).
-    pub const W_MASK: DirectionSet = DirectionSet(!(NW.0 | W.0 | SW.0));
-    /// Bitmask stripping all Eastern directions (`NE`, `E`, `SE`).
-    pub const E_MASK: DirectionSet = DirectionSet(!(NE.0 | E.0 | SE.0));
+    /// DirectionSet representing all Northern directions (`NW`, `N`, `NE`).
+    pub const N_DIRECTIONS: DirectionSet = DirectionSet(NW.0 | N.0 | NE.0);
+    /// DirectionSet representing all Southern directions (`SW`, `S`, `SE`).
+    pub const S_DIRECTIONS: DirectionSet = DirectionSet(SW.0 | S.0 | SE.0);
+    /// DirectionSet representing all Western directions (`NW`, `W`, `SW`).
+    pub const W_DIRECTIONS: DirectionSet = DirectionSet(NW.0 | W.0 | SW.0);
+    /// DirectionSet representing all Eastern directions (`NE`, `E`, `SE`).
+    pub const E_DIRECTIONS: DirectionSet = DirectionSet(NE.0 | E.0 | SE.0);
 
     /// Creates an empty [`DirectionSet`].
     pub fn new() -> DirectionSet {
@@ -119,20 +119,20 @@ impl DirectionSet {
     /// Given a point in a fixed size field, return the set of neighbors, taking
     /// edges into consideration.
     pub fn all_neighbors(p: Point, width: u32, height: u32) -> DirectionSet {
-        let mut neighbors = Self::ALL;
+        let mut neighbors = Self::EMPTY;
         if p.x == 0 {
-            neighbors &= Self::W_MASK;
+            neighbors |= Self::W_DIRECTIONS;
         }
         if p.x >= width - 1 {
-            neighbors &= Self::E_MASK;
+            neighbors |= Self::E_DIRECTIONS;
         }
         if p.y == 0 {
-            neighbors &= Self::N_MASK;
+            neighbors |= Self::N_DIRECTIONS;
         }
         if p.y >= height - 1 {
-            neighbors &= Self::S_MASK;
+            neighbors |= Self::S_DIRECTIONS;
         }
-        neighbors
+        !neighbors
     }
 
     /// Returns the number of directions currently in the set (`0..=8`).
@@ -607,21 +607,9 @@ mod tests {
 
     #[test]
     fn test_direction_set_directional_masks() {
-        assert_eq!(
-            DirectionSet::ALL & DirectionSet::N_MASK,
-            W | SW | S | SE | E
-        );
-        assert_eq!(
-            DirectionSet::ALL & DirectionSet::S_MASK,
-            NW | N | NE | E | W
-        );
-        assert_eq!(
-            DirectionSet::ALL & DirectionSet::W_MASK,
-            N | NE | E | SE | S
-        );
-        assert_eq!(
-            DirectionSet::ALL & DirectionSet::E_MASK,
-            NW | N | S | SW | W
-        );
+        assert_eq!(DirectionSet::ALL & DirectionSet::N_DIRECTIONS, NW | N | NE);
+        assert_eq!(DirectionSet::ALL & DirectionSet::S_DIRECTIONS, SW | S | SE);
+        assert_eq!(DirectionSet::ALL & DirectionSet::W_DIRECTIONS, NW | W | SW);
+        assert_eq!(DirectionSet::ALL & DirectionSet::E_DIRECTIONS, NE | E | SE);
     }
 }
