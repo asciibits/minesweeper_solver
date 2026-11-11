@@ -333,25 +333,39 @@ impl MineField {
             .filter(|&i| self.cells[i].value().is_safe())
     }
 
+    /// Updates a cell's value and synchronizes neighbor sets, returning a [`ChangeStatus`].
+    ///
+    /// This function is optimized for typical forward gameplay (non-breaking changes):
+    /// - `Unknown -> Mine / InferredMine`: [`Self::unknown_to_mine`]
+    /// - `Unknown -> InferredSafe`: [`Self::unknown_to_inferred_safe`]
+    /// - `Unknown -> Count`: [`Self::unknown_to_count`]
+    /// - `InferredSafe -> Count`: [`Self::inferred_safe_to_count`]
+    ///
+    /// These transitions update directional neighbor masks incrementally without invalidating
+    /// partitions, returning [`ChangeStatus::NonBreaking`].
+    ///
+    /// Retractions (e.g. cell returning to `Unknown`) or conflicting changes route to
+    /// [`Self::inference_breaking_change`], returning [`ChangeStatus::Breaking`].
     fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         let prev_value = self.cells[idx].value();
 
-        // handle non-breaking changes first - this is the hot path, optimized for live
-        // non-inference-breaking changes
-        let change_status = match prev_value.cell_type() {
+        match prev_value.cell_type() {
             CellType::Unknown => match new_value.cell_type() {
                 CellType::Unknown => ChangeStatus::NoChange,
-                CellType::InferredMine | CellType::Mine => self.unknown_to_mine(idx),
-                CellType::InferredSafe => self.unknown_to_inferred_safe(idx),
-                CellType::Count => self.unknown_to_count(idx),
+                CellType::InferredMine | CellType::Mine => self.unknown_to_mine(idx, new_value),
+                CellType::InferredSafe => self.unknown_to_inferred_safe(idx, new_value),
+                CellType::Count => self.unknown_to_count(idx, new_value),
             },
             CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
-                CellType::InferredMine | CellType::Mine => ChangeStatus::NoChange,
+                CellType::InferredMine | CellType::Mine => {
+                    self.cells[idx].set_value(new_value);
+                    ChangeStatus::NoChange
+                }
                 _ => self.inference_breaking_change(idx, prev_value, new_value),
             },
             CellType::InferredSafe => match new_value.cell_type() {
-                CellType::InferredSafe => return ChangeStatus::NoChange,
-                CellType::Count => self.inferred_safe_to_count(idx),
+                CellType::InferredSafe => ChangeStatus::NoChange,
+                CellType::Count => self.inferred_safe_to_count(idx, new_value),
                 _ => self.inference_breaking_change(idx, prev_value, new_value),
             },
             CellType::Count => match new_value.cell_type() {
@@ -360,6 +374,7 @@ impl MineField {
                         ChangeStatus::NoChange
                     } else {
                         // count -> count (diff counts) - it could be de-solved, or solved
+                        self.cells[idx].set_value(new_value);
                         self.desolved_queue.push(&mut self.cells, idx);
                         self.solved_queue.push(&mut self.cells, idx);
                         ChangeStatus::Breaking
@@ -367,13 +382,10 @@ impl MineField {
                 }
                 _ => self.inference_breaking_change(idx, prev_value, new_value),
             },
-        };
-
-        self.cells[idx].set_value(new_value);
-        change_status
+        }
     }
 
-    fn unknown_to_mine(&mut self, idx: CellIdx) -> ChangeStatus {
+    fn unknown_to_mine(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // alt (count):  +mine, -alt, +solve
         // safe: +mine, -alt
         // mine: n/a
@@ -399,10 +411,11 @@ impl MineField {
             let cell = &mut self.cells[neighbor.idx];
             *cell.mine_neighbors_mut() |= neighbor.from;
         }
+        self.cells[idx].set_value(new_value);
         ChangeStatus::NonBreaking
     }
 
-    fn unknown_to_inferred_safe(&mut self, idx: CellIdx) -> ChangeStatus {
+    fn unknown_to_inferred_safe(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // alt (count):  -alt, +solve
         // safe: -alt
         // mine: n/a
@@ -427,10 +440,11 @@ impl MineField {
             *cell.safe_neighbors_mut() |= neighbor.from;
         }
         *self.cells[idx].alt_neighbors_mut() = unknown_neighbors;
+        self.cells[idx].set_value(new_value);
         ChangeStatus::NonBreaking
     }
 
-    fn unknown_to_count(&mut self, idx: CellIdx) -> ChangeStatus {
+    fn unknown_to_count(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // alt (count):  -alt, +solve
         // safe: -alt
         // mine: n/a
@@ -456,10 +470,11 @@ impl MineField {
         }
         *self.cells[idx].alt_neighbors_mut() = unknown_neighbors;
         self.solved_queue.push(&mut self.cells, idx);
+        self.cells[idx].set_value(new_value);
         ChangeStatus::NonBreaking
     }
 
-    fn inferred_safe_to_count(&mut self, idx: CellIdx) -> ChangeStatus {
+    fn inferred_safe_to_count(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // alt (unknown):  -safe, +alt
         // safe: n/a
         // mine: n/a
@@ -472,6 +487,7 @@ impl MineField {
             *cell.alt_neighbors_mut() |= neighbor.from;
         }
         self.solved_queue.push(&mut self.cells, idx);
+        self.cells[idx].set_value(new_value);
         ChangeStatus::NonBreaking
     }
 
@@ -548,6 +564,7 @@ impl MineField {
             }
         }
         let cell = &mut self.cells[idx];
+        cell.set_value(new_value);
         match new_value.cell_type() {
             CellType::Unknown => {
                 *cell.alt_neighbors_mut() = count;
@@ -784,9 +801,6 @@ impl MineField {
     fn desolve_partition(&mut self, idx: CellIdx) -> usize {
         let len = self.visit_neighbors_helper(idx, None, &mut |field, idx, prev_idx| {
             let cell = field.cells[idx];
-            if cell.value().is_inferred() {
-                field.change_cell_value(idx, CellValue::UNKNOWN);
-            }
             match cell.value().cell_type() {
                 CellType::Unknown => {
                     field.partitions.remove(&idx);
@@ -1038,9 +1052,11 @@ mod tests {
         grid::{E, NE, NW, S, SE, W},
     };
 
-    /// Helper asserting that a cell's `unknown_neighbors`, `safe_neighbors`, and `mine_neighbors`
-    /// form a pairwise-disjoint partition of `cell.neighbors`, and that its `inferred_*` sets
-    /// are synced with its base neighbor sets after partition construction/clearing.
+    /// Helper asserting neighbor direction set invariants:
+    /// - For non-mine cells, `alt_neighbors` and `mine_neighbors` are disjoint subsets of `cell.neighbors`.
+    /// - For unknown cells, `safe_neighbors` is also a disjoint subset of `cell.neighbors` (pairwise disjoint
+    ///   from `alt_neighbors` and `mine_neighbors`).
+    /// - Mine cells do not maintain neighbor direction sets.
     fn assert_neighbor_invariants(cell: &Cell) {
         if !cell.value().is_mine() {
             // all direction sets are subsets of neighbors
@@ -1093,6 +1109,86 @@ mod tests {
         assert!(field.cells[0].alt_neighbors().is_empty());
         assert!(field.cells[2].mine_neighbors().is_empty());
         assert!(field.cells[2].alt_neighbors().is_empty());
+    }
+
+    #[test]
+    fn test_streamlined_cell_value_transitions() {
+        // Grid 3x1: [0, 1, 2]
+        let mut field = MineField::new(3, 1).unwrap();
+
+        // 1. Unknown -> Count(1) on cell 0
+        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+        assert_eq!(status, ChangeStatus::NonBreaking);
+        assert_eq!(field.cells[0].value(), CellValue::for_mine_count(1));
+        // Cell 0 is Count, so alt_neighbors points to unknown neighbors (Cell 1)
+        assert_eq!(field.cells[0].alt_neighbors(), !!E);
+        // Cell 1 is Unknown, so alt_neighbors points to count neighbors (Cell 0)
+        assert_eq!(field.cells[1].alt_neighbors(), !!W);
+
+        // 2. Unknown -> InferredSafe on cell 2
+        let status = field.change_cell_value(CellIdx(2), CellValue::INFERRED_SAFE);
+        assert_eq!(status, ChangeStatus::NonBreaking);
+        assert_eq!(field.cells[2].value(), CellValue::INFERRED_SAFE);
+        // Cell 1 is Unknown, so safe_neighbors points to inferred safe neighbors (Cell 2)
+        assert_eq!(field.cells[1].safe_neighbors(), !!E);
+
+        // 3. InferredSafe -> Count(0) on cell 2
+        let status = field.change_cell_value(CellIdx(2), CellValue::for_mine_count(0));
+        assert_eq!(status, ChangeStatus::NonBreaking);
+        assert_eq!(field.cells[2].value(), CellValue::for_mine_count(0));
+        // Cell 1 is Unknown: safe_neighbors has Cell 2 cleared, alt_neighbors has Cell 2 set
+        assert!(field.cells[1].safe_neighbors().is_empty());
+        assert_eq!(field.cells[1].alt_neighbors(), W | E);
+
+        // 4. Unknown -> Mine on cell 1
+        let status = field.change_cell_value(CellIdx(1), CellValue::MINE);
+        assert_eq!(status, ChangeStatus::NonBreaking);
+        assert_eq!(field.cells[1].value(), CellValue::MINE);
+        // Both cell 0 and cell 2 are Count cells: alt_neighbors drops cell 1, mine_neighbors gets cell 1
+        assert!(field.cells[0].alt_neighbors().is_empty());
+        assert_eq!(field.cells[0].mine_neighbors(), !!E);
+        assert!(field.cells[2].alt_neighbors().is_empty());
+        assert_eq!(field.cells[2].mine_neighbors(), !!W);
+
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
+    }
+
+    #[test]
+    fn test_breaking_cell_value_transitions() {
+        let mut field = MineField::new(3, 1).unwrap();
+        field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+
+        // Count -> different Count is Breaking
+        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(2));
+        assert_eq!(status, ChangeStatus::Breaking);
+
+        // Count -> Unknown is Breaking
+        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        assert_eq!(status, ChangeStatus::Breaking);
+
+        // Unknown -> Mine is NonBreaking
+        let status = field.change_cell_value(CellIdx(0), CellValue::MINE);
+        assert_eq!(status, ChangeStatus::NonBreaking);
+
+        // Mine -> Unknown is Breaking
+        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        assert_eq!(status, ChangeStatus::Breaking);
+
+        // InferredSafe -> Unknown is Breaking
+        field.change_cell_value(CellIdx(0), CellValue::INFERRED_SAFE);
+        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        assert_eq!(status, ChangeStatus::Breaking);
+
+        // Mine -> Count is Breaking
+        field.change_cell_value(CellIdx(0), CellValue::MINE);
+        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+        assert_eq!(status, ChangeStatus::Breaking);
+
+        for cell in &field.cells {
+            assert_neighbor_invariants(cell);
+        }
     }
 
     #[test]
