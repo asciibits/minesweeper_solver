@@ -391,23 +391,23 @@ impl MineField {
         // mine: n/a
         // unknown: +mine
         // self: n/a
-        let neighbors = self.cells[idx].alt_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+        let alt_neighbors = self.cells[idx].alt_neighbors();
+        for neighbor in self.neighbor_iter(idx, alt_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.mine_neighbors_mut() |= neighbor.from;
             *cell.alt_neighbors_mut() -= neighbor.from;
             self.solved_queue.push(&mut self.cells, neighbor.idx);
         }
-        let neighbors = self.cells[idx].safe_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+        let safe_neighbors = self.cells[idx].safe_neighbors();
+        for neighbor in self.neighbor_iter(idx, safe_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.mine_neighbors_mut() |= neighbor.from;
             *cell.alt_neighbors_mut() -= neighbor.from;
         }
         let cell = &self.cells[idx];
-        let neighbors = cell.neighbors()
+        let unknown_neighbors = cell.neighbors()
             - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
-        for neighbor in Cell::neighbor_iter(idx, self.width, neighbors) {
+        for neighbor in self.neighbor_iter(idx, unknown_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.mine_neighbors_mut() |= neighbor.from;
         }
@@ -422,20 +422,20 @@ impl MineField {
         // unknown: +safe
         // self: alt = unknown
         let alt_neighbors = self.cells[idx].alt_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, alt_neighbors) {
+        for neighbor in self.neighbor_iter(idx, alt_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
             self.solved_queue.push(&mut self.cells, neighbor.idx);
         }
         let safe_neighbors = self.cells[idx].safe_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, safe_neighbors) {
+        for neighbor in self.neighbor_iter(idx, safe_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
         }
         let cell = &self.cells[idx];
         let unknown_neighbors = cell.neighbors()
             - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
-        for neighbor in Cell::neighbor_iter(idx, self.width, unknown_neighbors) {
+        for neighbor in self.neighbor_iter(idx, unknown_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.safe_neighbors_mut() |= neighbor.from;
         }
@@ -451,20 +451,20 @@ impl MineField {
         // unknown: +alt
         // self: alt = unknown, +solve
         let alt_neighbors = self.cells[idx].alt_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, alt_neighbors) {
+        for neighbor in self.neighbor_iter(idx, alt_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
             self.solved_queue.push(&mut self.cells, neighbor.idx);
         }
         let safe_neighbors = self.cells[idx].safe_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, safe_neighbors) {
+        for neighbor in self.neighbor_iter(idx, safe_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
         }
         let cell = &self.cells[idx];
         let unknown_neighbors = cell.neighbors()
             - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
-        for neighbor in Cell::neighbor_iter(idx, self.width, unknown_neighbors) {
+        for neighbor in self.neighbor_iter(idx, unknown_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.alt_neighbors_mut() |= neighbor.from;
         }
@@ -481,7 +481,7 @@ impl MineField {
         // count: n/a
         // self: +solve
         let alt_neighbors = self.cells[idx].alt_neighbors();
-        for neighbor in Cell::neighbor_iter(idx, self.width, alt_neighbors) {
+        for neighbor in self.neighbor_iter(idx, alt_neighbors) {
             let cell = &mut self.cells[neighbor.idx];
             *cell.safe_neighbors_mut() -= neighbor.from;
             *cell.alt_neighbors_mut() |= neighbor.from;
@@ -503,7 +503,7 @@ impl MineField {
         let mut count = DirectionSet::EMPTY;
         let mut safe = DirectionSet::EMPTY;
         let mut unknown = DirectionSet::EMPTY;
-        for neighbor in Cell::neighbor_iter(idx, self.width, self.cells[idx].neighbors()) {
+        for neighbor in self.neighbor_iter(idx, self.cells[idx].neighbors()) {
             let n_value = self.cells[neighbor.idx].value();
             if n_value.is_mine() {
                 mines |= neighbor.from.reverse();
@@ -715,13 +715,11 @@ impl MineField {
             if !cell.is_solved()
                 && let Some(value) = cell.infer_neighbors()
             {
-                self.metrics.inc_neighbor_visits(cell.alt_neighbors());
-                for Neighbor { idx: neighbor, .. } in
-                    Cell::neighbor_iter(idx, self.width, cell.alt_neighbors())
-                {
-                    let change_type = self.change_cell_value(neighbor, value);
+                let alt_neighbors = cell.alt_neighbors();
+                for Neighbor { idx: n_idx, .. } in self.neighbor_iter(idx, alt_neighbors) {
+                    let change_type = self.change_cell_value(n_idx, value);
                     if !matches!(change_type, ChangeStatus::NoChange) {
-                        self.recent_inferred.push(neighbor);
+                        self.recent_inferred.push(n_idx);
                     }
                 }
             } else {
@@ -755,7 +753,16 @@ impl MineField {
         }
     }
 
-    fn visit_neighbors_helper(
+    fn neighbor_iter(
+        &mut self,
+        idx: CellIdx,
+        neighbors: DirectionSet,
+    ) -> impl Iterator<Item = Neighbor> + use<> {
+        self.metrics.inc_neighbor_visits(neighbors);
+        Cell::neighbor_iter(idx, self.width, neighbors)
+    }
+
+    fn walk_neighbors(
         &mut self,
         idx: CellIdx,
         prev_idx: Option<CellIdx>,
@@ -770,36 +777,17 @@ impl MineField {
         self.cells[idx].set_partition_id(self.next_partition_id);
 
         let mut len = 1;
-        self.metrics.inc_neighbor_visits(neighbors);
-        for Neighbor { idx: n_idx, .. } in Cell::neighbor_iter(idx, self.width, neighbors) {
-            len += self.visit_neighbors_helper(n_idx, Some(idx), visit);
+        for Neighbor { idx: n_idx, .. } in self.neighbor_iter(idx, neighbors) {
+            len += self.walk_neighbors(n_idx, Some(idx), visit);
         }
         len
-    }
-
-    fn visit_partition_helper(
-        &mut self,
-        idx: CellIdx,
-        prev_idx: Option<CellIdx>,
-        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<CellIdx>),
-    ) -> usize {
-        self.visit_neighbors_helper(idx, prev_idx, &mut |field, idx, prev_idx| {
-            let cell = field.cells[idx];
-            match cell.value().cell_type() {
-                CellType::Count | CellType::Unknown => {
-                    visit(field, idx, prev_idx);
-                    Some(cell.alt_neighbors())
-                }
-                CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
-            }
-        })
     }
 
     // Step through the cells of a partition. Note: This function scans assuming the starting cell
     // has been mutated, and is unknown whether it was originally a known vs unknown. So, the
     // starting cell looks for *all* unknown + mine neighbors.
     fn desolve_partition(&mut self, idx: CellIdx) -> usize {
-        let len = self.visit_neighbors_helper(idx, None, &mut |field, idx, prev_idx| {
+        let len = self.walk_neighbors(idx, None, &mut |field, idx, prev_idx| {
             let cell = field.cells[idx];
             match cell.value().cell_type() {
                 CellType::Unknown => {
@@ -848,6 +836,24 @@ impl MineField {
         len
     }
 
+    fn visit_partition_helper(
+        &mut self,
+        idx: CellIdx,
+        prev_idx: Option<CellIdx>,
+        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<CellIdx>),
+    ) -> usize {
+        self.walk_neighbors(idx, prev_idx, &mut |field, idx, prev_idx| {
+            let cell = field.cells[idx];
+            match cell.value().cell_type() {
+                CellType::Count | CellType::Unknown => {
+                    visit(field, idx, prev_idx);
+                    Some(cell.alt_neighbors())
+                }
+                CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
+            }
+        })
+    }
+
     /// Returns the slice of linear cell indices belonging to this partition.
     #[cfg(test)]
     fn members(&mut self, member: CellIdx, capacity: usize) -> Vec<CellIdx> {
@@ -874,7 +880,7 @@ impl MineField {
     /// iterator of [`Cell`] updates for all non-skipped positions.
     pub(self) fn cells_and_size_from_spec(
         field_spec: &str,
-    ) -> (u32, u32, impl Iterator<Item = IdxAndCell>) {
+    ) -> (u32, u32, impl Iterator<Item = IdxAndCell> + use<>) {
         let cells: Vec<_> = Self::spec_to_iter(field_spec).collect();
 
         let size = cells
