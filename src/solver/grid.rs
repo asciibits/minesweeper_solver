@@ -44,7 +44,7 @@ impl Display for Point {
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
 /// [`Direction`] pointing from that neighbor back to the origin cell.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Neighbor {
+pub(super) struct Neighbor {
     /// The neighboring value or coordinate.
     pub idx: CellIdx,
     /// The direction from `neighbor` back to the origin cell.
@@ -143,10 +143,6 @@ impl DirectionSet {
     /// Returns `true` if the set contains no directions.
     pub fn is_empty(&self) -> bool {
         self.0 == 0
-    }
-
-    pub fn contains(&self, d: Direction) -> bool {
-        *self & d != Self::EMPTY
     }
 
     /// Returns an iterator over all [`Direction`]s in `self`.
@@ -319,6 +315,11 @@ impl Direction {
     #[inline]
     pub const fn index(&self) -> u8 {
         self.0.trailing_zeros() as u8
+    }
+
+    #[inline]
+    pub const fn reverse(&self) -> Direction {
+        Direction(self.0.reverse_bits())
     }
 }
 

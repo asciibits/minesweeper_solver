@@ -342,8 +342,7 @@ impl FieldBuilder {
             .map(|n| n.idx)
             .chain([cell_idx(zero_cell, width)]),
             shuffle,
-        );
-        unimplemented!()
+        )
     }
 
     /// Places `mine_count` mines randomly across a `width` × `height` board while keeping all
@@ -691,7 +690,7 @@ mod tests {
         {
             assert!(matches!(
                 field.cells[idx].value().cell_type(),
-                CellType::Safe
+                CellType::Count
             ));
         }
     }

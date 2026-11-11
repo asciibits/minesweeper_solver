@@ -10,9 +10,7 @@ use std::{
 };
 
 use crate::solver::{
-    grid::{
-        Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE, SW, W,
-    },
+    grid::{DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE, SW, W},
     stats,
 };
 
@@ -114,7 +112,7 @@ pub struct UserCellWithInference {
 /// A cell does not store its own index; callers identify a cell by its row-major position in the
 /// `cells` slice (see [`coordinates`] / [`cell_idx`]).
 // Note: Kept at 8 bytes so 8 cells fit in a single 64-byte cache line (enforced below).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct Cell {
     /// Inline the contents of Cell
     value: CellValue,
@@ -127,12 +125,12 @@ pub(super) struct Cell {
     /// for non-mine type cells.
     mine_neighbors: DirectionSet,
 
-    /// For [`CellType::Unknown`] cells, this is all [`CellType::Safe`] neighbors. Conversely, for
-    /// [`CellType::Safe`] and [`CellType::InferredSafe`] cells, this is all neighbors of type
+    /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] neighbors. Conversely, for
+    /// [`CellType::Count`] and [`CellType::InferredSafe`] cells, this is all neighbors of type
     /// [`CellType::Unknown`]. This value is unspecified for mine type cells.
     alt_neighbors: DirectionSet,
 
-    /// For [`CellType::Unknown`] cells, this is all [`CellType::Safe`] and
+    /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] and
     /// [`CellType::InferredSafe`] neighbors. For all other types, this is unspecified.
     safe_neighbors: DirectionSet,
 
@@ -214,13 +212,6 @@ impl Cell {
 
     /// Returns the mask of neighbors still unknown after applying solver inferences.
     #[inline]
-    pub(super) fn unknown_neighbors(&self) -> DirectionSet {
-        // not valid for mine cells
-        panic!("Function no longer exists!");
-    }
-
-    /// Returns the mask of neighbors still unknown after applying solver inferences.
-    #[inline]
     pub(super) fn alt_neighbors(&self) -> DirectionSet {
         // not valid for mine cells
         debug_assert!(!self.value.is_mine());
@@ -246,21 +237,18 @@ impl Cell {
     #[inline]
     pub(super) fn mine_neighbors_mut(&mut self) -> &mut DirectionSet {
         // not valid for mine cells
-        debug_assert!(!self.value.is_mine());
         &mut self.mine_neighbors
     }
 
     #[inline]
     pub(super) fn alt_neighbors_mut(&mut self) -> &mut DirectionSet {
         // not valid for mine cells
-        debug_assert!(!self.value.is_mine());
         &mut self.alt_neighbors
     }
 
     #[inline]
     pub(super) fn safe_neighbors_mut(&mut self) -> &mut DirectionSet {
         // only valid for unknown cells
-        debug_assert!(self.value.is_unknown());
         &mut self.safe_neighbors
     }
 
@@ -268,14 +256,6 @@ impl Cell {
     #[inline]
     pub(super) fn flags(&mut self) -> &mut CellFlags {
         &mut self.flags
-    }
-
-    pub(super) fn set_unknown(&mut self, dir: Direction) {
-        panic!("Nope")
-    }
-
-    pub(super) fn set_safe(&mut self, dir: Direction) {
-        panic!("Nope")
     }
 
     pub(super) fn remaining_mines(&self) -> i8 {
@@ -304,19 +284,6 @@ impl Cell {
         // only valid for count cells
         debug_assert!(self.value.has_count());
         self.alt_neighbors().is_empty()
-    }
-
-    // Checks if this cell is solvable. This yields the same result as `infer_neighbors().is_some()`
-    pub(super) fn is_solvable(&self) -> bool {
-        // only valid for count cells
-        debug_assert!(self.value.has_count());
-        let unknown_count = self.alt_neighbors().len() as i8;
-        if let Some(mine_count) = self.value().safe_mine_count() {
-            let remaining = mine_count as i8 - self.mine_neighbors().len() as i8;
-            remaining <= 0 || remaining >= unknown_count
-        } else {
-            false
-        }
     }
 
     // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
@@ -389,6 +356,56 @@ impl Cell {
     }
 }
 
+impl PartialEq for Cell {
+    fn eq(&self, other: &Self) -> bool {
+        if self.value != other.value
+            || self.neighbors != other.neighbors
+            || self.flags != other.flags
+        {
+            return false;
+        }
+
+        if !self.value.is_mine() {
+            if self.alt_neighbors != other.alt_neighbors
+                || self.mine_neighbors != other.mine_neighbors
+            {
+                return false;
+            }
+            if self.value.is_unknown() && self.safe_neighbors != other.safe_neighbors {
+                return false;
+            }
+        }
+
+        true
+        // /// Inline the contents of Cell
+        // value: CellValue,
+
+        // /// All neighbors to this cell. For inner cells this is DirectionSet::ALL, for border cells it
+        // /// is the set of valid neighbors.
+        // neighbors: DirectionSet,
+
+        // /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. This is not kept in sync
+        // /// for non-mine type cells.
+        // mine_neighbors: DirectionSet,
+
+        // /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] neighbors. Conversely, for
+        // /// [`CellType::Count`] and [`CellType::InferredSafe`] cells, this is all neighbors of type
+        // /// [`CellType::Unknown`]. This value is unspecified for mine type cells.
+        // alt_neighbors: DirectionSet,
+
+        // /// For [`CellType::Unknown`] cells, this is all [`CellType::Count`] and
+        // /// [`CellType::InferredSafe`] neighbors. For all other types, this is unspecified.
+        // safe_neighbors: DirectionSet,
+
+        // /// A unique id for all members of a partition. Zero values are always un-partitioned; non-zero
+        // /// values may or may not be partitioned.
+        // partition_id: u16,
+
+        // /// A set of bit flags used when executing a solve pass.
+        // flags: CellFlags,
+    }
+}
+
 impl Display for Cell {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let spacer = if f.alternate() { "\n    " } else { " " };
@@ -407,7 +424,7 @@ impl Display for Cell {
                     self.safe_neighbors()
                 )?;
             }
-            CellType::InferredSafe | CellType::Safe => {
+            CellType::InferredSafe | CellType::Count => {
                 write!(
                     f,
                     "{spacer}unknown_neighbors: {},{spacer}mine_neighbors: {},",
@@ -519,9 +536,8 @@ impl CellValue {
     }
 
     #[inline]
-    #[cfg(test)]
     pub(super) fn is_inferred(&self) -> bool {
-        self.0 & Self::INFERRED_SAFE.0 != 0
+        self.0 & Self::INFERRED_SAFE.0 == Self::INFERRED_SAFE.0
     }
 
     #[inline]
@@ -531,17 +547,6 @@ impl CellValue {
 
     pub(super) fn cell_type(&self) -> CellType {
         unsafe { std::mem::transmute(self.0.saturating_sub(8)) }
-    }
-
-    /// Returns `true` if `other` is the same "type" is this. This means that both will return the
-    /// same result for [`CellValue::is_safe`], [`CellValue::is_mine`], and
-    /// [`CellValue::is_unknown`]. Note: This wil return `false` if one is an inferred mine and the
-    /// other is a known mine - those are not considered "different". Same fore inferred/knows safe
-    /// cells. Also Note: this wil return false if both cells are safe, even if they have different
-    /// mine count.
-    #[inline]
-    pub(super) fn types_match(&self, other: CellValue) -> bool {
-        self.cell_type() == other.cell_type()
     }
 
     /// For valid, non-inferred Safe cells, this returns the mine count.
@@ -556,7 +561,7 @@ impl CellValue {
     pub(super) fn safe_mine_count(&self) -> Option<u8> {
         // NOTE: this is not the same as `.is_safe()`. This will not return
         // `true` for inferred values
-        self.is_safe().then_some(self.0)
+        self.has_count().then_some(self.0)
     }
 }
 
@@ -644,15 +649,19 @@ impl Display for CellValue {
 #[repr(u8)]
 pub(super) enum CellType {
     /// User-provided safe cell with an adjacent mine count (`has_count() == true`).
-    Safe = 0,
+    #[allow(dead_code)]
+    Count = 0,
     /// Cell deduced by the solver to be safe.
+    #[allow(dead_code)]
     InferredSafe = CellValue::INFERRED_SAFE.0 - 8,
     /// Cell whose state is unknown.
     #[default]
     Unknown = CellValue::UNKNOWN.0 - 8,
     /// Cell deduced by the solver to be a mine.
+    #[allow(dead_code)]
     InferredMine = CellValue::INFERRED_MINE.0 - 8,
     /// User-provided mine.
+    #[allow(dead_code)]
     Mine = CellValue::MINE.0 - 8,
 }
 
@@ -694,49 +703,6 @@ pub(super) enum ChangeStatus {
     NonBreaking,
     /// The value changed in a way that may invalidate existing inferences.
     Breaking,
-}
-
-/// How a [`CellValue::set_value`] call changed a cell.
-#[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub(super) enum CellValueChangeType {
-    /// The new value equals the old value.
-    #[default]
-    UnknownToUnknown = (CellType::Unknown as u8) << 3 | (CellType::Unknown as u8),
-    UnknownToMine = (CellType::Unknown as u8) << 3 | (CellType::Mine as u8),
-    UnknownToInferredMine = (CellType::Unknown as u8) << 3 | (CellType::InferredMine as u8),
-    UnknownToSafe = (CellType::Unknown as u8) << 3 | (CellType::Safe as u8),
-    UnknownToInferredSafe = (CellType::Unknown as u8) << 3 | (CellType::InferredSafe as u8),
-    MineToUnknown = (CellType::Mine as u8) << 3 | (CellType::Unknown as u8),
-    MineToMine = (CellType::Mine as u8) << 3 | (CellType::Mine as u8),
-    MineToInferredMine = (CellType::Mine as u8) << 3 | (CellType::InferredMine as u8),
-    MineToSafe = (CellType::Mine as u8) << 3 | (CellType::Safe as u8),
-    MineToInferredSafe = (CellType::Mine as u8) << 3 | (CellType::InferredSafe as u8),
-    InferredMineToUnknown = (CellType::InferredMine as u8) << 3 | (CellType::Unknown as u8),
-    InferredMineToMine = (CellType::InferredMine as u8) << 3 | (CellType::Mine as u8),
-    InferredMineToInferredMine =
-        (CellType::InferredMine as u8) << 3 | (CellType::InferredMine as u8),
-    InferredMineToSafe = (CellType::InferredMine as u8) << 3 | (CellType::Safe as u8),
-    InferredMineToInferredSafe =
-        (CellType::InferredMine as u8) << 3 | (CellType::InferredSafe as u8),
-    SafeToUnknown = (CellType::Safe as u8) << 3 | (CellType::Unknown as u8),
-    SafeToMine = (CellType::Safe as u8) << 3 | (CellType::Mine as u8),
-    SafeToInferredMine = (CellType::Safe as u8) << 3 | (CellType::InferredMine as u8),
-    SafeToSafe = (CellType::Safe as u8) << 3 | (CellType::Safe as u8),
-    SafeToInferredSafe = (CellType::Safe as u8) << 3 | (CellType::InferredSafe as u8),
-    InferredSafeToUnknown = (CellType::InferredSafe as u8) << 3 | (CellType::Unknown as u8),
-    InferredSafeToMine = (CellType::InferredSafe as u8) << 3 | (CellType::Mine as u8),
-    InferredSafeToInferredMine =
-        (CellType::InferredSafe as u8) << 3 | (CellType::InferredMine as u8),
-    InferredSafeToSafe = (CellType::InferredSafe as u8) << 3 | (CellType::Safe as u8),
-    InferredSafeToInferredSafe =
-        (CellType::InferredSafe as u8) << 3 | (CellType::InferredSafe as u8),
-}
-
-impl CellValueChangeType {
-    pub(super) fn for_types(old: CellType, new: CellType) -> CellValueChangeType {
-        unsafe { std::mem::transmute((old as u8) << 3 | new as u8) }
-    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1091,6 +1057,7 @@ mod tests {
 
         let mut cells = Cell::grid(2, 1);
         cells[0].set_value(CellValue::for_mine_count(1));
+        cells[0].alt_neighbors = !!E;
         assert!(!cells[0].is_invalid());
     }
 
@@ -1126,6 +1093,7 @@ mod tests {
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut cell_c = grid[2];
         cell_c.set_value(CellValue::for_mine_count(1));
+        *cell_c.alt_neighbors_mut() = W | SW | S;
 
         let ord_a = CellOrdering::from_cell(CellIdx(0), cell_a).unwrap();
         let ord_b = CellOrdering::from_cell(CellIdx(1), cell_b).unwrap();
@@ -1222,7 +1190,7 @@ mod tests {
         for count in 0..=8 {
             assert_eq!(
                 CellValue::for_mine_count(count).cell_type(),
-                CellType::Safe,
+                CellType::Count,
                 "Count {count} must map to CellType::Safe"
             );
         }
@@ -1265,29 +1233,5 @@ mod tests {
         assert!(!cells[3].flags().is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
         assert_eq!(queue.pop(&mut cells), None);
-    }
-
-    #[test]
-    fn test_cell_is_solvable() {
-        let mut cells = Cell::grid(3, 1);
-        // Cell 0 is safe count 1 with unknown neighbor East (1)
-        cells[0].set_value(CellValue::for_mine_count(1));
-        assert!(
-            cells[0].is_solvable(),
-            "needs 1 mine with 1 unknown neighbor -> solvable"
-        );
-
-        // Cell 0 with count 2 and 1 unknown neighbor -> over-constrained (solvable in the sense remaining >= unknown)
-        cells[0].set_value(CellValue::for_mine_count(2));
-        assert!(cells[0].is_solvable());
-
-        // Cell 0 with 0 unknown neighbors (solved)
-        cells[0].set_value(CellValue::for_mine_count(1));
-        cells[0].mine_neighbors = !!E;
-        cells[0].alt_neighbors = DirectionSet::EMPTY;
-        assert_eq!(cells[0].alt_neighbors().len(), 0);
-        assert!(cells[0].is_solved());
-        // Cell with no safe_mine_count (e.g. Unknown or Mine) is not solvable
-        assert!(!cells[1].is_solvable());
     }
 }
