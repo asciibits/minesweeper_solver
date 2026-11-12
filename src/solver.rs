@@ -536,20 +536,27 @@ impl MineField {
     fn walk_neighbors(
         &mut self,
         idx: CellIdx,
-        prev_idx: Option<CellIdx>,
-        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<CellIdx>) -> Option<DirectionSet>,
+        prev_neighbor: Option<Neighbor>,
+        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<Neighbor>) -> Option<DirectionSet>,
     ) -> usize {
         if self.cells[idx].partition_id() == self.next_partition_id {
             return 0;
         }
-        let Some(neighbors) = visit(self, idx, prev_idx) else {
+        let Some(neighbors) = visit(self, idx, prev_neighbor) else {
             return 0;
         };
         self.cells[idx].set_partition_id(self.next_partition_id);
 
         let mut len = 1;
-        for Neighbor { idx: n_idx, .. } in self.neighbor_iter(idx, neighbors) {
-            len += self.walk_neighbors(n_idx, Some(idx), visit);
+        for neighbor in self.neighbor_iter(idx, neighbors) {
+            len += self.walk_neighbors(
+                neighbor.idx,
+                Some(Neighbor {
+                    idx,
+                    from: neighbor.from.reverse(),
+                }),
+                visit,
+            );
         }
         len
     }
@@ -558,7 +565,7 @@ impl MineField {
     // has been mutated, and is unknown whether it was originally a known vs unknown. So, the
     // starting cell looks for *all* unknown + mine neighbors.
     fn desolve_partition(&mut self, idx: CellIdx) -> usize {
-        let len = self.walk_neighbors(idx, None, &mut |field, idx, prev_idx| {
+        let len = self.walk_neighbors(idx, None, &mut |field, idx, neighbor| {
             let cell = field.cells[idx];
             match cell.value().cell_type() {
                 CellType::Unknown => {
@@ -572,12 +579,18 @@ impl MineField {
                     Some(cell.alt_neighbors())
                 }
                 CellType::Count => {
-                    if prev_idx.is_none_or(|i| field.cells[i].value().is_unknown()) {
+                    if let Some(neighbor) = neighbor {
+                        if field.cells[neighbor.idx].value().is_unknown() {
+                            field.partitions.remove(&idx);
+                            field.pending_partition_queue.push(&mut field.cells, idx);
+                            Some(cell.neighbors() - neighbor.from.reverse())
+                        } else {
+                            None
+                        }
+                    } else {
                         field.partitions.remove(&idx);
                         field.pending_partition_queue.push(&mut field.cells, idx);
                         Some(cell.neighbors())
-                    } else {
-                        None
                     }
                 }
                 CellType::Mine => None,
@@ -594,7 +607,7 @@ impl MineField {
     fn visit_partition(
         &mut self,
         member: CellIdx,
-        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<CellIdx>),
+        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<Neighbor>),
     ) -> usize {
         let len = self.visit_partition_helper(member, None, visit);
         if len <= 1 {
@@ -610,15 +623,20 @@ impl MineField {
     fn visit_partition_helper(
         &mut self,
         idx: CellIdx,
-        prev_idx: Option<CellIdx>,
-        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<CellIdx>),
+        prev_neighbor: Option<Neighbor>,
+        visit: &mut impl FnMut(&mut MineField, CellIdx, Option<Neighbor>),
     ) -> usize {
-        self.walk_neighbors(idx, prev_idx, &mut |field, idx, prev_idx| {
+        self.walk_neighbors(idx, prev_neighbor, &mut |field, idx, prev_neighbor| {
             let cell = field.cells[idx];
             match cell.value().cell_type() {
                 CellType::Count | CellType::Unknown => {
-                    visit(field, idx, prev_idx);
-                    Some(cell.alt_neighbors())
+                    visit(field, idx, prev_neighbor);
+                    let neighbors = if let Some(Neighbor { from, .. }) = prev_neighbor {
+                        cell.alt_neighbors() - from.reverse()
+                    } else {
+                        cell.alt_neighbors()
+                    };
+                    Some(neighbors)
                 }
                 CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
             }
@@ -1698,7 +1716,9 @@ mod tests {
         // change (0,0) from Count(1) to Count(0).
         // Left cell (1,0) must change from InferredValue::Mine to InferredValue::Safe,
         // while the untouched RIGHT partition (and cell (3,0)'s Mine inference) remains intact!
+        DetailMineField::eprintln(&field);
         field.update("0");
+        DetailMineField::eprintln(&field);
         assert!(field.cells[1].value().is_safe());
         assert!(field.cells[3].value().is_mine());
         assert_eq!(field.cells[4].partition_id(), right_pid);
