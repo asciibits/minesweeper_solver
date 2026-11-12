@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::solver::{
+    Metrics,
     grid::{DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE, SW, W},
     stats,
 };
@@ -317,6 +318,363 @@ impl Cell {
                 None
             }
         })
+    }
+
+    pub(super) fn apply_change(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        let prev_value = cells[idx].value();
+
+        match prev_value.cell_type() {
+            CellType::Unknown => match new_value.cell_type() {
+                CellType::Unknown => ChangeStatus::NoChange,
+                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+                CellType::InferredSafe => Self::unknown_to_inferred_safe(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+                CellType::Count => Self::unknown_to_count(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+            },
+            CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
+                CellType::InferredMine | CellType::Mine => {
+                    cells[idx].set_value(new_value);
+                    ChangeStatus::NoChange
+                }
+                _ => Self::inference_breaking_change(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+            },
+            CellType::InferredSafe => match new_value.cell_type() {
+                CellType::InferredSafe => ChangeStatus::NoChange,
+                CellType::Count => Self::inferred_safe_to_count(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+                _ => Self::inference_breaking_change(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+            },
+            CellType::Count => match new_value.cell_type() {
+                CellType::Count => {
+                    if prev_value == new_value {
+                        ChangeStatus::NoChange
+                    } else {
+                        // count -> count (diff counts) - it could be de-solved, or solved
+                        cells[idx].set_value(new_value);
+                        solved_queue.push(cells, idx);
+                        desolved_queue.push(cells, idx);
+                        ChangeStatus::Breaking
+                    }
+                }
+                _ => Self::inference_breaking_change(
+                    cells,
+                    solved_queue,
+                    desolved_queue,
+                    metrics,
+                    idx,
+                    new_value,
+                    width,
+                ),
+            },
+        }
+    }
+
+    fn unknown_to_mine(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  +mine, -alt, +solve
+        // safe: +mine, -alt
+        // mine: n/a
+        // unknown: +mine
+        // self: n/a
+        let alt_neighbors = cells[idx].alt_neighbors();
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.mine_neighbors_mut() |= neighbor.from;
+            *cell.alt_neighbors_mut() -= neighbor.from;
+            solved_queue.push(cells, neighbor.idx);
+        }
+        let safe_neighbors = cells[idx].safe_neighbors();
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.mine_neighbors_mut() |= neighbor.from;
+            *cell.alt_neighbors_mut() -= neighbor.from;
+        }
+        let cell = cells[idx];
+        let unknown_neighbors = cell.neighbors()
+            - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.mine_neighbors_mut() |= neighbor.from;
+        }
+        cells[idx].set_value(new_value);
+        ChangeStatus::NonBreaking
+    }
+
+    fn unknown_to_inferred_safe(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  -alt, +solve
+        // safe: -alt
+        // mine: n/a
+        // unknown: +safe
+        // self: alt = unknown
+        let alt_neighbors = cells[idx].alt_neighbors();
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.alt_neighbors_mut() -= neighbor.from;
+            solved_queue.push(cells, neighbor.idx);
+        }
+        let safe_neighbors = cells[idx].safe_neighbors();
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.alt_neighbors_mut() -= neighbor.from;
+        }
+        let cell = cells[idx];
+        let unknown_neighbors = cell.neighbors()
+            - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.safe_neighbors_mut() |= neighbor.from;
+        }
+        *cells[idx].alt_neighbors_mut() = unknown_neighbors;
+        cells[idx].set_value(new_value);
+
+        ChangeStatus::NonBreaking
+    }
+
+    fn unknown_to_count(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  -alt, +solve
+        // safe: -alt
+        // mine: n/a
+        // unknown: +alt
+        // self: alt = unknown, +solve
+        let alt_neighbors = cells[idx].alt_neighbors();
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.alt_neighbors_mut() -= neighbor.from;
+            solved_queue.push(cells, neighbor.idx);
+        }
+        let safe_neighbors = cells[idx].safe_neighbors();
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.alt_neighbors_mut() -= neighbor.from;
+        }
+        let cell = &cells[idx];
+        let unknown_neighbors = cell.neighbors()
+            - (cell.mine_neighbors() | cell.alt_neighbors() | cell.safe_neighbors());
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.alt_neighbors_mut() |= neighbor.from;
+        }
+        *cells[idx].alt_neighbors_mut() = unknown_neighbors;
+        cells[idx].set_value(new_value);
+        solved_queue.push(cells, idx);
+
+        ChangeStatus::NonBreaking
+    }
+
+    fn inferred_safe_to_count(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (unknown):  -safe, +alt
+        // safe: n/a
+        // mine: n/a
+        // count: n/a
+        // self: +solve
+        let alt_neighbors = cells[idx].alt_neighbors();
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
+            let cell = &mut cells[neighbor.idx];
+            *cell.safe_neighbors_mut() -= neighbor.from;
+            *cell.alt_neighbors_mut() |= neighbor.from;
+        }
+        cells[idx].set_value(new_value);
+        solved_queue.push(cells, idx);
+
+        ChangeStatus::NonBreaking
+    }
+
+    // The slower, not-unrolled general purpose function for the rest of the values. Always involves
+    // a loop over all neighbors with a decent amount of branching
+    fn inference_breaking_change(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        let mut mines = DirectionSet::new();
+        let mut count = DirectionSet::new();
+        let mut safe = DirectionSet::new();
+        let mut unknown = DirectionSet::new();
+        let prev_value = cells[idx].value();
+        let neighbors = cells[idx].neighbors();
+        metrics.inc_neighbor_visits(neighbors);
+        for neighbor in Self::neighbor_iter(idx, width, neighbors) {
+            let dir = neighbor.from.reverse();
+            let n_value = cells[neighbor.idx].value();
+            if n_value.is_mine() {
+                mines |= dir;
+            } else if n_value.has_count() {
+                count |= dir;
+                desolved_queue.push(cells, neighbor.idx);
+                solved_queue.push(cells, neighbor.idx);
+            } else if n_value.is_safe() {
+                safe |= dir;
+            } else {
+                debug_assert!(n_value.is_unknown());
+                unknown |= dir;
+            }
+            match prev_value.cell_type() {
+                CellType::Unknown => {
+                    if n_value.is_safe() {
+                        *cells[neighbor.idx].alt_neighbors_mut() -= neighbor.from;
+                    }
+                }
+                CellType::Mine | CellType::InferredMine => {
+                    if !n_value.is_mine() {
+                        *cells[neighbor.idx].mine_neighbors_mut() -= neighbor.from;
+                    }
+                }
+                CellType::Count => {
+                    if n_value.is_unknown() {
+                        *cells[neighbor.idx].alt_neighbors_mut() -= neighbor.from;
+                    }
+                    desolved_queue.push(cells, neighbor.idx);
+                }
+                CellType::InferredSafe => {
+                    if n_value.is_unknown() {
+                        *cells[neighbor.idx].safe_neighbors_mut() -= neighbor.from;
+                    }
+                }
+            }
+            match new_value.cell_type() {
+                CellType::Unknown => {
+                    if n_value.is_safe() {
+                        *cells[neighbor.idx].alt_neighbors_mut() |= neighbor.from;
+                    }
+                }
+                CellType::Mine | CellType::InferredMine => {
+                    if !n_value.is_mine() {
+                        *cells[neighbor.idx].mine_neighbors_mut() |= neighbor.from;
+                    }
+                }
+                CellType::Count => {
+                    if n_value.is_unknown() {
+                        *cells[neighbor.idx].alt_neighbors_mut() |= neighbor.from;
+                    }
+                }
+                CellType::InferredSafe => {
+                    if n_value.is_unknown() {
+                        *cells[neighbor.idx].safe_neighbors_mut() |= neighbor.from;
+                    }
+                }
+            }
+        }
+        let cell = &mut cells[idx];
+        cell.set_value(new_value);
+        match new_value.cell_type() {
+            CellType::Unknown => {
+                *cell.alt_neighbors_mut() = count;
+                *cell.safe_neighbors_mut() = safe;
+                *cell.mine_neighbors_mut() = mines;
+            }
+            CellType::Count | CellType::InferredSafe => {
+                *cell.alt_neighbors_mut() = unknown;
+                *cell.mine_neighbors_mut() = mines;
+            }
+            _ => (),
+        }
+        if prev_value.has_count() {
+            desolved_queue.push(cells, idx);
+        }
+        if new_value.has_count() {
+            solved_queue.push(cells, idx);
+        }
+
+        ChangeStatus::Breaking
     }
 
     pub(super) fn neighbor_iter(
@@ -688,12 +1046,6 @@ impl Ord for IdxAndCell {
         self.idx.cmp(&other.idx)
     }
 }
-
-// 000 safe, no infer
-// 001 safe, infer
-// 010 unknown
-// 100 mine, no infer
-// 101 mine, inferred
 
 /// Status returned by cell value updates indicating the impact on current inferences.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

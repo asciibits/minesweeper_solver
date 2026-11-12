@@ -136,11 +136,13 @@ impl DirectionSet {
     }
 
     /// Returns the number of directions currently in the set (`0..=8`).
+    #[inline]
     pub fn len(&self) -> u8 {
         self.0.count_ones() as u8
     }
 
     /// Returns `true` if the set contains no directions.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
