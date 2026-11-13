@@ -58,6 +58,8 @@ pub enum UserCellValue {
     /// The cell has not been revealed or flagged.
     #[default]
     Unknown,
+    /// The cell is an interior wall
+    Wall,
     /// The cell contains a mine.
     Mine,
     /// The cell is revealed and has the given number of adjacent mines (`0..=8`).
@@ -68,6 +70,7 @@ impl Display for UserCellValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             UserCellValue::Unknown => write!(f, "Unknown"),
+            UserCellValue::Wall => write!(f, "Wall"),
             UserCellValue::Mine => write!(f, "MINE"),
             UserCellValue::Safe(c) => write!(f, "{c}"),
         }
@@ -137,7 +140,7 @@ pub(super) struct Cell {
 
     /// A unique id for all members of a partition. Zero values are always un-partitioned; non-zero
     /// values may or may not be partitioned.
-    partition_id: u16,
+    partition_id: u8,
 
     /// A set of bit flags used when executing a solve pass.
     flags: CellFlags,
@@ -195,13 +198,13 @@ impl Cell {
 
     /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
-    pub(super) fn partition_id(&self) -> u16 {
+    pub(super) fn partition_id(&self) -> u8 {
         self.partition_id
     }
 
     /// Sets the ID of the partition this cell belongs to (`0` if unpartitioned).
     #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: u16) {
+    pub(super) fn set_partition_id(&mut self, partition_id: u8) {
         self.partition_id = partition_id;
     }
 
@@ -331,96 +334,86 @@ impl Cell {
     ) -> ChangeStatus {
         let prev_value = cells[idx].value();
 
-        match prev_value.cell_type() {
+        let change_function = match prev_value.cell_type() {
             CellType::Unknown => match new_value.cell_type() {
-                CellType::Unknown => ChangeStatus::NoChange,
-                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
-                CellType::InferredSafe => Self::unknown_to_inferred_safe(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
-                CellType::Count => Self::unknown_to_count(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
+                CellType::Unknown => Self::no_change,
+                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine,
+                CellType::InferredSafe => Self::unknown_to_inferred_safe,
+                CellType::Count => Self::unknown_to_count,
+                CellType::Wall => Self::inference_breaking_change,
             },
             CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
-                CellType::InferredMine | CellType::Mine => {
-                    cells[idx].set_value(new_value);
-                    ChangeStatus::NoChange
-                }
-                _ => Self::inference_breaking_change(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
+                CellType::InferredMine | CellType::Mine => Self::to_mine,
+                _ => Self::inference_breaking_change,
             },
             CellType::InferredSafe => match new_value.cell_type() {
-                CellType::InferredSafe => ChangeStatus::NoChange,
-                CellType::Count => Self::inferred_safe_to_count(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
-                _ => Self::inference_breaking_change(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
+                CellType::InferredSafe => Self::no_change,
+                CellType::Count => Self::inferred_safe_to_count,
+                _ => Self::inference_breaking_change,
             },
             CellType::Count => match new_value.cell_type() {
                 CellType::Count => {
                     if prev_value == new_value {
-                        ChangeStatus::NoChange
+                        Self::no_change
                     } else {
                         // count -> count (diff counts) - it could be de-solved, or solved
-                        cells[idx].set_value(new_value);
-                        solved_queue.push(cells, idx);
-                        desolved_queue.push(cells, idx);
-                        ChangeStatus::Breaking
+                        Self::count_to_count
                     }
                 }
-                _ => Self::inference_breaking_change(
-                    cells,
-                    solved_queue,
-                    desolved_queue,
-                    metrics,
-                    idx,
-                    new_value,
-                    width,
-                ),
+                _ => Self::inference_breaking_change,
             },
-        }
+            CellType::Wall => Self::inference_breaking_change,
+        };
+
+        change_function(
+            cells,
+            solved_queue,
+            desolved_queue,
+            metrics,
+            idx,
+            new_value,
+            width,
+        )
+    }
+
+    fn no_change(
+        _cells: &mut [Cell],
+        _solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        _idx: CellIdx,
+        _new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        ChangeStatus::NoChange
+    }
+
+    fn to_mine(
+        cells: &mut [Cell],
+        _solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        cells[idx].set_value(new_value);
+        ChangeStatus::NoChange
+    }
+
+    fn count_to_count(
+        cells: &mut [Cell],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        cells[idx].set_value(new_value);
+        solved_queue.push(cells, idx);
+        desolved_queue.push(cells, idx);
+        ChangeStatus::Breaking
     }
 
     fn unknown_to_mine(
@@ -603,9 +596,10 @@ impl Cell {
                 solved_queue.push(cells, neighbor.idx);
             } else if n_value.is_safe() {
                 safe |= dir;
-            } else {
-                debug_assert!(n_value.is_unknown());
+            } else if n_value.is_unknown() {
                 unknown |= dir;
+            } else {
+                debug_assert!(n_value.is_wall());
             }
             match prev_value.cell_type() {
                 CellType::Unknown => {
@@ -629,6 +623,9 @@ impl Cell {
                         *cells[neighbor.idx].safe_neighbors_mut() -= neighbor.from;
                     }
                 }
+                CellType::Wall => {
+                    // nothing to subtract for WALL
+                }
             }
             match new_value.cell_type() {
                 CellType::Unknown => {
@@ -650,6 +647,9 @@ impl Cell {
                     if n_value.is_unknown() {
                         *cells[neighbor.idx].safe_neighbors_mut() |= neighbor.from;
                     }
+                }
+                CellType::Wall => {
+                    // nothing to add for WALL
                 }
             }
         }
@@ -859,14 +859,16 @@ impl Display for CellIdx {
 pub(super) struct CellValue(u8);
 
 impl CellValue {
-    /// Nothing is known about the cell.
-    pub(super) const UNKNOWN: Self = Self(0b1010);
-    /// The cell is provided as a mine.
-    pub(super) const MINE: Self = Self(0b1100);
-    /// The solver deduced the cell is a mine.
-    pub(super) const INFERRED_MINE: Self = Self(0b1101);
     /// The solver deduced the cell is safe.
     pub(super) const INFERRED_SAFE: Self = Self(0b1001);
+    /// Nothing is known about the cell.
+    pub(super) const UNKNOWN: Self = Self(0b1010);
+    /// Cell is an interior wall.
+    pub(super) const WALL: Self = Self(0b1100);
+    /// The cell is provided as a mine.
+    pub(super) const MINE: Self = Self(0b1110);
+    /// The solver deduced the cell is a mine.
+    pub(super) const INFERRED_MINE: Self = Self(0b1111);
 
     /// Creates the value of a revealed, user-supplied count cell.
     pub(super) fn for_mine_count(mine_count: u8) -> CellValue {
@@ -900,8 +902,9 @@ impl CellValue {
         *self == Self::UNKNOWN
     }
 
-    pub(super) fn cell_type(&self) -> CellType {
-        unsafe { std::mem::transmute(self.0.saturating_sub(8)) }
+    #[inline]
+    pub(super) fn is_wall(&self) -> bool {
+        *self == Self::WALL
     }
 
     /// For valid, non-inferred Safe cells, this returns the mine count.
@@ -919,12 +922,26 @@ impl CellValue {
         // `true` for inferred values
         self.has_count().then_some(self.0)
     }
+
+    /// TODO: Document
+    pub(super) fn cell_type(&self) -> CellType {
+        match self.0.saturating_sub(8) {
+            0b000 => CellType::Count,
+            0b001 => CellType::InferredSafe,
+            0b010 => CellType::Unknown,
+            0b100 => CellType::Wall,
+            0b110 => CellType::Mine,
+            0b111 => CellType::InferredMine,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl From<UserCellValue> for CellValue {
     fn from(value: UserCellValue) -> Self {
         match value {
             UserCellValue::Unknown => Self::UNKNOWN,
+            UserCellValue::Wall => Self::WALL,
             UserCellValue::Mine => Self::MINE,
             UserCellValue::Safe(c) => Self(c),
         }
@@ -966,6 +983,10 @@ impl From<CellValue> for UserValueWithInference {
                 value: UserCellValue::Mine,
                 inferred: InferredValue::None,
             },
+            CellValue::WALL => UserValueWithInference {
+                value: UserCellValue::Wall,
+                inferred: InferredValue::None,
+            },
             CellValue::INFERRED_MINE => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
@@ -991,6 +1012,7 @@ impl Display for CellValue {
         match *self {
             Self::UNKNOWN => write!(f, "??"),
             Self::MINE => write!(f, "**"),
+            Self::WALL => write!(f, "@@"),
             Self::INFERRED_MINE => write!(f, "!*"),
             Self::INFERRED_SAFE => write!(f, "!#"),
             CellValue(c) => write!(f, "{}#", c & 0xf),
@@ -1004,21 +1026,26 @@ impl Display for CellValue {
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum CellType {
+    /// An interior wall
+    Wall = 0b000,
     /// User-provided safe cell with an adjacent mine count (`has_count() == true`).
-    #[allow(dead_code)]
-    Count = 0,
+    Count = Self::COUNT_MASK,
     /// Cell deduced by the solver to be safe.
-    #[allow(dead_code)]
-    InferredSafe = CellValue::INFERRED_SAFE.0 - 8,
+    InferredSafe = Self::INFERRED_MASK,
     /// Cell whose state is unknown.
     #[default]
-    Unknown = CellValue::UNKNOWN.0 - 8,
+    Unknown = Self::UNKNOWN_MASK,
     /// Cell deduced by the solver to be a mine.
-    #[allow(dead_code)]
-    InferredMine = CellValue::INFERRED_MINE.0 - 8,
+    InferredMine = Self::MINE_MASK | Self::INFERRED_MASK,
     /// User-provided mine.
-    #[allow(dead_code)]
-    Mine = CellValue::MINE.0 - 8,
+    Mine = Self::MINE_MASK,
+}
+
+impl CellType {
+    const COUNT_MASK: u8 = 0b1000;
+    const UNKNOWN_MASK: u8 = 0b0100;
+    const MINE_MASK: u8 = 0b0010;
+    const INFERRED_MASK: u8 = 0b0001;
 }
 
 #[derive(Debug, Copy, Clone)]

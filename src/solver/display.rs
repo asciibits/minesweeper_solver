@@ -82,6 +82,10 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
                 inferred: _,
             } => " ".on_bright_red(),
             UserValueWithInference {
+                value: UserCellValue::Wall,
+                inferred: _,
+            } => " ".on_white(),
+            UserValueWithInference {
                 value: UserCellValue::Safe(c),
                 inferred: _,
             } => match c {
@@ -97,7 +101,7 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             },
         };
 
-        let partition_ids: HashMap<u16, usize> = field
+        let partition_ids: HashMap<u8, usize> = field
             .partitions
             .keys()
             .copied()
@@ -106,10 +110,9 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             .map(|(i, pid)| (pid, i))
             .collect();
         let printable = if let Some(&i) = partition_ids.get(&cell.partition_id()) {
-            match i % 3 {
+            match i % 2 {
                 0 => printable.bold().on_yellow(),
                 1 => printable.bold().on_magenta(),
-                2 => printable.bold().on_white(),
                 _ => unreachable!(),
             }
         } else {
@@ -294,6 +297,31 @@ mod tests {
     #[test]
     fn test_print() {
         let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });
+        builder
+            .mine_field()
+            .set_cells([
+                UserCell {
+                    point: Point { x: 23, y: 0 },
+                    value: UserCellValue::Wall,
+                },
+                UserCell {
+                    point: Point { x: 25, y: 0 },
+                    value: UserCellValue::Wall,
+                },
+                UserCell {
+                    point: Point { x: 23, y: 1 },
+                    value: UserCellValue::Wall,
+                },
+                UserCell {
+                    point: Point { x: 24, y: 1 },
+                    value: UserCellValue::Wall,
+                },
+                UserCell {
+                    point: Point { x: 25, y: 1 },
+                    value: UserCellValue::Wall,
+                },
+            ])
+            .unwrap();
         println!("{}", ColoredMineField(builder.mine_field()));
         println!("{}", builder.mine_field());
         // eprintln!("{:#}", DetailMineField(builder.mine_field()));

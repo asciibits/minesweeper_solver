@@ -45,7 +45,7 @@ pub struct MineField {
     /// Active board partitions, mapping a representative seed cell index to the partition size.
     partitions: HashMap<CellIdx, usize, FastNumberHasherBuilder>,
     /// Next unique ID to assign to a newly walked partition.
-    next_partition_id: u16,
+    next_partition_id: u8,
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
     pending: Vec<IdxAndCell>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
@@ -276,8 +276,6 @@ impl MineField {
             });
         }
 
-        self.pending.sort();
-        self.pending.dedup();
         self.solve();
         Ok(())
     }
@@ -358,31 +356,33 @@ impl MineField {
         )
     }
 
-    /// Compacts partition IDs when `next_partition_id` approaches `u16::MAX`.
+    /// Increments the [`MineField::next_partition_id`] value. If needed, it first compacts all
+    /// existing ids when `next_partition_id` reaches [`u8::MAX`].
     ///
-    /// Re-maps all active partition IDs recorded in `self.partitions` to sequential IDs
-    /// starting at `1`, updates every cell currently assigned to an active partition,
-    /// clears any dangling non-zero partition IDs on cells not in `self.partitions`,
-    /// and resets `next_partition_id` to `self.partitions.len() as u16 + 1`.
-    pub(super) fn compact_partition_ids(&mut self) {
-        let mut old_to_new: HashMap<u16, u16, FastNumberHasherBuilder> =
-            HashMap::with_capacity_and_hasher(self.partitions.len(), FastNumberHasherBuilder);
-        let mut new_id: u16 = 1;
-        for &seed_idx in self.partitions.keys() {
-            let old_id = self.cells[seed_idx].partition_id();
-            if old_id != 0 && !old_to_new.contains_key(&old_id) {
-                old_to_new.insert(old_id, new_id);
-                new_id += 1;
-            }
+    /// The only requirement for next_partition_id is that it be greater than all current
+    /// partition_ids. The simplest approach is to zero out all partition_ids, and set
+    /// next_partition_id to 1. This is what is done in release mode. In debug mode, however, it is
+    /// useful to have some history of old partition ids for debugging. So, all partitions have
+    /// their leading bit set to 0, and next_partition_id is set to 128.
+    pub(super) fn increment_partition_id(&mut self) {
+        if self.next_partition_id < u8::MAX {
+            self.next_partition_id += 1;
+            return;
         }
-        for cell in self.cells.iter_mut() {
-            let pid = cell.partition_id();
-            if pid != 0 {
-                let mapped = old_to_new.get(&pid).copied().unwrap_or(0);
-                cell.set_partition_id(mapped);
+        #[cfg(debug_assertions)]
+        {
+            for cell in self.cells.iter_mut() {
+                cell.set_partition_id(cell.partition_id() & 0x7f);
             }
+            self.next_partition_id = 0x80;
         }
-        self.next_partition_id = new_id;
+        #[cfg(not(debug_assertions))]
+        {
+            for cell in self.cells.iter_mut() {
+                cell.set_partition_id(0);
+            }
+            self.next_partition_id = 1;
+        }
     }
 
     fn solve(&mut self) {
@@ -391,10 +391,6 @@ impl MineField {
 
         self.metrics.inc_solve_passes();
         self.metrics.mark_now();
-
-        if self.next_partition_id >= 60_000 {
-            self.compact_partition_ids();
-        }
 
         // index the new pending changes
         #[cfg(feature = "debug")]
@@ -461,11 +457,11 @@ impl MineField {
     }
 
     fn process_desolved(&mut self) {
-        let start_desolved_id = self.next_partition_id;
+        let mut has_partition = false;
         while let Some(idx) = self.desolved_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
 
-            if cell.partition_id() >= start_desolved_id {
+            if cell.partition_id() == self.next_partition_id {
                 continue;
             }
             if cell.value().has_count() {
@@ -474,7 +470,13 @@ impl MineField {
                 self.partitions.remove(&idx);
             }
 
-            self.desolve_partition(idx);
+            let len = self.desolve_partition(idx);
+            if len > 1 {
+                has_partition = true;
+            }
+        }
+        if has_partition {
+            self.increment_partition_id();
         }
     }
 
@@ -500,9 +502,6 @@ impl MineField {
     }
 
     fn partition(&mut self) {
-        if self.next_partition_id >= 60_000 {
-            self.compact_partition_ids();
-        }
         let start_partition_id = self.next_partition_id;
         self.recent_invalid.clear();
         while let Some(idx) = self.pending_partition_queue.pop(&mut self.cells) {
@@ -594,12 +593,11 @@ impl MineField {
                     }
                 }
                 CellType::Mine => None,
+                CellType::Wall => unreachable!(),
             }
         });
         if len <= 1 {
             self.cells[idx].set_partition_id(0);
-        } else if len > 1 {
-            self.next_partition_id += 1;
         }
         len
     }
@@ -613,7 +611,7 @@ impl MineField {
         if len <= 1 {
             self.cells[member].set_partition_id(0);
         } else if len > 1 {
-            self.next_partition_id += 1;
+            self.increment_partition_id();
             self.metrics.inc_partitions_created();
             self.metrics.set_max_partition_size(len);
         }
@@ -639,6 +637,7 @@ impl MineField {
                     Some(neighbors)
                 }
                 CellType::Mine | CellType::InferredMine | CellType::InferredSafe => None,
+                CellType::Wall => unreachable!(),
             }
         })
     }
@@ -702,6 +701,7 @@ impl MineField {
                 '*' => Some(CellValue::MINE),
                 n @ '0'..='8' => Some(CellValue::for_mine_count(n as u8 - b'0')),
                 '_' | 'x' | '#' => Some(CellValue::UNKNOWN),
+                '@' => Some(CellValue::WALL),
                 ' ' | '.' => None,
                 _ => panic!("Invalid field character: {c:?}"),
             }
@@ -736,6 +736,7 @@ impl Display for MineField {
                 let UserValueWithInference { value, inferred } = self.cell(Point { x, y });
                 let char = match (value, inferred) {
                     (UserCellValue::Mine, _) => '*',
+                    (UserCellValue::Wall, _) => '@',
                     (UserCellValue::Safe(n), _) => n.to_string().chars().next().unwrap(),
                     (UserCellValue::Unknown, InferredValue::None) => '.',
                     (UserCellValue::Unknown, InferredValue::Safe) => '#',
@@ -1869,7 +1870,7 @@ mod tests {
     }
 
     fn assert_partition_invariants(field: &MineField) {
-        let mut partition_sizes: HashMap<u16, usize> = HashMap::new();
+        let mut partition_sizes: HashMap<u8, usize> = HashMap::new();
         for cell in &field.cells {
             let pid = cell.partition_id();
             if pid != 0 {
@@ -2019,33 +2020,58 @@ mod tests {
 
     #[test]
     fn test_compact_partition_ids() {
-        let spec = "1.1\n...\n1.1";
+        let spec = "1...1
+                    .....
+                    1...1";
         let mut field = MineField::create(spec);
         assert!(!field.partitions.is_empty());
         let orig_partition_count = field.partitions.len();
 
-        // Artificially elevate next_partition_id near u16::MAX
-        field.next_partition_id = 60_005;
+        // Artificially elevate next_partition_id to u8::MAX
+        field.next_partition_id = u8::MAX;
         // Inject an obsolete cell partition_id that is NOT in field.partitions
-        field.cells[4].set_partition_id(50_000);
+        field.cells[7].set_partition_id(213);
 
-        field.compact_partition_ids();
+        field.increment_partition_id();
 
         assert_eq!(field.partitions.len(), orig_partition_count);
-        assert_eq!(field.next_partition_id, orig_partition_count as u16 + 1);
-        // Dangling partition ID on cell 4 was cleared to 0
-        assert_eq!(field.cells[4].partition_id(), 0);
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(field.next_partition_id, 128);
+            // Dangling partition ID on cell 7 was reset
+            assert_eq!(field.cells[7].partition_id(), 213 - 128);
 
-        // All active partition members have contiguous IDs in 1..=orig_partition_count
-        for &seed in field.partitions.keys() {
-            let pid = field.cells[seed].partition_id();
-            assert!(pid >= 1 && pid <= orig_partition_count as u16);
+            // All active partition members have IDs in 0..128
+            for &seed in field.partitions.keys() {
+                let pid = field.cells[seed].partition_id();
+                assert!(pid < 128);
+            }
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(field.next_partition_id, 1);
+            // Dangling partition ID on cell 7 was reset
+            assert_eq!(field.cells[7].partition_id(), 0);
+
+            // All active partition members have IDs set to 0
+            for &seed in field.partitions.keys() {
+                let pid = field.cells[seed].partition_id();
+                assert_eq!(pid, 0);
+            }
         }
 
         // Solving further when next_partition_id >= 60_000 automatically triggers compaction
-        field.next_partition_id = 60_000;
+        field.next_partition_id = u8::MAX;
+        field
+            .set_cell(UserCell {
+                point: Point { x: 0, y: 0 },
+                value: UserCellValue::Safe(2),
+            })
+            .unwrap();
         field.solve();
-        assert!(field.next_partition_id <= orig_partition_count as u16 + 2);
+
+        assert!(field.next_partition_id <= 129);
     }
 
     #[test]
