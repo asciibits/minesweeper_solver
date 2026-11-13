@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt::{self, Display},
+    ops::{Index, IndexMut},
 };
 
 #[cfg(feature = "debug")]
@@ -42,10 +43,12 @@ pub struct MineField {
     mine_count: Option<u32>,
     /// Row-major contiguous array of all board cells and their precomputed solver metadata.
     cells: Box<[Cell]>,
+    // TODO: Document
+    partition_ids: Box<[PartitionId]>,
     /// Active board partitions, mapping a representative seed cell index to the partition size.
     partitions: HashMap<CellIdx, usize, FastNumberHasherBuilder>,
     /// Next unique ID to assign to a newly walked partition.
-    next_partition_id: u8,
+    next_partition_id: PartitionId,
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
     pending: Vec<IdxAndCell>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
@@ -117,7 +120,8 @@ impl MineField {
             mine_count,
             cells: Cell::grid(width, height),
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
-            next_partition_id: 1,
+            partition_ids: vec![PartitionId(0); area].into_boxed_slice(),
+            next_partition_id: PartitionId(1),
             pending: Vec::with_capacity(area / 4),
             desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVED_QUEUE),
             solved_queue: GuardedQueue::with_capacity(perimeter, FlagMask::SOLVED_QUEUE),
@@ -365,23 +369,21 @@ impl MineField {
     /// useful to have some history of old partition ids for debugging. So, all partitions have
     /// their leading bit set to 0, and next_partition_id is set to 128.
     pub(super) fn increment_partition_id(&mut self) {
-        if self.next_partition_id < u8::MAX {
-            self.next_partition_id += 1;
+        if self.next_partition_id < PartitionId::MAX {
+            self.next_partition_id.inc();
             return;
         }
         #[cfg(debug_assertions)]
         {
-            for cell in self.cells.iter_mut() {
-                cell.set_partition_id(cell.partition_id() & 0x7f);
+            for partition_id in self.partition_ids.iter_mut() {
+                partition_id.set(partition_id.get() & 0x7f);
             }
-            self.next_partition_id = 0x80;
+            self.next_partition_id.set(0x80);
         }
         #[cfg(not(debug_assertions))]
         {
-            for cell in self.cells.iter_mut() {
-                cell.set_partition_id(0);
-            }
-            self.next_partition_id = 1;
+            self.partition_ids.fill(PartitionId(0));
+            self.next_partition_id.set(1);
         }
     }
 
@@ -461,7 +463,7 @@ impl MineField {
         while let Some(idx) = self.desolved_queue.pop(&mut self.cells) {
             let cell = &mut self.cells[idx];
 
-            if cell.partition_id() == self.next_partition_id {
+            if self.partition_ids[idx] == self.next_partition_id {
                 continue;
             }
             if cell.value().has_count() {
@@ -510,7 +512,7 @@ impl MineField {
             if cell.is_invalid() {
                 self.recent_invalid.push(idx);
             }
-            if cell.partition_id() < start_partition_id {
+            if self.partition_ids[idx] < start_partition_id {
                 self.partitions.remove(&idx);
                 let len = self.visit_partition(idx, &mut |field, idx, _| {
                     field.partitions.remove(&idx);
@@ -538,13 +540,13 @@ impl MineField {
         prev_neighbor: Option<Neighbor>,
         visit: &mut impl FnMut(&mut MineField, CellIdx, Option<Neighbor>) -> Option<DirectionSet>,
     ) -> usize {
-        if self.cells[idx].partition_id() == self.next_partition_id {
+        if self.partition_ids[idx] == self.next_partition_id {
             return 0;
         }
         let Some(neighbors) = visit(self, idx, prev_neighbor) else {
             return 0;
         };
-        self.cells[idx].set_partition_id(self.next_partition_id);
+        self.partition_ids[idx] = self.next_partition_id;
 
         let mut len = 1;
         for neighbor in self.neighbor_iter(idx, neighbors) {
@@ -597,7 +599,7 @@ impl MineField {
             }
         });
         if len <= 1 {
-            self.cells[idx].set_partition_id(0);
+            self.partition_ids[idx].set(0);
         }
         len
     }
@@ -609,7 +611,7 @@ impl MineField {
     ) -> usize {
         let len = self.visit_partition_helper(member, None, visit);
         if len <= 1 {
-            self.cells[member].set_partition_id(0);
+            self.partition_ids[member].set(0);
         } else if len > 1 {
             self.increment_partition_id();
             self.metrics.inc_partitions_created();
@@ -771,7 +773,8 @@ impl MineField {
             mine_count: self.mine_count,
             cells,
             partitions: self.partitions.clone(),
-            next_partition_id: 1,
+            partition_ids: self.partition_ids.clone(),
+            next_partition_id: PartitionId(1),
             pending,
             desolved_queue: self.desolved_queue.clone(),
             solved_queue: self.solved_queue.clone(),
@@ -782,6 +785,7 @@ impl MineField {
         };
         // clear the cloned collections for the new solve
         field.partitions.clear();
+        field.partition_ids.fill(PartitionId(0));
         field.desolved_queue.clear();
         field.solved_queue.clear();
         field.pending_partition_queue.clear();
@@ -789,6 +793,47 @@ impl MineField {
         field.recent_invalid.clear();
         field.solve();
         field
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PartitionId(u8);
+
+impl PartitionId {
+    const MAX: PartitionId = PartitionId(u8::MAX);
+
+    fn inc(&mut self) {
+        self.0 += 1;
+    }
+
+    fn get(&self) -> u8 {
+        self.0
+    }
+
+    fn set(&mut self, id: u8) {
+        self.0 = id;
+    }
+}
+
+impl Index<CellIdx> for [PartitionId] {
+    type Output = PartitionId;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [PartitionId] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
+    }
+}
+
+impl Display for PartitionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -844,7 +889,6 @@ mod tests {
     use super::*;
     use crate::solver::{
         cell::InferredValue,
-        display::DetailMineField,
         grid::{E, NE, NW, S, SE, W},
     };
 
@@ -1381,28 +1425,24 @@ mod tests {
         // Left: {(0,0), (1,0), (0,1), (1,1)} (4 cells)
         // Right: {(4,0), (3,0), (4,1), (3,1)} (4 cells)
         assert_eq!(field.partitions.len(), 2);
-        let p_left = field.cells[0].partition_id();
-        let p_right = field.cells[4].partition_id();
+        let p_left = field.partition_ids[0].get();
+        let p_right = field.partition_ids[4].get();
         assert_ne!(p_left, 0);
         assert_ne!(p_right, 0);
         assert_ne!(p_left, p_right);
         assert_eq!(
-            field
-                .cells
-                .iter()
-                .filter(|c| c.partition_id() == p_left)
-                .count(),
+            field.partition_ids.iter().filter(|p| p.0 == p_left).count(),
             4
         );
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == p_right)
+                .filter(|p| p.0 == p_right)
                 .count(),
             4
         );
-        assert_eq!(field.cells[2].partition_id(), 0);
+        assert_eq!(field.partition_ids[2].0, 0);
         assert!(field.cells[2].alt_neighbors().is_empty());
         assert!(field.cells[2].safe_neighbors().is_empty());
 
@@ -1410,13 +1450,13 @@ mod tests {
         // into a single 10-cell partition!
         field.update("..2");
         assert_eq!(field.partitions.len(), 1);
-        let merged_pid = field.cells[2].partition_id();
-        assert_ne!(merged_pid, 0);
+        let merged_pid = field.partition_ids[2];
+        assert_ne!(merged_pid.0, 0);
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == merged_pid)
+                .filter(|&&p| p == merged_pid)
                 .count(),
             10
         );
@@ -1436,9 +1476,9 @@ mod tests {
              .....",
         );
         assert_eq!(field.partitions.len(), 1);
-        let initial_pid = field.cells[0].partition_id();
-        assert_ne!(initial_pid, 0);
-        assert!(field.cells.iter().all(|c| c.partition_id() == initial_pid));
+        let initial_pid = field.partition_ids[0];
+        assert_ne!(initial_pid.0, 0);
+        assert!(field.partition_ids.iter().all(|&p| p == initial_pid));
 
         // Now reveal the bridge cell (2, 0) as Count(0).
         // `basic_solve` infers (1, 1), (2, 1), and (3, 1) as InferredValue::Safe,
@@ -1450,28 +1490,34 @@ mod tests {
         assert_eq!(field.partitions.len(), 2);
         assert!(field.cells[2].alt_neighbors().is_empty());
 
-        let left_pid = field.cells[0].partition_id();
-        let right_pid = field.cells[4].partition_id();
-        assert_ne!(left_pid, 0);
-        assert_ne!(right_pid, 0);
+        let left_pid = field.partition_ids[0];
+        let right_pid = field.partition_ids[4];
+        assert_ne!(left_pid.0, 0);
+        assert_ne!(right_pid.0, 0);
         assert_ne!(left_pid, right_pid);
-        assert_eq!(field.cells[1].partition_id(), left_pid);
-        assert_eq!(cell(&field, 0, 1).partition_id(), left_pid);
-        assert_eq!(field.cells[3].partition_id(), right_pid);
-        assert_eq!(cell(&field, 4, 1).partition_id(), right_pid);
+        assert_eq!(field.partition_ids[1], left_pid);
+        assert_eq!(
+            field.partition_ids[field.cell_idx(Point::new(0, 1))],
+            left_pid
+        );
+        assert_eq!(field.partition_ids[3], right_pid);
+        assert_eq!(
+            field.partition_ids[field.cell_idx(Point::new(4, 1))],
+            right_pid
+        );
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == left_pid)
+                .filter(|&&p| p == left_pid)
                 .count(),
             3
         );
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == right_pid)
+                .filter(|&&p| p == right_pid)
                 .count(),
             3
         );
@@ -1694,7 +1740,6 @@ mod tests {
         // (0,0) and (1,0) to Unknown. Verify (2,0)'s Safe inference is cleared even though no
         // new partition is created!
         field.update("__");
-        DetailMineField::eprintln(&field);
         assert!(field.partitions.is_empty());
         for cell in &field.cells {
             assert!(!cell.value().is_inferred());
@@ -1711,18 +1756,16 @@ mod tests {
         let mut field = MineField::create("1...1");
         assert!(field.cells[1].value().is_mine());
         assert!(field.cells[3].value().is_mine());
-        let right_pid = field.cells[4].partition_id();
+        let right_pid = field.partition_ids[4];
 
         // Trigger an inference-breaking update on the LEFT partition only:
         // change (0,0) from Count(1) to Count(0).
         // Left cell (1,0) must change from InferredValue::Mine to InferredValue::Safe,
         // while the untouched RIGHT partition (and cell (3,0)'s Mine inference) remains intact!
-        DetailMineField::eprintln(&field);
         field.update("0");
-        DetailMineField::eprintln(&field);
         assert!(field.cells[1].value().is_safe());
         assert!(field.cells[3].value().is_mine());
-        assert_eq!(field.cells[4].partition_id(), right_pid);
+        assert_eq!(field.partition_ids[4], right_pid);
         assert_eq!(
             field
                 .cells()
@@ -1836,31 +1879,31 @@ mod tests {
         // Left:  {(0,0), (0,1), (1,0)}
         // Right: {(3,0), (4,0), (4,1)}
         assert_eq!(field.partitions.len(), 2);
-        assert_eq!(field.cells[2].partition_id(), 0);
+        assert_eq!(field.partition_ids[2].0, 0);
         for x in 1..=3 {
             let idx = field.cell_idx(Point { x, y: 1 });
             assert!(field.cells[idx].value().is_mine());
-            assert_eq!(field.cells[idx].partition_id(), 0);
+            assert_eq!(field.partition_ids[idx].0, 0);
         }
 
-        let left_pid = field.cells[0].partition_id();
-        let right_pid = field.cells[4].partition_id();
-        assert_ne!(left_pid, 0);
-        assert_ne!(right_pid, 0);
+        let left_pid = field.partition_ids[0];
+        let right_pid = field.partition_ids[4];
+        assert_ne!(left_pid.0, 0);
+        assert_ne!(right_pid.0, 0);
         assert_ne!(left_pid, right_pid);
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == left_pid)
+                .filter(|&&p| p == left_pid)
                 .count(),
             3
         );
         assert_eq!(
             field
-                .cells
+                .partition_ids
                 .iter()
-                .filter(|c| c.partition_id() == right_pid)
+                .filter(|&&p| p == right_pid)
                 .count(),
             3
         );
@@ -1870,16 +1913,15 @@ mod tests {
     }
 
     fn assert_partition_invariants(field: &MineField) {
-        let mut partition_sizes: HashMap<u8, usize> = HashMap::new();
-        for cell in &field.cells {
-            let pid = cell.partition_id();
-            if pid != 0 {
+        let mut partition_sizes: HashMap<PartitionId, usize> = HashMap::new();
+        for &pid in &field.partition_ids {
+            if pid.0 != 0 {
                 *partition_sizes.entry(pid).or_insert(0) += 1;
             }
         }
         for (&seed, &len) in &field.partitions {
-            let pid = field.cells[seed].partition_id();
-            assert_ne!(pid, 0);
+            let pid = field.partition_ids[seed];
+            assert_ne!(pid.0, 0);
             assert_eq!(partition_sizes.get(&pid), Some(&len));
         }
     }
@@ -1956,9 +1998,8 @@ mod tests {
 
         // Reverting cell 1 to Unknown leaves only {2, 3, 4} connected.
         field.update("._");
-        DetailMineField::eprintln(&field);
         assert_eq!(field.partitions.len(), 1);
-        assert!(field.cells[1].partition_id() < field.next_partition_id);
+        assert!(field.partition_ids[1] < field.next_partition_id);
         assert_partition_invariants(&field);
     }
 
@@ -1969,8 +2010,8 @@ mod tests {
 
         field.update("._");
         assert!(field.partitions.is_empty());
-        for cell in field.cells.iter() {
-            assert!(cell.partition_id() < field.next_partition_id);
+        for &pid in field.partition_ids.iter() {
+            assert!(pid < field.next_partition_id);
         }
     }
 
@@ -1980,10 +2021,10 @@ mod tests {
             "1...1
              .....",
         );
-        let before: Vec<_> = field.cells.iter().map(|c| c.partition_id()).collect();
+        let before: Vec<_> = field.partition_ids.iter().copied().collect();
 
         field.update("1...1");
-        let after: Vec<_> = field.cells.iter().map(|c| c.partition_id()).collect();
+        let after: Vec<_> = field.partition_ids.iter().copied().collect();
         assert_eq!(before, after);
     }
 
@@ -2011,10 +2052,10 @@ mod tests {
 
         let members = field.members(CellIdx(0), 3);
         assert_eq!(members, vec![CellIdx(0), CellIdx(1), CellIdx(2)]);
-        let id = field.cells[0].partition_id();
-        assert_ne!(id, 0);
-        for c in &field.cells {
-            assert_eq!(c.partition_id(), id);
+        let id = field.partition_ids[0];
+        assert_ne!(id.0, 0);
+        for pid in field.partition_ids {
+            assert_eq!(pid, id);
         }
     }
 
@@ -2028,41 +2069,41 @@ mod tests {
         let orig_partition_count = field.partitions.len();
 
         // Artificially elevate next_partition_id to u8::MAX
-        field.next_partition_id = u8::MAX;
+        field.next_partition_id = PartitionId::MAX;
         // Inject an obsolete cell partition_id that is NOT in field.partitions
-        field.cells[7].set_partition_id(213);
+        field.partition_ids[7].set(213);
 
         field.increment_partition_id();
 
         assert_eq!(field.partitions.len(), orig_partition_count);
         #[cfg(debug_assertions)]
         {
-            assert_eq!(field.next_partition_id, 128);
+            assert_eq!(field.next_partition_id.0, 128);
             // Dangling partition ID on cell 7 was reset
-            assert_eq!(field.cells[7].partition_id(), 213 - 128);
+            assert_eq!(field.partition_ids[7].0, 213 - 128);
 
             // All active partition members have IDs in 0..128
             for &seed in field.partitions.keys() {
-                let pid = field.cells[seed].partition_id();
-                assert!(pid < 128);
+                let pid = field.partition_ids[seed];
+                assert!(pid.0 < 128);
             }
         }
 
         #[cfg(not(debug_assertions))]
         {
-            assert_eq!(field.next_partition_id, 1);
+            assert_eq!(field.next_partition_id.0, 1);
             // Dangling partition ID on cell 7 was reset
-            assert_eq!(field.cells[7].partition_id(), 0);
+            assert_eq!(field.partition_ids[7].0, 0);
 
             // All active partition members have IDs set to 0
             for &seed in field.partitions.keys() {
-                let pid = field.cells[seed].partition_id();
-                assert_eq!(pid, 0);
+                let pid = field.partition_ids[seed];
+                assert_eq!(pid.0, 0);
             }
         }
 
         // Solving further when next_partition_id >= 60_000 automatically triggers compaction
-        field.next_partition_id = u8::MAX;
+        field.next_partition_id = PartitionId::MAX;
         field
             .set_cell(UserCell {
                 point: Point { x: 0, y: 0 },
@@ -2071,7 +2112,7 @@ mod tests {
             .unwrap();
         field.solve();
 
-        assert!(field.next_partition_id <= 129);
+        assert!(field.next_partition_id.0 <= 129);
     }
 
     #[test]
@@ -2145,6 +2186,6 @@ mod tests {
         field.update("_..._\n.....");
         assert!(field.desolved_queue.is_empty());
         // next_partition_id should not experience runaway increments
-        assert!(field.next_partition_id <= pid_before + 4);
+        assert!(field.next_partition_id.0 <= pid_before.0 + 4);
     }
 }

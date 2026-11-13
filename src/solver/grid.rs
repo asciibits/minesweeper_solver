@@ -18,6 +18,11 @@ pub struct Point {
 }
 
 impl Point {
+    #[cfg(test)]
+    pub(super) const fn new(x: u32, y: u32) -> Point {
+        Point { x, y }
+    }
+
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
     pub(super) const fn from_index(cell_idx: CellIdx, width: u32) -> Point {

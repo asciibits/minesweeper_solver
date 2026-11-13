@@ -138,10 +138,6 @@ pub(super) struct Cell {
     /// For all other cell types, this is unspecified.
     safe_neighbors: DirectionSet,
 
-    /// A unique id for all members of a partition. Zero values are always un-partitioned; non-zero
-    /// values may or may not be partitioned.
-    partition_id: u8,
-
     /// A set of bit flags used when executing a solve pass.
     flags: CellFlags,
 }
@@ -159,7 +155,6 @@ impl Cell {
             alt_neighbors: DirectionSet::EMPTY,
             mine_neighbors: DirectionSet::EMPTY,
             safe_neighbors: DirectionSet::EMPTY,
-            partition_id: 0,
             flags: CellFlags::new(),
         };
         let mut grid: Vec<Cell> = vec![inner_cell; len];
@@ -194,18 +189,6 @@ impl Cell {
     #[inline]
     pub(super) fn set_value(&mut self, value: CellValue) {
         self.value = value;
-    }
-
-    /// Returns the ID of the partition this cell belongs to (`0` if unpartitioned).
-    #[inline]
-    pub(super) fn partition_id(&self) -> u8 {
-        self.partition_id
-    }
-
-    /// Sets the ID of the partition this cell belongs to (`0` if unpartitioned).
-    #[inline]
-    pub(super) fn set_partition_id(&mut self, partition_id: u8) {
-        self.partition_id = partition_id;
     }
 
     /// Returns all valid board neighbors for this cell.
@@ -780,11 +763,7 @@ impl Display for Cell {
             }
             _ => (),
         };
-        write!(
-            f,
-            "{spacer}partition_id: {},{spacer}flags: {}",
-            self.partition_id, self.flags
-        )?;
+        write!(f, "{spacer}flags: {},", self.flags)?;
         if f.alternate() {
             writeln!(f)?;
         }

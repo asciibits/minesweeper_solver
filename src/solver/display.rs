@@ -1,6 +1,9 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
-use crate::solver::cell::{InferredValue, UserCellValue, UserValueWithInference};
+use crate::solver::{
+    CellIdx, PartitionId,
+    cell::{InferredValue, UserCellValue, UserValueWithInference},
+};
 
 use super::MineField;
 use colored::Colorize;
@@ -62,7 +65,8 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
     write!(f, "{:4}", row * field.width)?;
     for col in 0..field.width {
         write!(f, "{}", "│ ".bold())?;
-        let cell = field.cells[col as usize + row as usize * field.width as usize];
+        let idx = CellIdx(col + row * field.width);
+        let cell = field.cells[idx];
         let user_value: UserValueWithInference = cell.value().into();
         let printable = match user_value {
             UserValueWithInference {
@@ -101,15 +105,15 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
             },
         };
 
-        let partition_ids: HashMap<u8, usize> = field
+        let partition_ids: HashMap<PartitionId, usize> = field
             .partitions
             .keys()
             .copied()
-            .map(|i| field.cells[i].partition_id())
+            .map(|i| field.partition_ids[i])
             .enumerate()
             .map(|(i, pid)| (pid, i))
             .collect();
-        let printable = if let Some(&i) = partition_ids.get(&cell.partition_id()) {
+        let printable = if let Some(&i) = partition_ids.get(&field.partition_ids[idx]) {
             match i % 2 {
                 0 => printable.bold().on_yellow(),
                 1 => printable.bold().on_magenta(),
@@ -222,11 +226,17 @@ impl<'a> Display for DetailMineField<'a> {
             write!(f, ", {mine_count}*")?;
         }
         write!(f, ") {{")?;
-        for (idx, cell) in self.0.cells.iter().enumerate() {
+        for (idx, (&cell, &pid)) in self
+            .0
+            .cells
+            .iter()
+            .zip(self.0.partition_ids.iter())
+            .enumerate()
+        {
             // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(f, "{spacer}{idx}: ")?;
+            write!(f, "{spacer}{idx} (pid: {pid}: ")?;
             cell.fmt(f)?;
-            write!(f, ",")?;
+            write!(f, ",{spacer}")?;
         }
         write!(
             f,
@@ -260,7 +270,7 @@ impl<'a> Display for DetailMineField<'a> {
             write!(
                 f,
                 "{spacer}  {}: member: {idx}, len: {len}",
-                self.0.cells[idx].partition_id()
+                self.0.partition_ids[idx]
             )?;
         }
         write!(f, "]")?;
