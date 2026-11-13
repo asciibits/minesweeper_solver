@@ -510,9 +510,11 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::solver::CellType;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    use crate::solver::{CellType, Metrics};
+    #[cfg(test)]
+    use crate::solver::metrics::AggregatedMetrics;
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -834,19 +836,29 @@ mod tests {
     }
 
     #[cfg(test)]
-    fn validate_incremental_field(inc_field: &MineField, validation_metrics: &mut Metrics) {
+    fn validate_incremental_field(
+        inc_field: &MineField,
+        validation_metrics: &mut AggregatedMetrics,
+    ) {
         let fresh_field = inc_field.rebuild_from_scratch();
-        validation_metrics.tally_game(&fresh_field.metrics);
+        validation_metrics.apply_metrics(&fresh_field.metrics);
 
         // validate cells are identical, aside from a partition_id remapping
-        for ((idx, inc_cell), fresh_cell) in inc_field
+        for ((idx, (inc_cell, inc_flags)), (fresh_cell, fresh_flags)) in inc_field
             .cells
             .iter()
             .copied()
+            .zip(inc_field.cell_flags.iter().copied())
             .enumerate()
-            .zip(fresh_field.cells.iter().copied())
+            .zip(
+                fresh_field
+                    .cells
+                    .iter()
+                    .copied()
+                    .zip(fresh_field.cell_flags.iter().copied()),
+            )
         {
-            if inc_cell != fresh_cell {
+            if inc_cell != fresh_cell || inc_flags != fresh_flags {
                 #[cfg(debug_assertions)]
                 {
                     eprintln!("Incremental:");
@@ -864,8 +876,8 @@ mod tests {
     fn test_multiple_random_incremental_play_through() {
         let rng = &mut rng();
 
-        let mut metrics = Metrics::default();
-        let mut validation_metrics = Metrics::default();
+        let mut metrics = AggregatedMetrics::default();
+        let mut validation_metrics = AggregatedMetrics::default();
 
         let count = 100;
         let width = 30;
@@ -894,8 +906,8 @@ mod tests {
         width: u32,
         height: u32,
         mine_count: u32,
-        metrics: &mut Metrics,
-        validation_metrics: &mut Metrics,
+        metrics: &mut AggregatedMetrics,
+        validation_metrics: &mut AggregatedMetrics,
         rng: &mut impl Rng,
     ) {
         let start_pt = Point {
@@ -973,6 +985,6 @@ mod tests {
                 panic!("Loop count exceeded limit: {loop_count}");
             }
         }
-        metrics.tally_game(&builder.field.metrics);
+        metrics.apply_metrics(&builder.field.metrics);
     }
 }

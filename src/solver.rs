@@ -15,9 +15,9 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            CellIdx, CellType, CellValue, ChangeStatus, FastNumberHasherBuilder, FlagMask,
-            GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference, cell_idx,
-            coordinates,
+            CellFlags, CellIdx, CellType, CellValue, ChangeStatus, FastNumberHasherBuilder,
+            FlagMask, GuardedQueue, IdxAndCell, UserCellWithInference, UserValueWithInference,
+            cell_idx, coordinates,
         },
         grid::{DirectionSet, Neighbor},
         metrics::Metrics,
@@ -45,6 +45,8 @@ pub struct MineField {
     cells: Box<[Cell]>,
     // TODO: Document
     partition_ids: Box<[PartitionId]>,
+    // TODO: Document
+    cell_flags: Box<[CellFlags]>,
     /// Active board partitions, mapping a representative seed cell index to the partition size.
     partitions: HashMap<CellIdx, usize, FastNumberHasherBuilder>,
     /// Next unique ID to assign to a newly walked partition.
@@ -65,11 +67,7 @@ pub struct MineField {
     recent_invalid: Vec<CellIdx>,
 }
 
-const MAX_SIZE: usize = if usize::MAX > u32::MAX as usize {
-    usize::MAX >> 9
-} else {
-    u32::MAX as usize
-};
+const MAX_SIZE: u32 = u32::MAX >> 9;
 
 impl MineField {
     /// Creates a new [`MineField`] with the given dimensions and if provided, the total
@@ -96,9 +94,9 @@ impl MineField {
         height: u32,
         mine_count: Option<u32>,
     ) -> Result<MineField, SolverError> {
-        let area = width as usize * height as usize;
+        let area = (width as usize).saturating_mul(height as usize);
         let perimeter = (width as usize + height as usize) * 2;
-        if area > MAX_SIZE {
+        if area > MAX_SIZE as usize {
             return Err(SolverError::AreaTooLarge { width, height });
         }
         if area == 0 {
@@ -121,6 +119,7 @@ impl MineField {
             cells: Cell::grid(width, height),
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
             partition_ids: vec![PartitionId(0); area].into_boxed_slice(),
+            cell_flags: vec![CellFlags::new(); area].into_boxed_slice(),
             next_partition_id: PartitionId(1),
             pending: Vec::with_capacity(area / 4),
             desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVED_QUEUE),
@@ -351,6 +350,7 @@ impl MineField {
     fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         Cell::apply_change(
             &mut self.cells,
+            &mut self.cell_flags,
             &mut self.solved_queue,
             &mut self.desolved_queue,
             &mut self.metrics,
@@ -450,8 +450,9 @@ impl MineField {
                 let IdxAndCell { idx, .. } = self.pending[i];
                 let cell = &mut self.cells[idx];
                 if !cell.value().has_count() {
-                    self.solved_queue.remove(&mut self.cells, idx);
-                    self.pending_partition_queue.remove(&mut self.cells, idx);
+                    self.solved_queue.remove(&mut self.cell_flags, idx);
+                    self.pending_partition_queue
+                        .remove(&mut self.cell_flags, idx);
                 }
             }
         }
@@ -460,14 +461,14 @@ impl MineField {
 
     fn process_desolved(&mut self) {
         let mut has_partition = false;
-        while let Some(idx) = self.desolved_queue.pop(&mut self.cells) {
+        while let Some(idx) = self.desolved_queue.pop(&mut self.cell_flags) {
             let cell = &mut self.cells[idx];
 
             if self.partition_ids[idx] == self.next_partition_id {
                 continue;
             }
             if cell.value().has_count() {
-                self.pending_partition_queue.push(&mut self.cells, idx);
+                self.pending_partition_queue.push(&mut self.cell_flags, idx);
             } else {
                 self.partitions.remove(&idx);
             }
@@ -484,7 +485,7 @@ impl MineField {
 
     fn process_solved(&mut self) {
         self.recent_inferred.clear();
-        while let Some(idx) = self.solved_queue.pop(&mut self.cells) {
+        while let Some(idx) = self.solved_queue.pop(&mut self.cell_flags) {
             let cell = &mut self.cells[idx];
             debug_assert!(cell.value().has_count(), "broke: {idx}");
             if !cell.is_solved()
@@ -498,7 +499,7 @@ impl MineField {
                     }
                 }
             } else {
-                self.pending_partition_queue.push(&mut self.cells, idx);
+                self.pending_partition_queue.push(&mut self.cell_flags, idx);
             }
         }
     }
@@ -506,7 +507,7 @@ impl MineField {
     fn partition(&mut self) {
         let start_partition_id = self.next_partition_id;
         self.recent_invalid.clear();
-        while let Some(idx) = self.pending_partition_queue.pop(&mut self.cells) {
+        while let Some(idx) = self.pending_partition_queue.pop(&mut self.cell_flags) {
             let cell = &mut self.cells[idx];
             debug_assert!(cell.value().has_count());
             if cell.is_invalid() {
@@ -583,14 +584,18 @@ impl MineField {
                     if let Some(neighbor) = neighbor {
                         if field.cells[neighbor.idx].value().is_unknown() {
                             field.partitions.remove(&idx);
-                            field.pending_partition_queue.push(&mut field.cells, idx);
+                            field
+                                .pending_partition_queue
+                                .push(&mut field.cell_flags, idx);
                             Some(cell.neighbors() - neighbor.from.reverse())
                         } else {
                             None
                         }
                     } else {
                         field.partitions.remove(&idx);
-                        field.pending_partition_queue.push(&mut field.cells, idx);
+                        field
+                            .pending_partition_queue
+                            .push(&mut field.cell_flags, idx);
                         Some(cell.neighbors())
                     }
                 }
@@ -774,6 +779,7 @@ impl MineField {
             cells,
             partitions: self.partitions.clone(),
             partition_ids: self.partition_ids.clone(),
+            cell_flags: self.cell_flags.clone(),
             next_partition_id: PartitionId(1),
             pending,
             desolved_queue: self.desolved_queue.clone(),
@@ -786,6 +792,7 @@ impl MineField {
         // clear the cloned collections for the new solve
         field.partitions.clear();
         field.partition_ids.fill(PartitionId(0));
+        field.cell_flags.fill(CellFlags::new());
         field.desolved_queue.clear();
         field.solved_queue.clear();
         field.pending_partition_queue.clear();

@@ -137,9 +137,6 @@ pub(super) struct Cell {
     /// For [`CellType::Unknown`] cells, this points to all [`CellType::InferredSafe`] neighbors.
     /// For all other cell types, this is unspecified.
     safe_neighbors: DirectionSet,
-
-    /// A set of bit flags used when executing a solve pass.
-    flags: CellFlags,
 }
 
 const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
@@ -155,7 +152,6 @@ impl Cell {
             alt_neighbors: DirectionSet::EMPTY,
             mine_neighbors: DirectionSet::EMPTY,
             safe_neighbors: DirectionSet::EMPTY,
-            flags: CellFlags::new(),
         };
         let mut grid: Vec<Cell> = vec![inner_cell; len];
         // fix up the edge neighbors
@@ -253,12 +249,6 @@ impl Cell {
         &mut self.safe_neighbors
     }
 
-    /// Returns mutable reference to the cell's status flags.
-    #[inline]
-    pub(super) fn flags(&mut self) -> &mut CellFlags {
-        &mut self.flags
-    }
-
     pub(super) fn remaining_mines(&self) -> i8 {
         // only valid for count cells
         debug_assert!(self.value.has_count());
@@ -308,6 +298,7 @@ impl Cell {
 
     pub(super) fn apply_change(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -350,6 +341,7 @@ impl Cell {
 
         change_function(
             cells,
+            flags,
             solved_queue,
             desolved_queue,
             metrics,
@@ -361,6 +353,7 @@ impl Cell {
 
     fn no_change(
         _cells: &mut [Cell],
+        _flags: &mut [CellFlags],
         _solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         _metrics: &mut Metrics,
@@ -373,6 +366,7 @@ impl Cell {
 
     fn to_mine(
         cells: &mut [Cell],
+        _flags: &mut [CellFlags],
         _solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         _metrics: &mut Metrics,
@@ -386,6 +380,7 @@ impl Cell {
 
     fn count_to_count(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         desolved_queue: &mut GuardedQueue,
         _metrics: &mut Metrics,
@@ -394,13 +389,14 @@ impl Cell {
         _width: u32,
     ) -> ChangeStatus {
         cells[idx].set_value(new_value);
-        solved_queue.push(cells, idx);
-        desolved_queue.push(cells, idx);
+        solved_queue.push(flags, idx);
+        desolved_queue.push(flags, idx);
         ChangeStatus::Breaking
     }
 
     fn unknown_to_mine(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -419,7 +415,7 @@ impl Cell {
             let cell = &mut cells[neighbor.idx];
             *cell.mine_neighbors_mut() |= neighbor.from;
             *cell.alt_neighbors_mut() -= neighbor.from;
-            solved_queue.push(cells, neighbor.idx);
+            solved_queue.push(flags, neighbor.idx);
         }
         let safe_neighbors = cells[idx].safe_neighbors();
         metrics.inc_neighbor_visits(safe_neighbors);
@@ -442,6 +438,7 @@ impl Cell {
 
     fn unknown_to_inferred_safe(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -459,7 +456,7 @@ impl Cell {
         for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
             let cell = &mut cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
-            solved_queue.push(cells, neighbor.idx);
+            solved_queue.push(flags, neighbor.idx);
         }
         let safe_neighbors = cells[idx].safe_neighbors();
         metrics.inc_neighbor_visits(safe_neighbors);
@@ -483,6 +480,7 @@ impl Cell {
 
     fn unknown_to_count(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -500,7 +498,7 @@ impl Cell {
         for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
             let cell = &mut cells[neighbor.idx];
             *cell.alt_neighbors_mut() -= neighbor.from;
-            solved_queue.push(cells, neighbor.idx);
+            solved_queue.push(flags, neighbor.idx);
         }
         let safe_neighbors = cells[idx].safe_neighbors();
         metrics.inc_neighbor_visits(safe_neighbors);
@@ -518,13 +516,14 @@ impl Cell {
         }
         *cells[idx].alt_neighbors_mut() = unknown_neighbors;
         cells[idx].set_value(new_value);
-        solved_queue.push(cells, idx);
+        solved_queue.push(flags, idx);
 
         ChangeStatus::NonBreaking
     }
 
     fn inferred_safe_to_count(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         _desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -545,7 +544,7 @@ impl Cell {
             *cell.alt_neighbors_mut() |= neighbor.from;
         }
         cells[idx].set_value(new_value);
-        solved_queue.push(cells, idx);
+        solved_queue.push(flags, idx);
 
         ChangeStatus::NonBreaking
     }
@@ -554,6 +553,7 @@ impl Cell {
     // a loop over all neighbors with a decent amount of branching
     fn inference_breaking_change(
         cells: &mut [Cell],
+        flags: &mut [CellFlags],
         solved_queue: &mut GuardedQueue,
         desolved_queue: &mut GuardedQueue,
         metrics: &mut Metrics,
@@ -575,8 +575,8 @@ impl Cell {
                 mines |= dir;
             } else if n_value.has_count() {
                 count |= dir;
-                desolved_queue.push(cells, neighbor.idx);
-                solved_queue.push(cells, neighbor.idx);
+                desolved_queue.push(flags, neighbor.idx);
+                solved_queue.push(flags, neighbor.idx);
             } else if n_value.is_safe() {
                 safe |= dir;
             } else if n_value.is_unknown() {
@@ -599,7 +599,7 @@ impl Cell {
                     if n_value.is_unknown() {
                         *cells[neighbor.idx].alt_neighbors_mut() -= neighbor.from;
                     }
-                    desolved_queue.push(cells, neighbor.idx);
+                    desolved_queue.push(flags, neighbor.idx);
                 }
                 CellType::InferredSafe => {
                     if n_value.is_unknown() {
@@ -651,10 +651,10 @@ impl Cell {
             _ => (),
         }
         if prev_value.has_count() {
-            desolved_queue.push(cells, idx);
+            desolved_queue.push(flags, idx);
         }
         if new_value.has_count() {
-            solved_queue.push(cells, idx);
+            solved_queue.push(flags, idx);
         }
 
         ChangeStatus::Breaking
@@ -713,10 +713,7 @@ impl Cell {
 
 impl PartialEq for Cell {
     fn eq(&self, other: &Self) -> bool {
-        if self.value != other.value
-            || self.neighbors != other.neighbors
-            || self.flags != other.flags
-        {
+        if self.value != other.value || self.neighbors != other.neighbors {
             return false;
         }
 
@@ -763,7 +760,6 @@ impl Display for Cell {
             }
             _ => (),
         };
-        write!(f, "{spacer}flags: {},", self.flags)?;
         if f.alternate() {
             writeln!(f)?;
         }
@@ -1109,6 +1105,22 @@ impl Display for CellFlags {
     }
 }
 
+impl Index<CellIdx> for [CellFlags] {
+    type Output = CellFlags;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [CellFlags] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub(super) struct FlagMask(u8);
 
@@ -1139,24 +1151,23 @@ impl GuardedQueue {
     }
 
     /// Pushes `idx` to the back of the queue if not already marked with this queue's mask.
-    pub(super) fn push(&mut self, cells: &mut [Cell], idx: CellIdx) {
-        cells[idx]
-            .flags()
+    pub(super) fn push(&mut self, flags: &mut [CellFlags], idx: CellIdx) {
+        flags[idx]
             .mark(self.mask)
             .then(|| self.queue.push_back(idx));
     }
 
     /// Pops the front index from the queue and clears its corresponding flag mask.
-    pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
+    pub(super) fn pop(&mut self, flags: &mut [CellFlags]) -> Option<CellIdx> {
         self.queue
             .pop_front()
-            .inspect(|&i| cells[i].flags().clear(self.mask))
+            .inspect(|&i| flags[i].clear(self.mask))
     }
 
     /// Removes `idx` from the queue if present and clears its flag mask.
-    pub(super) fn remove(&mut self, cells: &mut [Cell], idx: CellIdx) {
-        if cells[idx].flags().is_marked(self.mask) {
-            cells[idx].flags().clear(self.mask);
+    pub(super) fn remove(&mut self, flags: &mut [CellFlags], idx: CellIdx) {
+        if flags[idx].is_marked(self.mask) {
+            flags[idx].clear(self.mask);
             if let Some(i) = self.queue.iter().position(|&i| i == idx) {
                 self.queue.remove(i);
             }
@@ -1644,40 +1655,40 @@ mod tests {
 
     #[test]
     fn test_guarded_queue_push_pop_remove_dedup() {
-        let mut cells = Cell::grid(4, 1);
+        let mut flags = vec![CellFlags::new(); 4].into_boxed_slice();
         let mut queue = GuardedQueue::with_capacity(4, FlagMask::PENDING_PARTITION);
         assert!(queue.is_empty());
 
         // First push succeeds
-        queue.push(&mut cells, CellIdx(1));
+        queue.push(&mut flags, CellIdx(1));
         assert!(!queue.is_empty());
-        assert!(cells[1].flags().is_marked(FlagMask::PENDING_PARTITION));
+        assert!(flags[1].is_marked(FlagMask::PENDING_PARTITION));
 
         // Duplicate push of the same index is ignored
-        queue.push(&mut cells, CellIdx(1));
+        queue.push(&mut flags, CellIdx(1));
         let items: Vec<_> = queue.iter().collect();
         assert_eq!(items, vec![CellIdx(1)]);
 
         // Push another index
-        queue.push(&mut cells, CellIdx(3));
+        queue.push(&mut flags, CellIdx(3));
         assert_eq!(
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
 
         // Remove CellIdx(1)
-        queue.remove(&mut cells, CellIdx(1));
-        assert!(!cells[1].flags().is_marked(FlagMask::PENDING_PARTITION));
+        queue.remove(&mut flags, CellIdx(1));
+        assert!(!flags[1].is_marked(FlagMask::PENDING_PARTITION));
         assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
 
         // Removing non-existent or already removed element is safe no-op
-        queue.remove(&mut cells, CellIdx(1));
-        queue.remove(&mut cells, CellIdx(0));
+        queue.remove(&mut flags, CellIdx(1));
+        queue.remove(&mut flags, CellIdx(0));
 
         // Pop remaining item
-        assert_eq!(queue.pop(&mut cells), Some(CellIdx(3)));
-        assert!(!cells[3].flags().is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.pop(&mut flags), Some(CellIdx(3)));
+        assert!(!flags[3].is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
-        assert_eq!(queue.pop(&mut cells), None);
+        assert_eq!(queue.pop(&mut flags), None);
     }
 }
