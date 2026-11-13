@@ -220,24 +220,40 @@ where
 
 impl<'a> Display for DetailMineField<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let spacer = if f.alternate() { "\n " } else { " " };
+        let spacer = if f.alternate() { "\n  " } else { " " };
+        let cell_spacer = if f.alternate() { "\n    " } else { " " };
         write!(f, "MineField ({}x{}", self.0.width, self.0.height)?;
         if let Some(mine_count) = self.0.mine_count {
             write!(f, ", {mine_count}*")?;
         }
         write!(f, ") {{")?;
-        for (idx, (&cell, &pid)) in self
-            .0
-            .cells
-            .iter()
-            .zip(self.0.partition_ids.iter())
-            .enumerate()
-        {
+        for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
             // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(f, "{spacer}{idx} (pid: {pid}: ")?;
-            cell.fmt(f)?;
-            write!(f, ",{spacer}")?;
+            write!(
+                f,
+                "{spacer}{idx}: Cell {{{cell_spacer}value: {},",
+                cell.value
+            )?;
+            write!(f, "{cell_spacer}neighbors: {},", neighbors.neighbors)?;
+            write!(
+                f,
+                "{cell_spacer}alt_neighbors: {},",
+                neighbors.alt_neighbors
+            )?;
+            write!(
+                f,
+                "{cell_spacer}mine_neighbors: {},",
+                neighbors.mine_neighbors
+            )?;
+            write!(
+                f,
+                "{cell_spacer}safe_neighbors: {},",
+                neighbors.safe_neighbors
+            )?;
+            write!(f, "{cell_spacer}flags: {flags},")?;
+            write!(f, "{cell_spacer}pid: {pid},")?;
         }
+        write!(f, "{spacer}}},")?;
         write!(
             f,
             "{spacer}next partition id: {},",

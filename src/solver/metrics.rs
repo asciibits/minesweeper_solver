@@ -191,7 +191,7 @@ impl Display for Metrics {
     }
 }
 
-#[cfg(any(test))]
+#[cfg(test)]
 #[derive(Debug, Default, Copy, Clone)]
 pub(super) struct AggregatedMetrics {
     solve_passes: AggregatedMetric,
@@ -206,7 +206,7 @@ pub(super) struct AggregatedMetrics {
     total_duration: AggregatedMetric,
 }
 
-#[cfg(any(test))]
+#[cfg(test)]
 impl AggregatedMetrics {
     pub(super) fn apply_metrics(&mut self, metrics: &Metrics) {
         self.solve_passes.apply(metrics.solve_passes as f64);
@@ -224,11 +224,11 @@ impl AggregatedMetrics {
         self.partition_duration
             .apply(metrics.partition_duration.total());
         self.total_duration
-            .apply(metrics.partition_duration.total());
+            .apply(metrics.total_time_duration.total());
     }
 }
 
-#[cfg(any(test))]
+#[cfg(test)]
 impl Display for AggregatedMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         pub(super) fn write_usize_field(

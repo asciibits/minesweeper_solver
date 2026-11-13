@@ -449,10 +449,11 @@ impl FieldBuilder {
             }
         }
         while let Some(idx) = zero_queue.pop() {
-            let cell = self.field.cells[idx];
-            for Neighbor { idx: neighbor, .. } in
-                Cell::neighbor_iter(idx, self.field.width, cell.neighbors())
-            {
+            for Neighbor { idx: neighbor, .. } in Cell::neighbor_iter(
+                idx,
+                self.field.width,
+                self.field.cell_neighbors[idx].neighbors,
+            ) {
                 if all_ids.insert(neighbor) && self.mines[neighbor].count() == 0 {
                     zero_queue.push(neighbor);
                 }
@@ -514,7 +515,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
     #[cfg(test)]
-    use crate::solver::metrics::AggregatedMetrics;
+    use crate::solver::{cell::cells_equal, metrics::AggregatedMetrics};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -844,21 +845,20 @@ mod tests {
         validation_metrics.apply_metrics(&fresh_field.metrics);
 
         // validate cells are identical, aside from a partition_id remapping
-        for ((idx, (inc_cell, inc_flags)), (fresh_cell, fresh_flags)) in inc_field
-            .cells
-            .iter()
-            .copied()
-            .zip(inc_field.cell_flags.iter().copied())
+        for (
+            idx,
+            (
+                (inc_cell, inc_flags, inc_neighbors, _inc_pid),
+                (fresh_cell, fresh_flags, fresh_neighbors, _fresh_pid),
+            ),
+        ) in inc_field
+            .cell_data_iter()
+            .zip(inc_field.cell_data_iter())
             .enumerate()
-            .zip(
-                fresh_field
-                    .cells
-                    .iter()
-                    .copied()
-                    .zip(fresh_field.cell_flags.iter().copied()),
-            )
         {
-            if inc_cell != fresh_cell || inc_flags != fresh_flags {
+            if !cells_equal(inc_cell, inc_neighbors, fresh_cell, fresh_neighbors)
+                || inc_flags != fresh_flags
+            {
                 #[cfg(debug_assertions)]
                 {
                     eprintln!("Incremental:");
@@ -866,7 +866,9 @@ mod tests {
                     eprintln!("Fresh:");
                     ColoredMineField::eprintln(&fresh_field);
                 }
-                panic!("Cells [{idx}] don't match: {inc_cell}, {fresh_cell}");
+                panic!(
+                    "Cells [{idx}] don't match: {inc_cell}|{inc_neighbors}, {fresh_cell}|{fresh_neighbors}"
+                );
             }
         }
     }
