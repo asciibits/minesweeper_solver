@@ -231,26 +231,10 @@ impl<'a> Display for DetailMineField<'a> {
             let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
             write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
-            write!(
-                f,
-                "{cell_spacer}all_neighbors: {},",
-                neighbors.all_neighbors()
-            )?;
-            write!(
-                f,
-                "{cell_spacer}open_neighbors: {},",
-                neighbors.open_neighbors()
-            )?;
-            write!(
-                f,
-                "{cell_spacer}mine_neighbors: {},",
-                neighbors.mine_neighbors()
-            )?;
-            write!(
-                f,
-                "{cell_spacer}safe_neighbors: {},",
-                neighbors.safe_neighbors()
-            )?;
+            write!(f, "{cell_spacer}unknown: {},", neighbors.unknown())?;
+            write!(f, "{cell_spacer}opened: {},", neighbors.opened())?;
+            write!(f, "{cell_spacer}mine: {},", neighbors.mine())?;
+            write!(f, "{cell_spacer}inferred: {},", neighbors.inferred())?;
             write!(f, "{cell_spacer}flags: {flags},")?;
             write!(f, "{cell_spacer}pid: {pid},")?;
         }

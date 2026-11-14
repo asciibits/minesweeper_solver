@@ -446,10 +446,9 @@ impl FieldBuilder {
             }
         }
         while let Some(idx) = zero_queue.pop() {
-            for Neighbor { idx: n_idx, .. } in idx.neighbor_iter(
-                self.field.width,
-                self.field.cell_neighbors[idx].all_neighbors(),
-            ) {
+            for Neighbor { idx: n_idx, .. } in
+                idx.neighbor_iter(self.field.width, self.field.cell_neighbors[idx].all())
+            {
                 if all_ids.insert(n_idx) && self.mines[n_idx].count() == 0 {
                     zero_queue.push(n_idx);
                 }
@@ -687,7 +686,7 @@ mod tests {
         for Neighbor { idx, .. } in
             zero_cell_idx.neighbor_iter(6, DirectionSet::all_neighbors(zero_pt, 6, 5))
         {
-            assert!(matches!(field.cells[idx].cell_type(), CellType::Open));
+            assert!(matches!(field.cells[idx].cell_type(), CellType::Opened));
         }
     }
 
@@ -967,7 +966,7 @@ mod tests {
                 }
             } else {
                 for &i in inferred.iter() {
-                    assert_eq!(builder.field.cells[i], CellValue::CLEAR);
+                    assert_eq!(builder.field.cells[i], CellValue::CLEARED);
                 }
                 builder.expand_cells(inferred);
             }
