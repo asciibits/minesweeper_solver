@@ -253,7 +253,7 @@ impl FieldBuilder {
         for IndexedCell { idx, value } in cell_iter {
             if value.is_mine() {
                 field[idx] = MineOrCount::MINE;
-            } else if value.has_count() {
+            } else if value.is_open() {
                 user_checks.push((idx, value.mine_count()));
             }
         }
@@ -687,7 +687,7 @@ mod tests {
         for Neighbor { idx, .. } in
             zero_cell_idx.neighbor_iter(6, DirectionSet::all_neighbors(zero_pt, 6, 5))
         {
-            assert!(matches!(field.cells[idx].cell_type(), CellType::Count));
+            assert!(matches!(field.cells[idx].cell_type(), CellType::Open));
         }
     }
 
@@ -967,7 +967,7 @@ mod tests {
                 }
             } else {
                 for &i in inferred.iter() {
-                    assert_eq!(builder.field.cells[i], CellValue::INFERRED_SAFE);
+                    assert_eq!(builder.field.cells[i], CellValue::CLEAR);
                 }
                 builder.expand_cells(inferred);
             }

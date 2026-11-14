@@ -208,7 +208,7 @@ pub(super) struct CellValue(u8);
 
 impl CellValue {
     /// The solver deduced the cell is safe.
-    pub(super) const INFERRED_SAFE: Self = Self(0b1001);
+    pub(super) const CLEAR: Self = Self(0b1001);
     /// Nothing is known about the cell.
     pub(super) const UNKNOWN: Self = Self(0b1010);
     /// Cell is an interior wall.
@@ -216,7 +216,7 @@ impl CellValue {
     /// The cell is provided as a mine.
     pub(super) const MINE: Self = Self(0b1110);
     /// The solver deduced the cell is a mine.
-    pub(super) const INFERRED_MINE: Self = Self(0b1111);
+    pub(super) const FLAGGED: Self = Self(0b1111);
 
     /// Creates the value of a revealed, user-supplied count cell.
     pub(super) fn for_mine_count(mine_count: u8) -> CellValue {
@@ -225,13 +225,13 @@ impl CellValue {
     }
 
     #[inline]
-    pub(super) fn is_safe(&self) -> bool {
-        self.0 <= Self::INFERRED_SAFE.0
+    pub(super) fn is_clear(&self) -> bool {
+        self.0 <= Self::CLEAR.0
     }
 
     #[inline]
-    pub(super) fn has_count(&self) -> bool {
-        self.0 < Self::INFERRED_SAFE.0
+    pub(super) fn is_open(&self) -> bool {
+        self.0 < Self::CLEAR.0
     }
 
     #[inline]
@@ -241,7 +241,7 @@ impl CellValue {
 
     #[inline]
     pub(super) fn is_inferred(&self) -> bool {
-        self.0 & Self::INFERRED_SAFE.0 == Self::INFERRED_SAFE.0
+        self.0 & Self::CLEAR.0 == Self::CLEAR.0
     }
 
     #[inline]
@@ -258,7 +258,7 @@ impl CellValue {
     /// For all other types, returns 0.
     #[inline]
     pub(super) fn mine_count(&self) -> u8 {
-        debug_assert!(self.has_count());
+        debug_assert!(self.is_open());
         self.0
     }
 
@@ -267,25 +267,25 @@ impl CellValue {
     pub(super) fn safe_mine_count(&self) -> Option<u8> {
         // NOTE: this is not the same as `.is_safe()`. This will not return
         // `true` for inferred values
-        self.has_count().then_some(self.0)
+        self.is_open().then_some(self.0)
     }
 
     /// TODO: Document
     pub(super) fn cell_type(&self) -> CellType {
         match self.0.saturating_sub(8) {
-            0b000 => CellType::Count,
-            0b001 => CellType::InferredSafe,
+            0b000 => CellType::Open,
+            0b001 => CellType::Clear,
             0b010 => CellType::Unknown,
             0b100 => CellType::Wall,
             0b110 => CellType::Mine,
-            0b111 => CellType::InferredMine,
+            0b111 => CellType::Flag,
             _ => unreachable!(),
         }
     }
 
     pub(super) fn remaining_mines(&self, neighbors: CellNeighbors) -> i8 {
         // only valid for count cells
-        debug_assert!(self.has_count());
+        debug_assert!(self.is_open());
         self.mine_count() as i8 - neighbors.mine_neighbors.len() as i8
     }
 
@@ -294,7 +294,7 @@ impl CellValue {
     /// mines than remaining spaces
     pub(super) fn is_invalid(&self, neighbors: CellNeighbors) -> bool {
         // only valid for count cells
-        debug_assert!(self.has_count());
+        debug_assert!(self.is_open());
         let mine_neighbors = neighbors.mine_neighbors.len() as i8;
         let unknown_neighbors = neighbors.alt_neighbors.len() as i8;
         self.safe_mine_count().is_some_and(|mine_count| {
@@ -307,15 +307,15 @@ impl CellValue {
     // either a Mine or Safe...
     pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
         // only valid for count cells
-        debug_assert!(self.has_count());
+        debug_assert!(self.is_open());
         let unknown_count = neighbors.alt_neighbors.len() as i8;
 
         self.safe_mine_count().and_then(|mine_count| {
             let remaining = mine_count as i8 - neighbors.mine_neighbors.len() as i8;
             if remaining <= 0 {
-                Some(CellValue::INFERRED_SAFE)
+                Some(CellValue::CLEAR)
             } else if remaining >= unknown_count {
-                Some(CellValue::INFERRED_MINE)
+                Some(CellValue::FLAGGED)
             } else {
                 None
             }
@@ -338,22 +338,22 @@ impl CellValue {
         let change_function = match prev_value.cell_type() {
             CellType::Unknown => match new_value.cell_type() {
                 CellType::Unknown => Self::no_change,
-                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine,
-                CellType::InferredSafe => Self::unknown_to_inferred_safe,
-                CellType::Count => Self::unknown_to_count,
+                CellType::Flag | CellType::Mine => Self::unknown_to_mine,
+                CellType::Clear => Self::unknown_to_inferred_safe,
+                CellType::Open => Self::unknown_to_count,
                 CellType::Wall => Self::inference_breaking_change,
             },
-            CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
-                CellType::InferredMine | CellType::Mine => Self::to_mine,
+            CellType::Flag | CellType::Mine => match new_value.cell_type() {
+                CellType::Flag | CellType::Mine => Self::to_mine,
                 _ => Self::inference_breaking_change,
             },
-            CellType::InferredSafe => match new_value.cell_type() {
-                CellType::InferredSafe => Self::no_change,
-                CellType::Count => Self::inferred_safe_to_count,
+            CellType::Clear => match new_value.cell_type() {
+                CellType::Clear => Self::no_change,
+                CellType::Open => Self::inferred_safe_to_count,
                 _ => Self::inference_breaking_change,
             },
-            CellType::Count => match new_value.cell_type() {
-                CellType::Count => {
+            CellType::Open => match new_value.cell_type() {
+                CellType::Open => {
                     if prev_value == new_value {
                         Self::no_change
                     } else {
@@ -609,11 +609,11 @@ impl CellValue {
             let n_value = cells[neighbor.idx];
             if n_value.is_mine() {
                 mines |= dir;
-            } else if n_value.has_count() {
+            } else if n_value.is_open() {
                 count |= dir;
                 desolved_queue.push(flags, neighbor.idx);
                 solved_queue.push(flags, neighbor.idx);
-            } else if n_value.is_safe() {
+            } else if n_value.is_clear() {
                 safe |= dir;
             } else if n_value.is_unknown() {
                 unknown |= dir;
@@ -622,22 +622,22 @@ impl CellValue {
             }
             match prev_value.cell_type() {
                 CellType::Unknown => {
-                    if n_value.is_safe() {
+                    if n_value.is_clear() {
                         cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
                     }
                 }
-                CellType::Mine | CellType::InferredMine => {
+                CellType::Mine | CellType::Flag => {
                     if !n_value.is_mine() {
                         cell_neighbors[neighbor.idx].mine_neighbors -= neighbor.from;
                     }
                 }
-                CellType::Count => {
+                CellType::Open => {
                     if n_value.is_unknown() {
                         cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
                     }
                     desolved_queue.push(flags, neighbor.idx);
                 }
-                CellType::InferredSafe => {
+                CellType::Clear => {
                     if n_value.is_unknown() {
                         cell_neighbors[neighbor.idx].safe_neighbors -= neighbor.from;
                     }
@@ -648,21 +648,21 @@ impl CellValue {
             }
             match new_value.cell_type() {
                 CellType::Unknown => {
-                    if n_value.is_safe() {
+                    if n_value.is_clear() {
                         cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
                     }
                 }
-                CellType::Mine | CellType::InferredMine => {
+                CellType::Mine | CellType::Flag => {
                     if !n_value.is_mine() {
                         cell_neighbors[neighbor.idx].mine_neighbors |= neighbor.from;
                     }
                 }
-                CellType::Count => {
+                CellType::Open => {
                     if n_value.is_unknown() {
                         cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
                     }
                 }
-                CellType::InferredSafe => {
+                CellType::Clear => {
                     if n_value.is_unknown() {
                         cell_neighbors[neighbor.idx].safe_neighbors |= neighbor.from;
                     }
@@ -679,16 +679,16 @@ impl CellValue {
                 cell_neighbors[idx].safe_neighbors = safe;
                 cell_neighbors[idx].mine_neighbors = mines;
             }
-            CellType::Count | CellType::InferredSafe => {
+            CellType::Open | CellType::Clear => {
                 cell_neighbors[idx].alt_neighbors = unknown;
                 cell_neighbors[idx].mine_neighbors = mines;
             }
             _ => (),
         }
-        if prev_value.has_count() {
+        if prev_value.is_open() {
             desolved_queue.push(flags, idx);
         }
-        if new_value.has_count() {
+        if new_value.is_open() {
             solved_queue.push(flags, idx);
         }
 
@@ -717,11 +717,11 @@ impl From<UserValueWithInference> for CellValue {
             UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
-            } => CellValue::INFERRED_MINE,
+            } => CellValue::FLAGGED,
             UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Safe,
-            } => CellValue::INFERRED_SAFE,
+            } => CellValue::CLEAR,
             UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::None,
@@ -746,11 +746,11 @@ impl From<CellValue> for UserValueWithInference {
                 value: UserCellValue::Wall,
                 inferred: InferredValue::None,
             },
-            CellValue::INFERRED_MINE => UserValueWithInference {
+            CellValue::FLAGGED => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
             },
-            CellValue::INFERRED_SAFE => UserValueWithInference {
+            CellValue::CLEAR => UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Safe,
             },
@@ -788,8 +788,8 @@ impl Display for CellValue {
             Self::UNKNOWN => write!(f, "??"),
             Self::MINE => write!(f, "**"),
             Self::WALL => write!(f, "@@"),
-            Self::INFERRED_MINE => write!(f, "!*"),
-            Self::INFERRED_SAFE => write!(f, "!#"),
+            Self::FLAGGED => write!(f, "!*"),
+            Self::CLEAR => write!(f, "!#"),
             CellValue(c) => write!(f, "{}#", c & 0xf),
         }
     }
@@ -804,20 +804,20 @@ pub(super) enum CellType {
     /// An interior wall
     Wall = 0b000,
     /// User-provided safe cell with an adjacent mine count (`has_count() == true`).
-    Count = Self::COUNT_MASK,
+    Open = Self::OPEN_MASK,
     /// Cell deduced by the solver to be safe.
-    InferredSafe = Self::INFERRED_MASK,
+    Clear = Self::INFERRED_MASK,
     /// Cell whose state is unknown.
     #[default]
     Unknown = Self::UNKNOWN_MASK,
     /// Cell deduced by the solver to be a mine.
-    InferredMine = Self::MINE_MASK | Self::INFERRED_MASK,
+    Flag = Self::MINE_MASK | Self::INFERRED_MASK,
     /// User-provided mine.
     Mine = Self::MINE_MASK,
 }
 
 impl CellType {
-    const COUNT_MASK: u8 = 0b1000;
+    const OPEN_MASK: u8 = 0b1000;
     const UNKNOWN_MASK: u8 = 0b0100;
     const MINE_MASK: u8 = 0b0010;
     const INFERRED_MASK: u8 = 0b0001;
@@ -1308,7 +1308,7 @@ mod tests {
         assert_eq!(CellValue::for_mine_count(8).safe_mine_count(), Some(8));
         // `Safe(0)` must be distinguishable from `Unknown`
         assert_ne!(CellValue::for_mine_count(0), CellValue::UNKNOWN);
-        assert!(CellValue::for_mine_count(0).is_safe());
+        assert!(CellValue::for_mine_count(0).is_clear());
         assert!(!CellValue::for_mine_count(0).is_unknown());
         #[cfg(debug_assertions)]
         {
@@ -1319,19 +1319,19 @@ mod tests {
     #[test]
     fn test_cell_value_predicates() {
         assert!(CellValue::UNKNOWN.is_unknown());
-        assert!(!CellValue::UNKNOWN.is_safe() && !CellValue::UNKNOWN.is_mine());
+        assert!(!CellValue::UNKNOWN.is_clear() && !CellValue::UNKNOWN.is_mine());
 
         assert!(CellValue::MINE.is_mine());
         assert!(!CellValue::MINE.is_inferred());
         assert_eq!(CellValue::MINE.safe_mine_count(), None);
 
-        assert!(CellValue::INFERRED_MINE.is_mine() && CellValue::INFERRED_MINE.is_inferred());
-        assert!(CellValue::INFERRED_SAFE.is_safe() && CellValue::INFERRED_SAFE.is_inferred());
+        assert!(CellValue::FLAGGED.is_mine() && CellValue::FLAGGED.is_inferred());
+        assert!(CellValue::CLEAR.is_clear() && CellValue::CLEAR.is_inferred());
         // inferred-safe cells carry no count, so they must not look like a Count cell
-        assert_eq!(CellValue::INFERRED_SAFE.safe_mine_count(), None);
+        assert_eq!(CellValue::CLEAR.safe_mine_count(), None);
 
         let three = CellValue::for_mine_count(3);
-        assert!(three.is_safe() && !three.is_inferred() && !three.is_mine());
+        assert!(three.is_clear() && !three.is_inferred() && !three.is_mine());
         assert_eq!(three.safe_mine_count(), Some(3));
         assert_eq!(three.mine_count(), 3);
     }
@@ -1352,15 +1352,15 @@ mod tests {
             assert_eq!(CellValue::from(with_inference), internal);
         }
 
-        let inferred_mine: UserValueWithInference = CellValue::INFERRED_MINE.into();
+        let inferred_mine: UserValueWithInference = CellValue::FLAGGED.into();
         assert_eq!(inferred_mine.value, UserCellValue::Unknown);
         assert_eq!(inferred_mine.inferred, InferredValue::Mine);
-        assert_eq!(CellValue::from(inferred_mine), CellValue::INFERRED_MINE);
+        assert_eq!(CellValue::from(inferred_mine), CellValue::FLAGGED);
 
-        let inferred_safe: UserValueWithInference = CellValue::INFERRED_SAFE.into();
+        let inferred_safe: UserValueWithInference = CellValue::CLEAR.into();
         assert_eq!(inferred_safe.value, UserCellValue::Unknown);
         assert_eq!(inferred_safe.inferred, InferredValue::Safe);
-        assert_eq!(CellValue::from(inferred_safe), CellValue::INFERRED_SAFE);
+        assert_eq!(CellValue::from(inferred_safe), CellValue::CLEAR);
     }
 
     #[test]
@@ -1501,13 +1501,13 @@ mod tests {
     fn test_cell_type_mapping() {
         assert_eq!(CellValue::UNKNOWN.cell_type(), CellType::Unknown);
         assert_eq!(CellValue::MINE.cell_type(), CellType::Mine);
-        assert_eq!(CellValue::INFERRED_MINE.cell_type(), CellType::InferredMine);
-        assert_eq!(CellValue::INFERRED_SAFE.cell_type(), CellType::InferredSafe);
+        assert_eq!(CellValue::FLAGGED.cell_type(), CellType::Flag);
+        assert_eq!(CellValue::CLEAR.cell_type(), CellType::Clear);
 
         for count in 0..=8 {
             assert_eq!(
                 CellValue::for_mine_count(count).cell_type(),
-                CellType::Count,
+                CellType::Open,
                 "Count {count} must map to CellType::Count"
             );
         }
@@ -1517,28 +1517,28 @@ mod tests {
     fn test_cell_value_4bit_encoding() {
         for count in 0..=8 {
             let val = CellValue::for_mine_count(count);
-            assert!(val.has_count());
-            assert!(val.is_safe());
+            assert!(val.is_open());
+            assert!(val.is_clear());
             assert!(!val.is_mine());
             assert!(!val.is_inferred());
             assert!(!val.is_unknown());
-            assert_eq!(val.cell_type(), CellType::Count);
+            assert_eq!(val.cell_type(), CellType::Open);
             assert_eq!(val.safe_mine_count(), Some(count));
             assert_eq!(val.mine_count(), count);
         }
 
-        let inf_safe = CellValue::INFERRED_SAFE;
-        assert!(!inf_safe.has_count());
-        assert!(inf_safe.is_safe());
+        let inf_safe = CellValue::CLEAR;
+        assert!(!inf_safe.is_open());
+        assert!(inf_safe.is_clear());
         assert!(!inf_safe.is_mine());
         assert!(inf_safe.is_inferred());
         assert!(!inf_safe.is_unknown());
-        assert_eq!(inf_safe.cell_type(), CellType::InferredSafe);
+        assert_eq!(inf_safe.cell_type(), CellType::Clear);
         assert_eq!(inf_safe.safe_mine_count(), None);
 
         let unk = CellValue::UNKNOWN;
-        assert!(!unk.has_count());
-        assert!(!unk.is_safe());
+        assert!(!unk.is_open());
+        assert!(!unk.is_clear());
         assert!(!unk.is_mine());
         assert!(!unk.is_inferred());
         assert!(unk.is_unknown());
@@ -1546,21 +1546,21 @@ mod tests {
         assert_eq!(unk.safe_mine_count(), None);
 
         let mine = CellValue::MINE;
-        assert!(!mine.has_count());
-        assert!(!mine.is_safe());
+        assert!(!mine.is_open());
+        assert!(!mine.is_clear());
         assert!(mine.is_mine());
         assert!(!mine.is_inferred());
         assert!(!mine.is_unknown());
         assert_eq!(mine.cell_type(), CellType::Mine);
         assert_eq!(mine.safe_mine_count(), None);
 
-        let inf_mine = CellValue::INFERRED_MINE;
-        assert!(!inf_mine.has_count());
-        assert!(!inf_mine.is_safe());
+        let inf_mine = CellValue::FLAGGED;
+        assert!(!inf_mine.is_open());
+        assert!(!inf_mine.is_clear());
         assert!(inf_mine.is_mine());
         assert!(inf_mine.is_inferred());
         assert!(!inf_mine.is_unknown());
-        assert_eq!(inf_mine.cell_type(), CellType::InferredMine);
+        assert_eq!(inf_mine.cell_type(), CellType::Flag);
         assert_eq!(inf_mine.safe_mine_count(), None);
     }
 
