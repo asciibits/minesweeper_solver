@@ -903,13 +903,13 @@ impl CellNeighbors {
         grid.into_boxed_slice()
     }
 
-    pub(super) fn alt_neighbors(&self) -> DirectionSet {
-        self.alt_neighbors
-    }
-
     pub(super) fn unknown_neighbors(&self) -> DirectionSet {
         // only valid for `assert!(cell.is_open() || cell.is_clear())` cells
         self.alt_neighbors
+    }
+    #[cfg(test)]
+    pub(super) fn set_unknown_neighbors(&mut self, unknown: DirectionSet) {
+        self.alt_neighbors = unknown;
     }
 
     pub(super) fn open_neighbors(&self) -> DirectionSet {
@@ -917,14 +917,14 @@ impl CellNeighbors {
         self.alt_neighbors
     }
 
+    #[cfg(test)]
+    pub(super) fn set_open_neighbors(&mut self, open: DirectionSet) {
+        self.alt_neighbors = open;
+    }
+
     pub(super) fn inferred_neighbors(&self) -> DirectionSet {
         // only valid for `assert!(cell.is_unknown())` cells
         self.neighbors - self.alt_neighbors
-    }
-
-    #[cfg(test)]
-    pub(super) fn alt_neighbors_mut(&mut self) -> &mut DirectionSet {
-        &mut self.alt_neighbors
     }
 
     #[cfg(test)]

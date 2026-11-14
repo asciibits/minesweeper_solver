@@ -238,8 +238,8 @@ impl<'a> Display for DetailMineField<'a> {
             )?;
             write!(
                 f,
-                "{cell_spacer}alt_neighbors: {},",
-                neighbors.alt_neighbors()
+                "{cell_spacer}open_neighbors: {},",
+                neighbors.open_neighbors()
             )?;
             write!(
                 f,

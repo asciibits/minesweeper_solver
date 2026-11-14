@@ -508,7 +508,7 @@ impl Display for FieldBuilder {
 mod tests {
     use super::*;
     use crate::solver::cell::CellType;
-#[cfg(debug_assertions)]
+    #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
     #[cfg(test)]
     use crate::solver::{cell::cells_equal, metrics::AggregatedMetrics};
