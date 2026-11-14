@@ -446,11 +446,12 @@ impl FieldBuilder {
             }
         }
         while let Some(idx) = zero_queue.pop() {
-            for Neighbor { idx: neighbor, .. } in
-                idx.neighbor_iter(self.field.width, self.field.cell_neighbors[idx].neighbors)
-            {
-                if all_ids.insert(neighbor) && self.mines[neighbor].count() == 0 {
-                    zero_queue.push(neighbor);
+            for Neighbor { idx: n_idx, .. } in idx.neighbor_iter(
+                self.field.width,
+                self.field.cell_neighbors[idx].all_neighbors(),
+            ) {
+                if all_ids.insert(n_idx) && self.mines[n_idx].count() == 0 {
+                    zero_queue.push(n_idx);
                 }
             }
         }
@@ -506,8 +507,8 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::CellType;
-    #[cfg(debug_assertions)]
+    use crate::solver::cell::CellType;
+#[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
     #[cfg(test)]
     use crate::solver::{cell::cells_equal, metrics::AggregatedMetrics};

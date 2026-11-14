@@ -228,23 +228,28 @@ impl<'a> Display for DetailMineField<'a> {
         }
         write!(f, ") {{")?;
         for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
+            let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
             write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
-            write!(f, "{cell_spacer}neighbors: {},", neighbors.neighbors)?;
+            write!(
+                f,
+                "{cell_spacer}all_neighbors: {},",
+                neighbors.all_neighbors()
+            )?;
             write!(
                 f,
                 "{cell_spacer}alt_neighbors: {},",
-                neighbors.alt_neighbors
+                neighbors.alt_neighbors()
             )?;
             write!(
                 f,
                 "{cell_spacer}mine_neighbors: {},",
-                neighbors.mine_neighbors
+                neighbors.mine_neighbors()
             )?;
             write!(
                 f,
                 "{cell_spacer}safe_neighbors: {},",
-                neighbors.safe_neighbors
+                neighbors.safe_neighbors()
             )?;
             write!(f, "{cell_spacer}flags: {flags},")?;
             write!(f, "{cell_spacer}pid: {pid},")?;

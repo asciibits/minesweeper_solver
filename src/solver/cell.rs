@@ -240,7 +240,6 @@ impl CellValue {
     }
 
     #[inline]
-    #[cfg(test)]
     pub(super) fn is_inferred(&self) -> bool {
         self.0 & Self::INFERRED_SAFE.0 == Self::INFERRED_SAFE.0
     }
@@ -358,7 +357,6 @@ impl CellValue {
                     if prev_value == new_value {
                         Self::no_change
                     } else {
-                        // count -> count (diff counts) - it could be de-solved, or solved
                         Self::count_to_count
                     }
                 }
@@ -420,6 +418,7 @@ impl CellValue {
         new_value: CellValue,
         _width: u32,
     ) -> ChangeStatus {
+        // count -> count (diff counts) - it could be de-solved, or solved
         cells[idx] = new_value;
         solved_queue.push(flags, idx);
         desolved_queue.push(flags, idx);
@@ -828,20 +827,20 @@ impl CellType {
 pub(super) struct CellNeighbors {
     /// All neighbors to this cell. For inner cells this is DirectionSet::ALL, for border cells it
     /// is the set of valid neighbors.
-    pub(super) neighbors: DirectionSet,
+    neighbors: DirectionSet,
 
     /// For [`CellType::Unknown`] cells, this points to all [`CellType::Count`] neighbors.
     /// Conversely, for [`CellType::Count`] and [`CellType::InferredSafe`] cells, this points to
     /// neighbors of type [`CellType::Unknown`]. Unspecified for mine type cells.
-    pub(super) alt_neighbors: DirectionSet,
+    alt_neighbors: DirectionSet,
 
     /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. Maintained for all
     /// non-mine cells; unspecified for mine cells ([`CellType::Mine`] and [`CellType::InferredMine`]).
-    pub(super) mine_neighbors: DirectionSet,
+    mine_neighbors: DirectionSet,
 
     /// For [`CellType::Unknown`] cells, this points to all [`CellType::InferredSafe`] neighbors.
     /// For all other cell types, this is unspecified.
-    pub(super) safe_neighbors: DirectionSet,
+    safe_neighbors: DirectionSet,
 }
 
 impl CellNeighbors {
@@ -884,21 +883,37 @@ impl CellNeighbors {
         self.alt_neighbors
     }
 
+    pub(super) fn unknown_neighbors(&self) -> DirectionSet {
+        // only valid for `assert!(cell.is_safe())` cells
+        self.alt_neighbors
+    }
+
+    pub(super) fn count_neighbors(&self) -> DirectionSet {
+        // only valid for `assert!(cell.is_count())` cells
+        self.alt_neighbors
+    }
+
+    pub(super) fn inferred_neighbors(&self) -> DirectionSet {
+        // only valid for `assert!(cell.is_unknown())` cells
+        self.neighbors - self.alt_neighbors
+    }
+
+    #[cfg(test)]
+    pub(super) fn alt_neighbors_mut(&mut self) -> &mut DirectionSet {
+        &mut self.alt_neighbors
+    }
+
+    #[cfg(test)]
     pub(super) fn mine_neighbors(&self) -> DirectionSet {
         self.mine_neighbors
     }
 
-    pub(super) fn neighbors(
-        &self,
-        _idx: CellIdx,
-        _cells: &[CellValue],
-        _flags: &[CellFlags],
-    ) -> DirectionSet {
+    pub(super) fn all_neighbors(&self) -> DirectionSet {
         self.neighbors
     }
 
-    pub(super) fn safe_neighbors(&self, _idx: CellIdx, _cells: &[CellValue]) -> DirectionSet {
-        debug_assert!(_cells[_idx].is_unknown());
+    #[cfg(test)]
+    pub(super) fn safe_neighbors(&self) -> DirectionSet {
         self.safe_neighbors
     }
 
@@ -1104,16 +1119,6 @@ impl GuardedQueue {
         self.queue
             .pop_front()
             .inspect(|&i| flags[i].clear(self.mask))
-    }
-
-    /// Removes `idx` from the queue if present and clears its flag mask.
-    pub(super) fn remove(&mut self, flags: &mut [CellFlags], idx: CellIdx) {
-        if flags[idx].is_marked(self.mask) {
-            flags[idx].clear(self.mask);
-            if let Some(i) = self.queue.iter().position(|&i| i == idx) {
-                self.queue.remove(i);
-            }
-        }
     }
 
     #[cfg(test)]
@@ -1617,20 +1622,5 @@ mod tests {
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
-
-        // Remove CellIdx(1)
-        queue.remove(&mut flags, CellIdx(1));
-        assert!(!flags[1].is_marked(FlagMask::PENDING_PARTITION));
-        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
-
-        // Removing non-existent or already removed element is safe no-op
-        queue.remove(&mut flags, CellIdx(1));
-        queue.remove(&mut flags, CellIdx(0));
-
-        // Pop remaining item
-        assert_eq!(queue.pop(&mut flags), Some(CellIdx(3)));
-        assert!(!flags[3].is_marked(FlagMask::PENDING_PARTITION));
-        assert!(queue.is_empty());
-        assert_eq!(queue.pop(&mut flags), None);
     }
 }

@@ -12,7 +12,7 @@ use crate::solver::grid::DirectionSet;
 pub(super) struct Metrics {
     solve_passes: usize,
     max_partitions: usize,
-    max_partition_size: usize,
+    max_partition_size: u32,
     partitions_created: usize,
     neighbor_visits: usize,
     last_indexing_duration: Duration,
@@ -45,10 +45,10 @@ impl Metrics {
     }
 
     #[cfg(test)]
-    pub(super) fn max_partition_size(&self) -> usize {
+    pub(super) fn max_partition_size(&self) -> u32 {
         self.max_partition_size
     }
-    pub(super) fn set_max_partition_size(&mut self, maybe_max: usize) {
+    pub(super) fn set_max_partition_size(&mut self, maybe_max: u32) {
         self.max_partition_size = cmp::max(self.max_partition_size, maybe_max);
     }
 
