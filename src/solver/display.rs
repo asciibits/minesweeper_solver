@@ -67,7 +67,7 @@ fn print_row(field: &MineField, row: u32, f: &mut Formatter<'_>) -> fmt::Result 
         write!(f, "{}", "│ ".bold())?;
         let idx = CellIdx(col + row * field.width);
         let cell = field.cells[idx];
-        let user_value: UserValueWithInference = cell.value().into();
+        let user_value: UserValueWithInference = cell.into();
         let printable = match user_value {
             UserValueWithInference {
                 value: UserCellValue::Unknown,
@@ -229,11 +229,7 @@ impl<'a> Display for DetailMineField<'a> {
         write!(f, ") {{")?;
         for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
             // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(
-                f,
-                "{spacer}{idx}: Cell {{{cell_spacer}value: {},",
-                cell.value
-            )?;
+            write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
             write!(f, "{cell_spacer}neighbors: {},", neighbors.neighbors)?;
             write!(
                 f,

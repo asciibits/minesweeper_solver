@@ -23,7 +23,7 @@
 use crate::{
     MineField, Point,
     solver::{
-        Cell, CellIdx, CellValue, FastNumberHasherBuilder, IdxAndCell,
+        CellIdx, CellValue, FastNumberHasherBuilder, IndexedCell,
         cell::{UserCellValue, cell_idx, coordinates},
         grid::{DirectionSet, Neighbor},
     },
@@ -250,7 +250,7 @@ impl FieldBuilder {
         let (width, height, cell_iter) = MineField::cells_and_size_from_spec(mine_spec);
         let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
         let mut user_checks = Vec::new();
-        for IdxAndCell { idx, value } in cell_iter {
+        for IndexedCell { idx, value } in cell_iter {
             if value.is_mine() {
                 field[idx] = MineOrCount::MINE;
             } else if value.has_count() {
@@ -334,13 +334,10 @@ impl FieldBuilder {
             width,
             height,
             mine_count,
-            Cell::neighbor_iter(
-                cell_idx(zero_cell, width),
-                width,
-                DirectionSet::all_neighbors(zero_cell, width, height),
-            )
-            .map(|n| n.idx)
-            .chain([cell_idx(zero_cell, width)]),
+            cell_idx(zero_cell, width)
+                .neighbor_iter(width, DirectionSet::all_neighbors(zero_cell, width, height))
+                .map(|n| n.idx)
+                .chain([cell_idx(zero_cell, width)]),
             shuffle,
         )
     }
@@ -393,7 +390,7 @@ impl FieldBuilder {
                 mine_count += 1;
                 let pt = coordinates(idx, width);
                 for Neighbor { idx: neighbor, .. } in
-                    Cell::neighbor_iter(idx, width, DirectionSet::all_neighbors(pt, width, height))
+                    idx.neighbor_iter(width, DirectionSet::all_neighbors(pt, width, height))
                 {
                     if !field[neighbor].is_mine() {
                         field[neighbor] = MineOrCount(field[neighbor].count() + 1);
@@ -422,7 +419,7 @@ impl FieldBuilder {
     pub(super) fn expose_cells(&mut self, points: impl IntoIterator<Item = CellIdx>) -> &mut Self {
         self.field
             .pending
-            .extend(points.into_iter().map(|idx| IdxAndCell {
+            .extend(points.into_iter().map(|idx| IndexedCell {
                 idx,
                 value: self.mines[idx].into(),
             }));
@@ -449,11 +446,9 @@ impl FieldBuilder {
             }
         }
         while let Some(idx) = zero_queue.pop() {
-            for Neighbor { idx: neighbor, .. } in Cell::neighbor_iter(
-                idx,
-                self.field.width,
-                self.field.cell_neighbors[idx].neighbors,
-            ) {
+            for Neighbor { idx: neighbor, .. } in
+                idx.neighbor_iter(self.field.width, self.field.cell_neighbors[idx].neighbors)
+            {
                 if all_ids.insert(neighbor) && self.mines[neighbor].count() == 0 {
                     zero_queue.push(neighbor);
                 }
@@ -480,7 +475,7 @@ impl FieldBuilder {
         let members: Vec<_> = members
             .iter()
             .filter(|&i| self.mines[i.0 as usize] != MineOrCount::MINE)
-            .filter_map(|&i| self.field.cells[i].value().is_unknown().then_some(i))
+            .filter_map(|&i| self.field.cells[i].is_unknown().then_some(i))
             .collect();
         (!members.is_empty()).then_some(members[idx_selector(members.len())])
     }
@@ -689,12 +684,9 @@ mod tests {
         let field = zero_builder.into_mine_field();
         assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));
         for Neighbor { idx, .. } in
-            Cell::neighbor_iter(zero_cell_idx, 6, DirectionSet::all_neighbors(zero_pt, 6, 5))
+            zero_cell_idx.neighbor_iter(6, DirectionSet::all_neighbors(zero_pt, 6, 5))
         {
-            assert!(matches!(
-                field.cells[idx].value().cell_type(),
-                CellType::Count
-            ));
+            assert!(matches!(field.cells[idx].cell_type(), CellType::Count));
         }
     }
 
@@ -954,7 +946,7 @@ mod tests {
                                 .join(",")
                         )
                     });
-                    if builder.field.cells[idx].value() != CellValue::UNKNOWN {
+                    if builder.field.cells[idx] != CellValue::UNKNOWN {
                         eprintln!(
                             "Members: [{:?}]",
                             members
@@ -966,15 +958,15 @@ mod tests {
                         eprintln!("Hinted member is not UNKNOWN: {idx}");
                         panic!();
                     }
-                    assert_eq!(builder.field.cells[idx].value(), CellValue::UNKNOWN);
+                    assert_eq!(builder.field.cells[idx], CellValue::UNKNOWN);
                     builder.expand_cells([idx]);
-                    assert_ne!(builder.field.cells[idx].value(), CellValue::UNKNOWN);
+                    assert_ne!(builder.field.cells[idx], CellValue::UNKNOWN);
                 } else {
                     break;
                 }
             } else {
                 for &i in inferred.iter() {
-                    assert_eq!(builder.field.cells[i].value(), CellValue::INFERRED_SAFE);
+                    assert_eq!(builder.field.cells[i], CellValue::INFERRED_SAFE);
                 }
                 builder.expand_cells(inferred);
             }

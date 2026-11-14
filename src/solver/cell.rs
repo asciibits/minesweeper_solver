@@ -111,476 +111,16 @@ pub struct UserCellWithInference {
     pub inferred: InferredValue,
 }
 
-/// Internal solver representation of a board cell, caching neighbor masks and partition membership.
-///
-/// A cell does not store its own index; callers identify a cell by its row-major position in the
-/// `cells` slice (see [`coordinates`] / [`cell_idx`]).
-// Note: Kept at 8 bytes so 8 cells fit in a single 64-byte cache line (enforced below).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Cell {
-    /// Inline the contents of Cell
-    pub(super) value: CellValue,
-}
+#[derive(Debug, Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct CellIdx(pub(super) u32);
 
-const _: () = assert!(std::mem::size_of::<Cell>() <= 8);
-
-impl Cell {
-    pub(super) fn grid(width: u32, height: u32) -> Box<[CellNeighbors]> {
-        let width = width as usize;
-        let height = height as usize;
-        let len = width * height;
-        let mut grid: Vec<CellNeighbors> = vec![CellNeighbors::all(); len];
-        // fix up the edge neighbors
-        for neighbors in grid.iter_mut().take(width) {
-            // top row
-            neighbors.neighbors -= DirectionSet::N_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().skip(len - width) {
-            // bottom row
-            neighbors.neighbors -= DirectionSet::S_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().step_by(width) {
-            // left col
-            neighbors.neighbors -= DirectionSet::W_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().skip(width - 1).step_by(width) {
-            // right col
-            neighbors.neighbors -= DirectionSet::E_DIRECTIONS;
-        }
-
-        grid.into_boxed_slice()
-    }
-
-    /// Returns the cell's current [`CellValue`].
-    #[inline]
-    pub(super) fn value(&self) -> CellValue {
-        self.value
-    }
-
-    /// Sets the cell's [`CellValue`].
-    #[inline]
-    pub(super) fn set_value(&mut self, value: CellValue) {
-        self.value = value;
-    }
-
-    pub(super) fn remaining_mines(&self, neighbors: CellNeighbors) -> i8 {
-        // only valid for count cells
-        debug_assert!(self.value.has_count());
-        self.value.mine_count() as i8 - neighbors.mine_neighbors.len() as i8
-    }
-
-    /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
-    /// more mines than it has unknown neighbors left to hold, or it has more
-    /// mines than remaining spaces
-    pub(super) fn is_invalid(&self, neighbors: CellNeighbors) -> bool {
-        // only valid for count cells
-        debug_assert!(self.value.has_count());
-        let mine_neighbors = neighbors.mine_neighbors.len() as i8;
-        let unknown_neighbors = neighbors.alt_neighbors.len() as i8;
-        self.value().safe_mine_count().is_some_and(|mine_count| {
-            let mines_remaining = mine_count as i8 - mine_neighbors;
-            mines_remaining < 0 || mines_remaining > unknown_neighbors
-        })
-    }
-
-    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
-    // either a Mine or Safe...
-    pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
-        // only valid for count cells
-        debug_assert!(self.value.has_count());
-        let unknown_count = neighbors.alt_neighbors.len() as i8;
-
-        self.value().safe_mine_count().and_then(|mine_count| {
-            let remaining = mine_count as i8 - neighbors.mine_neighbors.len() as i8;
-            if remaining <= 0 {
-                Some(CellValue::INFERRED_SAFE)
-            } else if remaining >= unknown_count {
-                Some(CellValue::INFERRED_MINE)
-            } else {
-                None
-            }
-        })
-    }
-
-    pub(super) fn apply_change(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let prev_value = cells[idx].value();
-
-        let change_function = match prev_value.cell_type() {
-            CellType::Unknown => match new_value.cell_type() {
-                CellType::Unknown => Self::no_change,
-                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine,
-                CellType::InferredSafe => Self::unknown_to_inferred_safe,
-                CellType::Count => Self::unknown_to_count,
-                CellType::Wall => Self::inference_breaking_change,
-            },
-            CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
-                CellType::InferredMine | CellType::Mine => Self::to_mine,
-                _ => Self::inference_breaking_change,
-            },
-            CellType::InferredSafe => match new_value.cell_type() {
-                CellType::InferredSafe => Self::no_change,
-                CellType::Count => Self::inferred_safe_to_count,
-                _ => Self::inference_breaking_change,
-            },
-            CellType::Count => match new_value.cell_type() {
-                CellType::Count => {
-                    if prev_value == new_value {
-                        Self::no_change
-                    } else {
-                        // count -> count (diff counts) - it could be de-solved, or solved
-                        Self::count_to_count
-                    }
-                }
-                _ => Self::inference_breaking_change,
-            },
-            CellType::Wall => Self::inference_breaking_change,
-        };
-
-        change_function(
-            cells,
-            flags,
-            neighbors,
-            solved_queue,
-            desolved_queue,
-            metrics,
-            idx,
-            new_value,
-            width,
-        )
-    }
-
-    fn no_change(
-        _cells: &mut [Cell],
-        _flags: &mut [CellFlags],
-        _neighbors: &mut [CellNeighbors],
-        _solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        _metrics: &mut Metrics,
-        _idx: CellIdx,
-        _new_value: CellValue,
-        _width: u32,
-    ) -> ChangeStatus {
-        ChangeStatus::NoChange
-    }
-
-    fn to_mine(
-        cells: &mut [Cell],
-        _flags: &mut [CellFlags],
-        _neighbors: &mut [CellNeighbors],
-        _solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        _metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        _width: u32,
-    ) -> ChangeStatus {
-        cells[idx].set_value(new_value);
-        ChangeStatus::NoChange
-    }
-
-    fn count_to_count(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        _neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        _metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        _width: u32,
-    ) -> ChangeStatus {
-        cells[idx].set_value(new_value);
-        solved_queue.push(flags, idx);
-        desolved_queue.push(flags, idx);
-        ChangeStatus::Breaking
-    }
-
-    fn unknown_to_mine(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        // alt (count):  +mine, -alt, +solve
-        // safe: +mine, -alt
-        // mine: n/a
-        // unknown: +mine
-        // self: n/a
-        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
-        metrics.inc_neighbor_visits(alt_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.mine_neighbors |= neighbor.from;
-            neighbors.alt_neighbors -= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
-        }
-        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
-        metrics.inc_neighbor_visits(safe_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.mine_neighbors |= neighbor.from;
-            neighbors.alt_neighbors -= neighbor.from;
-        }
-        let neighbors = cell_neighbors[idx];
-        let unknown_neighbors = neighbors.neighbors
-            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.mine_neighbors |= neighbor.from;
-        }
-        cells[idx].set_value(new_value);
-        ChangeStatus::NonBreaking
-    }
-
-    fn unknown_to_inferred_safe(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        // alt (count):  -alt, +solve
-        // safe: -alt
-        // mine: n/a
-        // unknown: +safe
-        // self: alt = unknown
-        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
-        metrics.inc_neighbor_visits(alt_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.alt_neighbors -= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
-        }
-        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
-        metrics.inc_neighbor_visits(safe_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.alt_neighbors -= neighbor.from;
-        }
-        let neighbors = cell_neighbors[idx];
-        let unknown_neighbors = neighbors.neighbors
-            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.safe_neighbors |= neighbor.from;
-        }
-        cell_neighbors[idx].alt_neighbors = unknown_neighbors;
-        cells[idx].set_value(new_value);
-
-        ChangeStatus::NonBreaking
-    }
-
-    fn unknown_to_count(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        // alt (count):  -alt, +solve
-        // safe: -alt
-        // mine: n/a
-        // unknown: +alt
-        // self: alt = unknown, +solve
-        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
-        metrics.inc_neighbor_visits(alt_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.alt_neighbors -= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
-        }
-        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
-        metrics.inc_neighbor_visits(safe_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, safe_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.alt_neighbors -= neighbor.from;
-        }
-        let neighbors = &cell_neighbors[idx];
-        let unknown_neighbors = neighbors.neighbors
-            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, unknown_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
-            neighbors.alt_neighbors |= neighbor.from;
-        }
-        cell_neighbors[idx].alt_neighbors = unknown_neighbors;
-        cells[idx].set_value(new_value);
-        solved_queue.push(flags, idx);
-
-        ChangeStatus::NonBreaking
-    }
-
-    fn inferred_safe_to_count(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        // alt (unknown):  -safe, +alt
-        // safe: n/a
-        // mine: n/a
-        // count: n/a
-        // self: +solve
-        let alt_neighbors = neighbors[idx].alt_neighbors;
-        metrics.inc_neighbor_visits(alt_neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, alt_neighbors) {
-            let neighbors = &mut neighbors[neighbor.idx];
-            neighbors.safe_neighbors -= neighbor.from;
-            neighbors.alt_neighbors |= neighbor.from;
-        }
-        cells[idx].set_value(new_value);
-        solved_queue.push(flags, idx);
-
-        ChangeStatus::NonBreaking
-    }
-
-    // The slower, not-unrolled general purpose function for the rest of the values. Always involves
-    // a loop over all neighbors with a decent amount of branching
-    fn inference_breaking_change(
-        cells: &mut [Cell],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let mut mines = DirectionSet::new();
-        let mut count = DirectionSet::new();
-        let mut safe = DirectionSet::new();
-        let mut unknown = DirectionSet::new();
-        let prev_value = cells[idx].value();
-        let neighbors = cell_neighbors[idx].neighbors;
-        metrics.inc_neighbor_visits(neighbors);
-        for neighbor in Self::neighbor_iter(idx, width, neighbors) {
-            let dir = neighbor.from.reverse();
-            let n_value = cells[neighbor.idx].value();
-            if n_value.is_mine() {
-                mines |= dir;
-            } else if n_value.has_count() {
-                count |= dir;
-                desolved_queue.push(flags, neighbor.idx);
-                solved_queue.push(flags, neighbor.idx);
-            } else if n_value.is_safe() {
-                safe |= dir;
-            } else if n_value.is_unknown() {
-                unknown |= dir;
-            } else {
-                debug_assert!(n_value.is_wall());
-            }
-            match prev_value.cell_type() {
-                CellType::Unknown => {
-                    if n_value.is_safe() {
-                        cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
-                    }
-                }
-                CellType::Mine | CellType::InferredMine => {
-                    if !n_value.is_mine() {
-                        cell_neighbors[neighbor.idx].mine_neighbors -= neighbor.from;
-                    }
-                }
-                CellType::Count => {
-                    if n_value.is_unknown() {
-                        cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
-                    }
-                    desolved_queue.push(flags, neighbor.idx);
-                }
-                CellType::InferredSafe => {
-                    if n_value.is_unknown() {
-                        cell_neighbors[neighbor.idx].safe_neighbors -= neighbor.from;
-                    }
-                }
-                CellType::Wall => {
-                    // nothing to subtract for WALL
-                }
-            }
-            match new_value.cell_type() {
-                CellType::Unknown => {
-                    if n_value.is_safe() {
-                        cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
-                    }
-                }
-                CellType::Mine | CellType::InferredMine => {
-                    if !n_value.is_mine() {
-                        cell_neighbors[neighbor.idx].mine_neighbors |= neighbor.from;
-                    }
-                }
-                CellType::Count => {
-                    if n_value.is_unknown() {
-                        cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
-                    }
-                }
-                CellType::InferredSafe => {
-                    if n_value.is_unknown() {
-                        cell_neighbors[neighbor.idx].safe_neighbors |= neighbor.from;
-                    }
-                }
-                CellType::Wall => {
-                    // nothing to add for WALL
-                }
-            }
-        }
-        let cell = &mut cells[idx];
-        cell.set_value(new_value);
-        match new_value.cell_type() {
-            CellType::Unknown => {
-                cell_neighbors[idx].alt_neighbors = count;
-                cell_neighbors[idx].safe_neighbors = safe;
-                cell_neighbors[idx].mine_neighbors = mines;
-            }
-            CellType::Count | CellType::InferredSafe => {
-                cell_neighbors[idx].alt_neighbors = unknown;
-                cell_neighbors[idx].mine_neighbors = mines;
-            }
-            _ => (),
-        }
-        if prev_value.has_count() {
-            desolved_queue.push(flags, idx);
-        }
-        if new_value.has_count() {
-            solved_queue.push(flags, idx);
-        }
-
-        ChangeStatus::Breaking
-    }
-
+impl CellIdx {
     pub(super) fn neighbor_iter(
-        idx: CellIdx,
+        &self,
         width: u32,
         directions: DirectionSet,
-    ) -> impl Iterator<Item = Neighbor> {
+    ) -> impl Iterator<Item = Neighbor> + use<> {
+        let idx = *self;
         DirectionSetIterator::new(directions).map(move |d| match d.index() {
             0 => Neighbor {
                 idx: CellIdx(idx.0 - width - 1),
@@ -618,31 +158,6 @@ impl Cell {
         })
     }
 }
-
-impl Display for Cell {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Cell{{ value: {} }}", self.value)
-    }
-}
-
-impl Index<CellIdx> for [Cell] {
-    type Output = Cell;
-
-    #[inline]
-    fn index(&self, index: CellIdx) -> &Self::Output {
-        &self[index.0 as usize]
-    }
-}
-
-impl IndexMut<CellIdx> for [Cell] {
-    #[inline]
-    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
-        &mut self[index.0 as usize]
-    }
-}
-
-#[derive(Debug, Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct CellIdx(pub(super) u32);
 
 impl From<u32> for CellIdx {
     fn from(value: u32) -> Self {
@@ -768,6 +283,418 @@ impl CellValue {
             _ => unreachable!(),
         }
     }
+
+    pub(super) fn remaining_mines(&self, neighbors: CellNeighbors) -> i8 {
+        // only valid for count cells
+        debug_assert!(self.has_count());
+        self.mine_count() as i8 - neighbors.mine_neighbors.len() as i8
+    }
+
+    /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
+    /// more mines than it has unknown neighbors left to hold, or it has more
+    /// mines than remaining spaces
+    pub(super) fn is_invalid(&self, neighbors: CellNeighbors) -> bool {
+        // only valid for count cells
+        debug_assert!(self.has_count());
+        let mine_neighbors = neighbors.mine_neighbors.len() as i8;
+        let unknown_neighbors = neighbors.alt_neighbors.len() as i8;
+        self.safe_mine_count().is_some_and(|mine_count| {
+            let mines_remaining = mine_count as i8 - mine_neighbors;
+            mines_remaining < 0 || mines_remaining > unknown_neighbors
+        })
+    }
+
+    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
+    // either a Mine or Safe...
+    pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
+        // only valid for count cells
+        debug_assert!(self.has_count());
+        let unknown_count = neighbors.alt_neighbors.len() as i8;
+
+        self.safe_mine_count().and_then(|mine_count| {
+            let remaining = mine_count as i8 - neighbors.mine_neighbors.len() as i8;
+            if remaining <= 0 {
+                Some(CellValue::INFERRED_SAFE)
+            } else if remaining >= unknown_count {
+                Some(CellValue::INFERRED_MINE)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(super) fn apply_change(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        let prev_value = cells[idx];
+
+        let change_function = match prev_value.cell_type() {
+            CellType::Unknown => match new_value.cell_type() {
+                CellType::Unknown => Self::no_change,
+                CellType::InferredMine | CellType::Mine => Self::unknown_to_mine,
+                CellType::InferredSafe => Self::unknown_to_inferred_safe,
+                CellType::Count => Self::unknown_to_count,
+                CellType::Wall => Self::inference_breaking_change,
+            },
+            CellType::InferredMine | CellType::Mine => match new_value.cell_type() {
+                CellType::InferredMine | CellType::Mine => Self::to_mine,
+                _ => Self::inference_breaking_change,
+            },
+            CellType::InferredSafe => match new_value.cell_type() {
+                CellType::InferredSafe => Self::no_change,
+                CellType::Count => Self::inferred_safe_to_count,
+                _ => Self::inference_breaking_change,
+            },
+            CellType::Count => match new_value.cell_type() {
+                CellType::Count => {
+                    if prev_value == new_value {
+                        Self::no_change
+                    } else {
+                        // count -> count (diff counts) - it could be de-solved, or solved
+                        Self::count_to_count
+                    }
+                }
+                _ => Self::inference_breaking_change,
+            },
+            CellType::Wall => Self::inference_breaking_change,
+        };
+
+        change_function(
+            cells,
+            flags,
+            neighbors,
+            solved_queue,
+            desolved_queue,
+            metrics,
+            idx,
+            new_value,
+            width,
+        )
+    }
+
+    fn no_change(
+        _cells: &mut [CellValue],
+        _flags: &mut [CellFlags],
+        _neighbors: &mut [CellNeighbors],
+        _solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        _idx: CellIdx,
+        _new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        ChangeStatus::NoChange
+    }
+
+    fn to_mine(
+        cells: &mut [CellValue],
+        _flags: &mut [CellFlags],
+        _neighbors: &mut [CellNeighbors],
+        _solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        cells[idx] = new_value;
+        ChangeStatus::NoChange
+    }
+
+    fn count_to_count(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        _neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        _metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        _width: u32,
+    ) -> ChangeStatus {
+        cells[idx] = new_value;
+        solved_queue.push(flags, idx);
+        desolved_queue.push(flags, idx);
+        ChangeStatus::Breaking
+    }
+
+    fn unknown_to_mine(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        cell_neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  +mine, -alt, +solve
+        // safe: +mine, -alt
+        // mine: n/a
+        // unknown: +mine
+        // self: n/a
+        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in idx.neighbor_iter(width, alt_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.mine_neighbors |= neighbor.from;
+            neighbors.alt_neighbors -= neighbor.from;
+            solved_queue.push(flags, neighbor.idx);
+        }
+        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in idx.neighbor_iter(width, safe_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.mine_neighbors |= neighbor.from;
+            neighbors.alt_neighbors -= neighbor.from;
+        }
+        let neighbors = cell_neighbors[idx];
+        let unknown_neighbors = neighbors.neighbors
+            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.mine_neighbors |= neighbor.from;
+        }
+        cells[idx] = new_value;
+        ChangeStatus::NonBreaking
+    }
+
+    fn unknown_to_inferred_safe(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        cell_neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  -alt, +solve
+        // safe: -alt
+        // mine: n/a
+        // unknown: +safe
+        // self: alt = unknown
+        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in idx.neighbor_iter(width, alt_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.alt_neighbors -= neighbor.from;
+            solved_queue.push(flags, neighbor.idx);
+        }
+        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in idx.neighbor_iter(width, safe_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.alt_neighbors -= neighbor.from;
+        }
+        let neighbors = cell_neighbors[idx];
+        let unknown_neighbors = neighbors.neighbors
+            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.safe_neighbors |= neighbor.from;
+        }
+        cell_neighbors[idx].alt_neighbors = unknown_neighbors;
+        cells[idx] = new_value;
+
+        ChangeStatus::NonBreaking
+    }
+
+    fn unknown_to_count(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        cell_neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (count):  -alt, +solve
+        // safe: -alt
+        // mine: n/a
+        // unknown: +alt
+        // self: alt = unknown, +solve
+        let alt_neighbors = cell_neighbors[idx].alt_neighbors;
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in idx.neighbor_iter(width, alt_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.alt_neighbors -= neighbor.from;
+            solved_queue.push(flags, neighbor.idx);
+        }
+        let safe_neighbors = cell_neighbors[idx].safe_neighbors;
+        metrics.inc_neighbor_visits(safe_neighbors);
+        for neighbor in idx.neighbor_iter(width, safe_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.alt_neighbors -= neighbor.from;
+        }
+        let neighbors = &cell_neighbors[idx];
+        let unknown_neighbors = neighbors.neighbors
+            - (neighbors.mine_neighbors | neighbors.alt_neighbors | neighbors.safe_neighbors);
+        metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
+            let neighbors = &mut cell_neighbors[neighbor.idx];
+            neighbors.alt_neighbors |= neighbor.from;
+        }
+        cell_neighbors[idx].alt_neighbors = unknown_neighbors;
+        cells[idx] = new_value;
+        solved_queue.push(flags, idx);
+
+        ChangeStatus::NonBreaking
+    }
+
+    fn inferred_safe_to_count(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        _desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        // alt (unknown):  -safe, +alt
+        // safe: n/a
+        // mine: n/a
+        // count: n/a
+        // self: +solve
+        let alt_neighbors = neighbors[idx].alt_neighbors;
+        metrics.inc_neighbor_visits(alt_neighbors);
+        for neighbor in idx.neighbor_iter(width, alt_neighbors) {
+            let neighbors = &mut neighbors[neighbor.idx];
+            neighbors.safe_neighbors -= neighbor.from;
+            neighbors.alt_neighbors |= neighbor.from;
+        }
+        cells[idx] = new_value;
+        solved_queue.push(flags, idx);
+
+        ChangeStatus::NonBreaking
+    }
+
+    // The slower, not-unrolled general purpose function for the rest of the values. Always involves
+    // a loop over all neighbors with a decent amount of branching
+    fn inference_breaking_change(
+        cells: &mut [CellValue],
+        flags: &mut [CellFlags],
+        cell_neighbors: &mut [CellNeighbors],
+        solved_queue: &mut GuardedQueue,
+        desolved_queue: &mut GuardedQueue,
+        metrics: &mut Metrics,
+        idx: CellIdx,
+        new_value: CellValue,
+        width: u32,
+    ) -> ChangeStatus {
+        let mut mines = DirectionSet::new();
+        let mut count = DirectionSet::new();
+        let mut safe = DirectionSet::new();
+        let mut unknown = DirectionSet::new();
+        let prev_value = cells[idx];
+        let neighbors = cell_neighbors[idx].neighbors;
+        metrics.inc_neighbor_visits(neighbors);
+        for neighbor in idx.neighbor_iter(width, neighbors) {
+            let dir = neighbor.from.reverse();
+            let n_value = cells[neighbor.idx];
+            if n_value.is_mine() {
+                mines |= dir;
+            } else if n_value.has_count() {
+                count |= dir;
+                desolved_queue.push(flags, neighbor.idx);
+                solved_queue.push(flags, neighbor.idx);
+            } else if n_value.is_safe() {
+                safe |= dir;
+            } else if n_value.is_unknown() {
+                unknown |= dir;
+            } else {
+                debug_assert!(n_value.is_wall());
+            }
+            match prev_value.cell_type() {
+                CellType::Unknown => {
+                    if n_value.is_safe() {
+                        cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
+                    }
+                }
+                CellType::Mine | CellType::InferredMine => {
+                    if !n_value.is_mine() {
+                        cell_neighbors[neighbor.idx].mine_neighbors -= neighbor.from;
+                    }
+                }
+                CellType::Count => {
+                    if n_value.is_unknown() {
+                        cell_neighbors[neighbor.idx].alt_neighbors -= neighbor.from;
+                    }
+                    desolved_queue.push(flags, neighbor.idx);
+                }
+                CellType::InferredSafe => {
+                    if n_value.is_unknown() {
+                        cell_neighbors[neighbor.idx].safe_neighbors -= neighbor.from;
+                    }
+                }
+                CellType::Wall => {
+                    // nothing to subtract for WALL
+                }
+            }
+            match new_value.cell_type() {
+                CellType::Unknown => {
+                    if n_value.is_safe() {
+                        cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
+                    }
+                }
+                CellType::Mine | CellType::InferredMine => {
+                    if !n_value.is_mine() {
+                        cell_neighbors[neighbor.idx].mine_neighbors |= neighbor.from;
+                    }
+                }
+                CellType::Count => {
+                    if n_value.is_unknown() {
+                        cell_neighbors[neighbor.idx].alt_neighbors |= neighbor.from;
+                    }
+                }
+                CellType::InferredSafe => {
+                    if n_value.is_unknown() {
+                        cell_neighbors[neighbor.idx].safe_neighbors |= neighbor.from;
+                    }
+                }
+                CellType::Wall => {
+                    // nothing to add for WALL
+                }
+            }
+        }
+        cells[idx] = new_value;
+        match new_value.cell_type() {
+            CellType::Unknown => {
+                cell_neighbors[idx].alt_neighbors = count;
+                cell_neighbors[idx].safe_neighbors = safe;
+                cell_neighbors[idx].mine_neighbors = mines;
+            }
+            CellType::Count | CellType::InferredSafe => {
+                cell_neighbors[idx].alt_neighbors = unknown;
+                cell_neighbors[idx].mine_neighbors = mines;
+            }
+            _ => (),
+        }
+        if prev_value.has_count() {
+            desolved_queue.push(flags, idx);
+        }
+        if new_value.has_count() {
+            solved_queue.push(flags, idx);
+        }
+
+        ChangeStatus::Breaking
+    }
 }
 
 impl From<UserCellValue> for CellValue {
@@ -837,6 +764,22 @@ impl From<CellValue> for UserValueWithInference {
                 inferred: InferredValue::None,
             },
         }
+    }
+}
+
+impl Index<CellIdx> for [CellValue] {
+    type Output = CellValue;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [CellValue] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
     }
 }
 
@@ -911,6 +854,32 @@ impl CellNeighbors {
         }
     }
 
+    pub(super) fn grid(width: u32, height: u32) -> Box<[CellNeighbors]> {
+        let width = width as usize;
+        let height = height as usize;
+        let len = width * height;
+        let mut grid: Vec<CellNeighbors> = vec![CellNeighbors::all(); len];
+        // fix up the edge neighbors
+        for neighbors in grid.iter_mut().take(width) {
+            // top row
+            neighbors.neighbors -= DirectionSet::N_DIRECTIONS;
+        }
+        for neighbors in grid.iter_mut().skip(len - width) {
+            // bottom row
+            neighbors.neighbors -= DirectionSet::S_DIRECTIONS;
+        }
+        for neighbors in grid.iter_mut().step_by(width) {
+            // left col
+            neighbors.neighbors -= DirectionSet::W_DIRECTIONS;
+        }
+        for neighbors in grid.iter_mut().skip(width - 1).step_by(width) {
+            // right col
+            neighbors.neighbors -= DirectionSet::E_DIRECTIONS;
+        }
+
+        grid.into_boxed_slice()
+    }
+
     #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.alt_neighbors = DirectionSet::EMPTY;
@@ -953,22 +922,21 @@ impl IndexMut<CellIdx> for [CellNeighbors] {
 
 #[cfg(test)]
 pub(super) fn cells_equal(
-    cell_a: Cell,
+    cell_a: CellValue,
     neighbors_a: CellNeighbors,
-    cell_b: Cell,
+    cell_b: CellValue,
     neighbors_b: CellNeighbors,
 ) -> bool {
     if cell_a != cell_b || neighbors_a.neighbors != neighbors_b.neighbors {
         return false;
     }
-    if !cell_a.value().is_mine() {
+    if !cell_a.is_mine() {
         if neighbors_a.alt_neighbors != neighbors_b.alt_neighbors
             || neighbors_a.mine_neighbors != neighbors_b.mine_neighbors
         {
             return false;
         }
-        if cell_a.value().is_unknown() && (neighbors_a.safe_neighbors != neighbors_b.safe_neighbors)
-        {
+        if cell_a.is_unknown() && (neighbors_a.safe_neighbors != neighbors_b.safe_neighbors) {
             return false;
         }
     }
@@ -976,26 +944,26 @@ pub(super) fn cells_equal(
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(super) struct IdxAndCell {
+pub(super) struct IndexedCell {
     pub(super) idx: CellIdx,
     pub(super) value: CellValue,
 }
 
-impl PartialEq for IdxAndCell {
+impl PartialEq for IndexedCell {
     fn eq(&self, other: &Self) -> bool {
         self.idx == other.idx
     }
 }
 
-impl Eq for IdxAndCell {}
+impl Eq for IndexedCell {}
 
-impl PartialOrd for IdxAndCell {
+impl PartialOrd for IndexedCell {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for IdxAndCell {
+impl Ord for IndexedCell {
     fn cmp(&self, other: &Self) -> Ordering {
         self.idx.cmp(&other.idx)
     }
@@ -1206,10 +1174,10 @@ impl CellOrdering {
     /// Constructs a [`CellOrdering`] if `cell` holds a known count (`Safe(n)`), or `None` otherwise.
     pub(super) fn from_cell(
         idx: CellIdx,
-        cell: Cell,
+        cell: CellValue,
         neighbors: CellNeighbors,
     ) -> Option<CellOrdering> {
-        if let Some(mine_count) = cell.value().safe_mine_count() {
+        if let Some(mine_count) = cell.safe_mine_count() {
             let available_cells = neighbors.alt_neighbors.len();
             let remaining_mines = cell.remaining_mines(neighbors);
             let solution_count = stats::choose(available_cells, remaining_mines) as u8;
@@ -1295,7 +1263,7 @@ mod tests {
 
     #[test]
     fn test_processed_cell_initialization_and_display() {
-        let grid = Cell::grid(3, 3);
+        let grid = CellNeighbors::grid(3, 3);
         let pc = grid[0];
         assert_eq!(pc.neighbors, E | S | SE);
         assert_eq!(pc.alt_neighbors, DirectionSet::EMPTY);
@@ -1371,66 +1339,50 @@ mod tests {
     #[test]
     fn test_cell_is_invalid_detects_unsatisfiable_counts() {
         // 2x1 strip [Count(2), Unknown]: needs 2 mines but only 1 unknown neighbor -> invalid
-        let neighbors = Cell::grid(2, 1);
-        let cell = Cell {
-            value: CellValue::for_mine_count(2),
-        };
+        let neighbors = CellNeighbors::grid(2, 1);
+        let cell = CellValue::for_mine_count(2);
         assert!(
             cell.is_invalid(neighbors[0]),
             "needs 2 mines but only 1 unknown neighbor"
         );
 
-        let mut neighbors = Cell::grid(2, 1);
+        let mut neighbors = CellNeighbors::grid(2, 1);
         neighbors[0].alt_neighbors = !!E;
-        let cell = Cell {
-            value: CellValue::for_mine_count(1),
-        };
+        let cell = CellValue::for_mine_count(1);
         assert!(!cell.is_invalid(neighbors[0]));
     }
 
     #[test]
     fn test_cell_is_invalid_handles_excess_mine_neighbors() {
         // a Count(0) next to a known mine is over-satisfied
-        let mut neighbors = Cell::grid(2, 1);
+        let mut neighbors = CellNeighbors::grid(2, 1);
         neighbors[0].mine_neighbors |= E;
-        let cell = Cell {
-            value: CellValue::for_mine_count(0),
-        };
+        let cell = CellValue::for_mine_count(0);
         assert!(cell.is_invalid(neighbors[0]));
     }
 
     #[test]
     fn test_ordered_cell_from_cell_and_ordering() {
-        let grid = Cell::grid(3, 3);
+        let grid = CellNeighbors::grid(3, 3);
         let neighbors = grid[0];
-        let mut cell = Cell {
-            value: CellValue::UNKNOWN,
-        };
-        assert!(CellOrdering::from_cell(CellIdx(0), cell, neighbors).is_none());
+        assert!(CellOrdering::from_cell(CellIdx(0), CellValue::UNKNOWN, neighbors).is_none());
 
-        cell.set_value(CellValue::MINE);
-        assert!(CellOrdering::from_cell(CellIdx(0), cell, neighbors).is_none());
+        assert!(CellOrdering::from_cell(CellIdx(0), CellValue::MINE, neighbors).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
         let mut neighbors_a = grid[0];
-        let cell_a = Cell {
-            value: CellValue::for_mine_count(2),
-        };
+        let cell_a = CellValue::for_mine_count(2);
         neighbors_a.alt_neighbors = E | S;
 
         // Trivial cell B: 5 available, 0 remaining (1 mine already found) -> choose(5, 0) = 1 solution, lower mine_count
         let mut neighbor_b = grid[1];
-        let cell_b = Cell {
-            value: CellValue::for_mine_count(1),
-        };
+        let cell_b = CellValue::for_mine_count(1);
         neighbor_b.alt_neighbors = neighbor_b.neighbors - S;
         neighbor_b.mine_neighbors = !!S;
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut neighbors_c = grid[2];
-        let cell_c = Cell {
-            value: CellValue::for_mine_count(1),
-        };
+        let cell_c = CellValue::for_mine_count(1);
         neighbors_c.alt_neighbors = W | SW | S;
 
         let ord_a = CellOrdering::from_cell(CellIdx(0), cell_a, neighbors_a).unwrap();
@@ -1454,7 +1406,7 @@ mod tests {
     #[test]
     fn test_neighbor_iter() {
         // use a 3x3 grid, indices going from 0..=8, center 4
-        let neighbors: Vec<_> = Cell::neighbor_iter(CellIdx(4), 3, E | S | SE).collect();
+        let neighbors: Vec<_> = CellIdx(4).neighbor_iter(3, E | S | SE).collect();
         assert_eq!(
             neighbors.iter().map(|n| n.idx.0).collect::<Vec<_>>(),
             vec![5, 7, 8]
@@ -1587,7 +1539,7 @@ mod tests {
 
     #[test]
     fn test_cell_neighbor_direction_sets_semantics() {
-        let mut neighbors = Cell::grid(3, 3);
+        let mut neighbors = CellNeighbors::grid(3, 3);
         let center = &mut neighbors[4];
         assert_eq!(center.neighbors, DirectionSet::ALL);
         assert_eq!(center.alt_neighbors, DirectionSet::EMPTY);
