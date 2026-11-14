@@ -41,13 +41,14 @@ pub struct MineField {
     height: u32,
     /// Total number of mines on the board.
     mine_count: Option<u32>,
-    /// Row-major contiguous array of all board cells and their precomputed solver metadata.
+    /// Row-major contiguous array of all board cell values.
     cells: Box<[CellValue]>,
-    // TODO: Document
+    /// Row-major contiguous array of partition IDs for each cell. 0 indicates unpartitioned;
+    /// non-zero values group cells into connected bipartite frontier components.
     partition_ids: Box<[PartitionId]>,
-    // TODO: Document
+    /// Row-major contiguous array of bitflags tracking membership in solver queues ([`GuardedQueue`]).
     cell_flags: Box<[CellFlags]>,
-    // TODO: Document
+    /// Row-major contiguous array of precomputed and dynamically maintained neighbor direction masks for each cell ([`CellNeighbors`]).
     cell_neighbors: Box<[CellNeighbors]>,
     /// Active board partitions, mapping a representative seed cell index to the partition size.
     partitions: HashMap<CellIdx, u32, FastNumberHasherBuilder>,
@@ -57,15 +58,15 @@ pub struct MineField {
     pending: Vec<IndexedCell>,
     /// Queue of seed cells whose breaking changes require inferences in their connected components to be reset.
     desolved_queue: GuardedQueue,
-    /// Queue of "known" cells (guaranteed to satisfy [`CellValue::has_count`]) whose neighbor values have become solvable.
+    /// Queue of open cells (guaranteed to satisfy [`CellValue::is_open`]) whose neighbor values have become solvable.
     solved_queue: GuardedQueue,
-    /// Queue of "count" cells (guaranteed to satisfy [`CellValue::has_count`]) whose connected frontier needs to be partitioned or repartitioned.
+    /// Queue of open cells (guaranteed to satisfy [`CellValue::is_open`]) whose connected frontier needs to be partitioned or repartitioned.
     pending_partition_queue: GuardedQueue,
     /// Performance and step counters recorded during solving.
     metrics: Metrics,
     /// Cell indices whose inference changed during the most recent solve cycle.
     recent_inferred: Vec<CellIdx>,
-    /// Contradictory "count" cells discovered during the most recent solve cycle.
+    /// Contradictory open cells discovered during the most recent solve cycle.
     recent_invalid: Vec<CellIdx>,
 }
 
@@ -168,7 +169,7 @@ impl MineField {
     /// # Panics
     ///
     /// Panics if:
-    /// - `field_spec` contains any character outside `'0'..='8'`, `'*'`, `'x'`, `'#'`, `'_'`, `'.'`, `' '`, or `'\n'`.
+    /// - `field_spec` contains any character outside `'0'..='8'`, `'*'`, `'x'`, `'#'`, `'_'`, `'@'`, `'.'`, `' '`, or `'\n'`.
     /// - The inferred board dimensions and `mine_count` fail [`MineField::new`] validation (e.g., an empty
     ///   spec or `mine_count >= width * height`).
     #[track_caller]
@@ -563,8 +564,7 @@ impl MineField {
         idx.neighbor_iter(self.width, neighbors)
     }
 
-    /// From an `is_safe` cell, calls the visit function, then calls [`Self::walk_partition_b`] on
-    /// the neighboring `UNKNOWN` cells.
+    /// From an open (`is_open`) cell, calls the visit function, then walks the neighboring `UNKNOWN` cells.
     fn walk_partition_known(
         &mut self,
         idx: CellIdx,
@@ -613,7 +613,7 @@ impl MineField {
         visit_unknown(self, idx);
 
         let mut len = 1;
-        let mut neighbors = self.cell_neighbors[idx].count_neighbors();
+        let mut neighbors = self.cell_neighbors[idx].open_neighbors();
         if let Some(prev_neighbor) = prev_neighbor {
             neighbors -= prev_neighbor.from
         };
@@ -956,12 +956,12 @@ mod tests {
     };
 
     /// Helper asserting neighbor direction set invariants:
-    /// - For non-mine cells, `alt_neighbors` and `mine_neighbors` are disjoint subsets of `cell.neighbors`.
+    /// - For non-mine, non-wall cells, `alt_neighbors` and `mine_neighbors` are disjoint subsets of `cell.neighbors`.
     /// - For unknown cells, `safe_neighbors` is also a disjoint subset of `cell.neighbors` (pairwise disjoint
     ///   from `alt_neighbors` and `mine_neighbors`).
-    /// - Mine cells do not maintain neighbor direction sets.
+    /// - Mine and wall cells do not maintain neighbor direction sets.
     fn assert_neighbor_invariants(cell: CellValue, neighbors: CellNeighbors) {
-        if !cell.is_mine() {
+        if !cell.is_mine() && !cell.is_wall() {
             let all_neighbors = neighbors.all_neighbors();
             // all direction sets are subsets of neighbors
             assert_eq!(neighbors.alt_neighbors() | all_neighbors, all_neighbors);
@@ -1097,6 +1097,50 @@ mod tests {
     }
 
     #[test]
+    fn test_wall_cells_creation_and_solving() {
+        // 3x2 board:
+        // 1 @ .
+        // . * .
+        // (0,0) has count 1.
+        // Neighbors of (0,0) are (1,0)=Wall, (0,1)=Unknown, (1,1)=Mine.
+        // Because (1,0) is a Wall, it is neither an unknown nor a mine neighbor.
+        // The Mine at (1,1) satisfies the count 1 at (0,0), so (0,1) must be inferred CLEAR!
+        let field = MineField::create(
+            "1@.
+             .*.",
+        );
+        assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Wall);
+        assert_eq!(field.cells[cell_idx(Point { x: 1, y: 0 }, 3)], CellValue::WALL);
+        assert!(field.cells[cell_idx(Point { x: 0, y: 1 }, 3)].is_clear());
+
+        // 3x1 board:
+        // 1 @ _
+        // (0,0) is count 1. Neighbor (1,0) is Wall. (2,0) is Unknown but not adjacent to (0,0).
+        // (0,0) needs 1 mine but has 0 available unknown neighbors -> invalid!
+        let field = MineField::create("1@_");
+        assert_eq!(field.recent_invalid_cells().next(), Some(CellIdx(0)));
+    }
+
+    #[test]
+    fn test_wall_cell_value_transitions() {
+        let mut field = MineField::new(3, 1).unwrap();
+
+        // Unknown -> Wall is Breaking
+        let status = field.change_cell_value(CellIdx(1), CellValue::WALL);
+        assert_eq!(status, ChangeStatus::Breaking);
+        assert_eq!(field.cells[1], CellValue::WALL);
+
+        // Wall -> Unknown is Breaking
+        let status = field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
+        assert_eq!(status, ChangeStatus::Breaking);
+        assert_eq!(field.cells[1], CellValue::UNKNOWN);
+
+        for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
+            assert_neighbor_invariants(cell, neighbors);
+        }
+    }
+
+    #[test]
     fn test_create_minefield_basic_example() {
         // " 1* \n   1" -> 4x2 field with:
         // - Count(1) at (1, 0)
@@ -1158,14 +1202,15 @@ mod tests {
 
     #[test]
     fn test_create_minefield_all_supported_characters() {
-        // Test '0'..='8', '*', 'x', '#', ' ', '.', and '_'
+        // Test '0'..='8', '*', 'x', '#', ' ', '.', '_', and '@'
         let field = MineField::create(
             "01234
              5678*
-             *x#._",
+             *x#._
+             @....",
         );
         assert_eq!(field.width(), 5);
-        assert_eq!(field.height(), 3);
+        assert_eq!(field.height(), 4);
         assert_eq!(field.mine_count(), None);
 
         for x in 0..5u32 {
@@ -1199,13 +1244,21 @@ mod tests {
             field.cell(Point { x: 4, y: 2 }).value,
             UserCellValue::Unknown
         );
+
+        assert_eq!(field.cell(Point { x: 0, y: 3 }).value, UserCellValue::Wall);
+        for x in 1..5u32 {
+            assert_eq!(
+                field.cell(Point { x, y: 3 }).value,
+                UserCellValue::Unknown
+            );
+        }
     }
 
     #[test]
     fn test_cells_from_spec_and_update_minefield() {
-        // Verify ' ' and '.' are filtered out while '_', 'x', '#', '*', and digits emit Cells.
+        // Verify ' ' and '.' are filtered out while '_', 'x', '#', '*', '@', and digits emit Cells.
         // Leading unspecified cell must use '.' because leading spaces are trimmed.
-        let cells: Vec<IndexedCell> = MineField::cells_from_spec(". 1_x#*", 7).collect();
+        let cells: Vec<IndexedCell> = MineField::cells_from_spec(". 1_x#*@", 8).collect();
         assert_eq!(
             cells,
             vec![
@@ -1228,6 +1281,10 @@ mod tests {
                 IndexedCell {
                     idx: CellIdx(6),
                     value: CellValue::MINE
+                },
+                IndexedCell {
+                    idx: CellIdx(7),
+                    value: CellValue::WALL
                 },
             ]
         );
@@ -2096,10 +2153,10 @@ mod tests {
             "1...1
              .....",
         );
-        let before: Vec<_> = field.partition_ids.iter().copied().collect();
+        let before = field.partition_ids.to_vec();
 
         field.update("1...1");
-        let after: Vec<_> = field.partition_ids.iter().copied().collect();
+        let after = field.partition_ids.to_vec();
         assert_eq!(before, after);
     }
 
@@ -2217,35 +2274,35 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_has_count_invariants() {
+    fn test_queue_open_cells_invariants() {
         // Create a board with counts, unknowns, and mines
         let spec = "1.1\n...\n1.1";
         let mut field = MineField::create(spec);
         for idx in field.pending_partition_queue.iter() {
             assert!(
                 field.cells[idx].is_open(),
-                "pending_partition_queue must only contain cells with has_count"
+                "pending_partition_queue must only contain cells with is_open"
             );
         }
         for idx in field.solved_queue.iter() {
             assert!(
                 field.cells[idx].is_open(),
-                "solved_queue must only contain cells with has_count"
+                "solved_queue must only contain cells with is_open"
             );
         }
 
-        // Apply a breaking update changing a count cell into an unknown and another into a mine
+        // Apply a breaking update changing an open cell into an unknown and another into a mine
         field.update("._*\n...\n1.1");
         for idx in field.pending_partition_queue.iter() {
             assert!(
                 field.cells[idx].is_open(),
-                "pending_partition_queue must strictly maintain has_count after updates"
+                "pending_partition_queue must strictly maintain is_open after updates"
             );
         }
         for idx in field.solved_queue.iter() {
             assert!(
                 field.cells[idx].is_open(),
-                "solved_queue must strictly maintain has_count after updates"
+                "solved_queue must strictly maintain is_open after updates"
             );
         }
     }
@@ -2275,5 +2332,32 @@ mod tests {
 
         let mut field = MineField::create(".111.\n.....");
         field.update(".__")
+    }
+
+    #[test]
+    fn test_adjacent_walls_solve_isolation_and_reversion() {
+        let mut field = MineField::new(3, 1).unwrap();
+        field.change_cell_value(CellIdx(0), CellValue::WALL);
+        field.change_cell_value(CellIdx(1), CellValue::WALL);
+        field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+
+        // Solving an open cell adjacent to a wall must not overwrite the wall
+        field.change_cell_value(CellIdx(0), CellValue::for_mine_count(0));
+        field.solve();
+        assert_eq!(field.cells[1], CellValue::WALL, "Wall at cell 1 was overwritten by solver!");
+
+        // Reverting the second wall restores bidirectional connections between playable cells
+        field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
+        assert!(
+            !(field.cell_neighbors[0].all_neighbors() & crate::solver::grid::E).is_empty(),
+            "Cell 0 should have reconnected to Cell 1 (E)"
+        );
+        assert!(
+            !(field.cell_neighbors[1].all_neighbors() & crate::solver::grid::W).is_empty(),
+            "Cell 1 should have reconnected to Cell 0 (W)"
+        );
+        for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
+            assert_neighbor_invariants(cell, neighbors);
+        }
     }
 }

@@ -187,21 +187,23 @@ impl Display for CellIdx {
 ///
 /// # Encoding
 ///
-/// | Value | Binary | Meaning | `is_safe()` | `has_count()` | `is_mine()` | `is_inferred()` | `cell_type()` |
+/// | Value | Binary | Meaning | `is_open()` | `is_clear()` | `is_mine()` | `is_inferred()` | `cell_type()` |
 /// | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-/// | `0..=8` | `0000`..`1000` | User Count (`0` to `8`) | `true` | `true` | `false` | `false` | [`CellType::Count`] |
-/// | `9` | `1001` | Inferred Safe | `true` | `false` | `false` | `true` | [`CellType::InferredSafe`] |
+/// | `0..=8` | `0000`..`1000` | Open with adjacent mine count (`0` to `8`) | `true` | `true` | `false` | `false` | [`CellType::Open`] |
+/// | `9` | `1001` | Inferred Clear | `false` | `true` | `false` | `true` | [`CellType::Clear`] |
 /// | `10` | `1010` | Unknown | `false` | `false` | `false` | `false` | [`CellType::Unknown`] |
-/// | `12` | `1100` | User Mine | `false` | `false` | `true` | `false` | [`CellType::Mine`] |
-/// | `13` | `1101` | Inferred Mine | `false` | `false` | `true` | `true` | [`CellType::InferredMine`] |
+/// | `12` | `1100` | Interior Wall | `false` | `false` | `false` | `false` | [`CellType::Wall`] |
+/// | `14` | `1110` | User Mine | `false` | `false` | `true` | `false` | [`CellType::Mine`] |
+/// | `15` | `1111` | Inferred Mine (Flag) | `false` | `false` | `true` | `true` | [`CellType::Flag`] |
 ///
 /// # Invariants & Predicates
 ///
-/// - [`Self::is_safe`]: value $\le 9$ (all count cells `0..=8` and inferred safe `9`).
-/// - [`Self::has_count`]: value $< 9$ (`0..=8`). Note that [`Self::is_safe`] returns `true` for inferred values too;
-///   use [`Self::safe_mine_count`] or [`Self::has_count`] to identify true count cells.
-/// - [`Self::is_mine`]: value $\ge 12$ (user mine `12` and inferred mine `13`).
-/// - [`Self::is_inferred`]: `value & 0b1001 == 0b1001` (matches only `9` and `13`).
+/// - [`Self::is_clear`]: value $\le 9$ (all open cells `0..=8` and inferred clear `9`).
+/// - [`Self::is_open`]: value $< 9$ (`0..=8`). Note that [`Self::is_clear`] returns `true` for inferred clear cells too;
+///   use [`Self::safe_mine_count`] or [`Self::is_open`] to identify true opened cells.
+/// - [`Self::is_mine`]: value $\ge 14$ (user mine `14` and inferred flag `15`).
+/// - [`Self::is_wall`]: value $== 12$ ([`Self::WALL`]).
+/// - [`Self::is_inferred`]: `value & 0b1001 == 0b1001` (matches only `9` and `15`).
 /// - [`Self::cell_type`]: calculated via `value.saturating_sub(8)` mapped to [`CellType`].
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CellValue(u8);
@@ -254,23 +256,20 @@ impl CellValue {
         *self == Self::WALL
     }
 
-    /// For valid, non-inferred Safe cells, this returns the mine count.
-    /// For all other types, returns 0.
+    /// For open cells, this returns the mine count.
     #[inline]
     pub(super) fn mine_count(&self) -> u8 {
         debug_assert!(self.is_open());
         self.0
     }
 
-    /// For valid, non-inferred Safe cells, this returns the mine count.
-    /// For all other types, returns None.
+    /// For open cells, this returns the mine count as `Some(count)`.
+    /// For all other cell types, returns `None`.
     pub(super) fn safe_mine_count(&self) -> Option<u8> {
-        // NOTE: this is not the same as `.is_safe()`. This will not return
-        // `true` for inferred values
         self.is_open().then_some(self.0)
     }
 
-    /// TODO: Document
+    /// Returns the high-level [`CellType`] classification for this cell value.
     pub(super) fn cell_type(&self) -> CellType {
         match self.0.saturating_sub(8) {
             0b000 => CellType::Open,
@@ -322,6 +321,7 @@ impl CellValue {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_change(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
@@ -339,8 +339,8 @@ impl CellValue {
             CellType::Unknown => match new_value.cell_type() {
                 CellType::Unknown => Self::no_change,
                 CellType::Flag | CellType::Mine => Self::unknown_to_mine,
-                CellType::Clear => Self::unknown_to_inferred_safe,
-                CellType::Open => Self::unknown_to_count,
+                CellType::Clear => Self::unknown_to_clear,
+                CellType::Open => Self::unknown_to_open,
                 CellType::Wall => Self::inference_breaking_change,
             },
             CellType::Flag | CellType::Mine => match new_value.cell_type() {
@@ -349,7 +349,7 @@ impl CellValue {
             },
             CellType::Clear => match new_value.cell_type() {
                 CellType::Clear => Self::no_change,
-                CellType::Open => Self::inferred_safe_to_count,
+                CellType::Open => Self::clear_to_open,
                 _ => Self::inference_breaking_change,
             },
             CellType::Open => match new_value.cell_type() {
@@ -357,7 +357,7 @@ impl CellValue {
                     if prev_value == new_value {
                         Self::no_change
                     } else {
-                        Self::count_to_count
+                        Self::open_to_open
                     }
                 }
                 _ => Self::inference_breaking_change,
@@ -378,6 +378,7 @@ impl CellValue {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn no_change(
         _cells: &mut [CellValue],
         _flags: &mut [CellFlags],
@@ -392,6 +393,7 @@ impl CellValue {
         ChangeStatus::NoChange
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn to_mine(
         cells: &mut [CellValue],
         _flags: &mut [CellFlags],
@@ -407,7 +409,8 @@ impl CellValue {
         ChangeStatus::NoChange
     }
 
-    fn count_to_count(
+    #[allow(clippy::too_many_arguments)]
+    fn open_to_open(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
         _neighbors: &mut [CellNeighbors],
@@ -425,6 +428,7 @@ impl CellValue {
         ChangeStatus::Breaking
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn unknown_to_mine(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
@@ -468,7 +472,8 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    fn unknown_to_inferred_safe(
+    #[allow(clippy::too_many_arguments)]
+    fn unknown_to_clear(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
         cell_neighbors: &mut [CellNeighbors],
@@ -511,7 +516,8 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    fn unknown_to_count(
+    #[allow(clippy::too_many_arguments)]
+    fn unknown_to_open(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
         cell_neighbors: &mut [CellNeighbors],
@@ -555,7 +561,8 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    fn inferred_safe_to_count(
+    #[allow(clippy::too_many_arguments)]
+    fn clear_to_open(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
         neighbors: &mut [CellNeighbors],
@@ -586,6 +593,7 @@ impl CellValue {
 
     // The slower, not-unrolled general purpose function for the rest of the values. Always involves
     // a loop over all neighbors with a decent amount of branching
+    #[allow(clippy::too_many_arguments)]
     fn inference_breaking_change(
         cells: &mut [CellValue],
         flags: &mut [CellFlags],
@@ -602,7 +610,14 @@ impl CellValue {
         let mut safe = DirectionSet::new();
         let mut unknown = DirectionSet::new();
         let prev_value = cells[idx];
-        let neighbors = cell_neighbors[idx].neighbors;
+        let height = cells.len() as u32 / width;
+        let neighbors = if prev_value.is_wall() {
+            let pt = Point::from_index(idx, width);
+            DirectionSet::all_neighbors(pt, width, height)
+        } else {
+            cell_neighbors[idx].neighbors
+        };
+
         metrics.inc_neighbor_visits(neighbors);
         for neighbor in idx.neighbor_iter(width, neighbors) {
             let dir = neighbor.from.reverse();
@@ -643,7 +658,12 @@ impl CellValue {
                     }
                 }
                 CellType::Wall => {
-                    // nothing to subtract for WALL
+                    if !n_value.is_wall() {
+                        cell_neighbors[neighbor.idx].neighbors |= neighbor.from;
+                        cell_neighbors[idx].neighbors |= dir;
+                    } else {
+                        cell_neighbors[idx].neighbors -= dir;
+                    }
                 }
             }
             match new_value.cell_type() {
@@ -668,7 +688,7 @@ impl CellValue {
                     }
                 }
                 CellType::Wall => {
-                    // nothing to add for WALL
+                    cell_neighbors[neighbor.idx].neighbors -= neighbor.from;
                 }
             }
         }
@@ -714,6 +734,10 @@ impl From<UserValueWithInference> for CellValue {
                 value: UserCellValue::Mine,
                 inferred: InferredValue::None,
             } => CellValue::MINE,
+            UserValueWithInference {
+                value: UserCellValue::Wall,
+                inferred: InferredValue::None,
+            } => CellValue::WALL,
             UserValueWithInference {
                 value: UserCellValue::Unknown,
                 inferred: InferredValue::Mine,
@@ -797,13 +821,13 @@ impl Display for CellValue {
 
 /// High-level classification of a cell's value used to simplify traversal and neighbor updates.
 ///
-/// Note: [`CellType::Count`] represents a user-provided count cell that has an adjacent mine count.
+/// Note: [`CellType::Open`] represents a user-provided open cell that has an adjacent mine count.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum CellType {
     /// An interior wall
     Wall = 0b000,
-    /// User-provided safe cell with an adjacent mine count (`has_count() == true`).
+    /// User-provided safe cell with an adjacent mine count (`is_open() == true`).
     Open = Self::OPEN_MASK,
     /// Cell deduced by the solver to be safe.
     Clear = Self::INFERRED_MASK,
@@ -825,20 +849,20 @@ impl CellType {
 
 #[derive(Debug, Copy, Clone)]
 pub(super) struct CellNeighbors {
-    /// All neighbors to this cell. For inner cells this is DirectionSet::ALL, for border cells it
-    /// is the set of valid neighbors.
+    /// All neighbors to this cell. For inner cells this is `DirectionSet::ALL`; for border cells it
+    /// is the set of valid in-bounds neighbors.
     neighbors: DirectionSet,
 
-    /// For [`CellType::Unknown`] cells, this points to all [`CellType::Count`] neighbors.
-    /// Conversely, for [`CellType::Count`] and [`CellType::InferredSafe`] cells, this points to
-    /// neighbors of type [`CellType::Unknown`]. Unspecified for mine type cells.
+    /// For [`CellType::Unknown`] cells, this points to all [`CellType::Open`] neighbors.
+    /// Conversely, for [`CellType::Open`] and [`CellType::Clear`] cells, this points to
+    /// neighbors of type [`CellType::Unknown`]. Unspecified for mine and flag cells.
     alt_neighbors: DirectionSet,
 
-    /// All [`CellType::Mine`] and [`CellType::InferredMine`] neighbors. Maintained for all
-    /// non-mine cells; unspecified for mine cells ([`CellType::Mine`] and [`CellType::InferredMine`]).
+    /// All [`CellType::Mine`] and [`CellType::Flag`] neighbors. Maintained for all
+    /// non-mine cells; unspecified for mine cells ([`CellType::Mine`] and [`CellType::Flag`]).
     mine_neighbors: DirectionSet,
 
-    /// For [`CellType::Unknown`] cells, this points to all [`CellType::InferredSafe`] neighbors.
+    /// For [`CellType::Unknown`] cells, this points to all [`CellType::Clear`] neighbors.
     /// For all other cell types, this is unspecified.
     safe_neighbors: DirectionSet,
 }
@@ -884,12 +908,12 @@ impl CellNeighbors {
     }
 
     pub(super) fn unknown_neighbors(&self) -> DirectionSet {
-        // only valid for `assert!(cell.is_safe())` cells
+        // only valid for `assert!(cell.is_open() || cell.is_clear())` cells
         self.alt_neighbors
     }
 
-    pub(super) fn count_neighbors(&self) -> DirectionSet {
-        // only valid for `assert!(cell.is_count())` cells
+    pub(super) fn open_neighbors(&self) -> DirectionSet {
+        // only valid for `assert!(cell.is_unknown())` cells
         self.alt_neighbors
     }
 
@@ -1284,8 +1308,16 @@ mod tests {
     fn test_cell_value_is_known_and_display() {
         assert_eq!(UserCellValue::default(), UserCellValue::Unknown);
         assert_eq!(UserCellValue::Unknown.to_string(), "Unknown");
+        assert_eq!(UserCellValue::Wall.to_string(), "Wall");
         assert_eq!(UserCellValue::Mine.to_string(), "MINE");
         assert_eq!(UserCellValue::Safe(4).to_string(), "4");
+
+        assert_eq!(CellValue::UNKNOWN.to_string(), "??");
+        assert_eq!(CellValue::WALL.to_string(), "@@");
+        assert_eq!(CellValue::MINE.to_string(), "**");
+        assert_eq!(CellValue::FLAGGED.to_string(), "!*");
+        assert_eq!(CellValue::CLEAR.to_string(), "!#");
+        assert_eq!(CellValue::for_mine_count(3).to_string(), "3#");
     }
 
     #[test]
@@ -1340,6 +1372,7 @@ mod tests {
     fn test_cell_value_conversions_round_trip() {
         for user_value in [
             UserCellValue::Unknown,
+            UserCellValue::Wall,
             UserCellValue::Mine,
             UserCellValue::Safe(0),
             UserCellValue::Safe(4),
@@ -1500,6 +1533,7 @@ mod tests {
     #[test]
     fn test_cell_type_mapping() {
         assert_eq!(CellValue::UNKNOWN.cell_type(), CellType::Unknown);
+        assert_eq!(CellValue::WALL.cell_type(), CellType::Wall);
         assert_eq!(CellValue::MINE.cell_type(), CellType::Mine);
         assert_eq!(CellValue::FLAGGED.cell_type(), CellType::Flag);
         assert_eq!(CellValue::CLEAR.cell_type(), CellType::Clear);
@@ -1508,7 +1542,7 @@ mod tests {
             assert_eq!(
                 CellValue::for_mine_count(count).cell_type(),
                 CellType::Open,
-                "Count {count} must map to CellType::Count"
+                "Count {count} must map to CellType::Open"
             );
         }
     }
@@ -1544,6 +1578,16 @@ mod tests {
         assert!(unk.is_unknown());
         assert_eq!(unk.cell_type(), CellType::Unknown);
         assert_eq!(unk.safe_mine_count(), None);
+
+        let wall = CellValue::WALL;
+        assert!(!wall.is_open());
+        assert!(!wall.is_clear());
+        assert!(!wall.is_mine());
+        assert!(!wall.is_inferred());
+        assert!(!wall.is_unknown());
+        assert!(wall.is_wall());
+        assert_eq!(wall.cell_type(), CellType::Wall);
+        assert_eq!(wall.safe_mine_count(), None);
 
         let mine = CellValue::MINE;
         assert!(!mine.is_open());
