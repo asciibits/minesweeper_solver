@@ -880,6 +880,28 @@ impl CellNeighbors {
         grid.into_boxed_slice()
     }
 
+    pub(super) fn alt_neighbors(&self) -> DirectionSet {
+        self.alt_neighbors
+    }
+
+    pub(super) fn mine_neighbors(&self) -> DirectionSet {
+        self.mine_neighbors
+    }
+
+    pub(super) fn neighbors(
+        &self,
+        _idx: CellIdx,
+        _cells: &[CellValue],
+        _flags: &[CellFlags],
+    ) -> DirectionSet {
+        self.neighbors
+    }
+
+    pub(super) fn safe_neighbors(&self, _idx: CellIdx, _cells: &[CellValue]) -> DirectionSet {
+        debug_assert!(_cells[_idx].is_unknown());
+        self.safe_neighbors
+    }
+
     #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.alt_neighbors = DirectionSet::EMPTY;
