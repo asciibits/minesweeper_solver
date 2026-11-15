@@ -46,6 +46,18 @@ impl Display for Point {
     }
 }
 
+impl From<(u32, u32)> for Point {
+    fn from((x, y): (u32, u32)) -> Self {
+        Point { x, y }
+    }
+}
+
+impl From<Point> for (u32, u32) {
+    fn from(Point { x, y }: Point) -> Self {
+        (x, y)
+    }
+}
+
 /// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
 /// [`Direction`] pointing from that neighbor back to the origin cell.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -623,5 +635,11 @@ mod tests {
         assert_eq!(DirectionSet::ALL & DirectionSet::S_DIRECTIONS, SW | S | SE);
         assert_eq!(DirectionSet::ALL & DirectionSet::W_DIRECTIONS, NW | W | SW);
         assert_eq!(DirectionSet::ALL & DirectionSet::E_DIRECTIONS, NE | E | SE);
+    }
+
+    #[test]
+    fn test_point_into() {
+        assert_eq!(Point { x: 3, y: 5 }, (3, 5).into());
+        assert_eq!((3, 5), Point { x: 3, y: 5 }.into());
     }
 }
