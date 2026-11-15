@@ -99,14 +99,16 @@ impl MineField {
     ) -> Result<MineField, SolverError> {
         let area = (width as usize).saturating_mul(height as usize);
         let perimeter = (width as usize + height as usize) * 2;
-        if area > MAX_SIZE as usize {
+        // Area with room for WALL cells on the top, bottom, left, plus 1 extra fo last cell's SE
+        let border_area = ((width as usize) + 1).saturating_mul((height as usize) + 2).saturating_add(1);
+        if border_area > MAX_SIZE as usize {
             return Err(SolverError::AreaTooLarge { width, height });
         }
         if area == 0 {
             return Err(SolverError::AreaTooSmall);
         }
         if let Some(mine_count) = mine_count
-            && mine_count as usize >= area
+            && mine_count as usize > area
         {
             return Err(SolverError::MineCountTooLarge {
                 mine_count,
@@ -923,8 +925,8 @@ impl fmt::Display for SolverError {
         match self {
             SolverError::AreaTooLarge { width, height } => write!(
                 f,
-                "The mine field area ({width} x {height}) must be below 2^{}.",
-                usize::BITS - 10
+                "The mine field area ({width} x {height}) must be below {} (with a little padding for borders).",
+                MAX_SIZE
             ),
             SolverError::AreaTooSmall => write!(f, "The width and height must both be >= 1"),
             SolverError::MineCountTooLarge {
@@ -934,7 +936,7 @@ impl fmt::Display for SolverError {
             } => {
                 write!(
                     f,
-                    "The mine count ({mine_count}) must be strictly less than the area of the mine field ({width} x {height}."
+                    "The mine count ({mine_count}) must be less than or equal to the area of the mine field ({width} x {height}."
                 )
             }
             SolverError::CoordinatesOutOfBounds { p, width, height } => write!(
@@ -1442,16 +1444,16 @@ mod tests {
         assert!(err.to_string().contains("must be below"));
 
         // MineCountTooLarge
-        let err = MineField::with_mine_count(4, 4, 16).unwrap_err();
+        let err = MineField::with_mine_count(4, 4, 17).unwrap_err();
         assert!(matches!(
             err,
             SolverError::MineCountTooLarge {
-                mine_count: 16,
+                mine_count: 17,
                 width: 4,
                 height: 4
             }
         ));
-        assert!(err.to_string().contains("must be strictly less"));
+        assert!(err.to_string().contains("must be less than or equal to"));
 
         // 0x0 field rejected as MineCountTooLarge
         assert!(matches!(
