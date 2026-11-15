@@ -367,7 +367,7 @@ impl Metrics {
     pub(super) fn set_max_partitions(&mut self, _maybe_max: usize) {}
 
     #[inline(always)]
-    pub(super) fn set_max_partition_size(&mut self, _maybe_max: usize) {}
+    pub(super) fn set_max_partition_size(&mut self, _maybe_max: u32) {}
 
     #[inline(always)]
     pub(super) fn inc_partitions_created(&mut self) {}
