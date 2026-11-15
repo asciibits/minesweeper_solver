@@ -12,15 +12,10 @@ use std::{
 #[cfg(feature = "debug")]
 use crate::solver::display::DetailMineField;
 use crate::{
-    InferredValue,
-    solver::{
+    InferredValue, solver::{
         cell::{
-            CellFlags, CellIdx, CellNeighbors, CellValue, ChangeStatus, FastNumberHasherBuilder,
-            FlagMask, GuardedQueue, IndexedCell, UserCellWithInference, UserValueWithInference,
-            cell_idx, coordinates,
-        },
-        grid::{DirectionSet, Neighbor},
-        metrics::Metrics,
+            CellFlags, CellIdx, CellNeighbors, CellValue, ChangeStatus, FastNumberHasherBuilder, FlagMask, GuardedQueue, IndexedCell, Neighbor, UserCellWithInference, UserValueWithInference, cell_idx, coordinates, create_grid_with_border,
+        }, grid::DirectionSet, metrics::Metrics,
     },
 };
 
@@ -36,9 +31,9 @@ pub(crate) mod test_utils;
 #[derive(Debug, Clone)]
 pub struct MineField {
     /// Width of the board in cells.
-    width: u32,
+    width_with_border: u32,
     /// Height of the board in cells.
-    height: u32,
+    height_with_border: u32,
     /// Total number of mines on the board.
     mine_count: Option<u32>,
     /// Row-major contiguous array of all board cell values.
@@ -100,7 +95,9 @@ impl MineField {
         let area = (width as usize).saturating_mul(height as usize);
         let perimeter = (width as usize + height as usize) * 2;
         // Area with room for WALL cells on the top, bottom, left, plus 1 extra fo last cell's SE
-        let border_area = ((width as usize) + 1).saturating_mul((height as usize) + 2).saturating_add(1);
+        let border_area = ((width as usize) + 1)
+            .saturating_mul((height as usize) + 2)
+            .saturating_add(1);
         if border_area > MAX_SIZE as usize {
             return Err(SolverError::AreaTooLarge { width, height });
         }
@@ -117,15 +114,19 @@ impl MineField {
             });
         }
 
+        let (cells, cell_neighbors) = create_grid_with_border(width, height);
+
         let field = MineField {
-            width,
-            height,
+            // make room for a set of WALL cells between rows
+            width_with_border: width + 1,
+            // make room for a set of WALL cells above and below the interior cells
+            height_with_border: height + 2,
             mine_count,
-            cells: vec![CellValue::UNKNOWN; area].into_boxed_slice(),
+            cells,
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
-            partition_ids: vec![PartitionId(0); area].into_boxed_slice(),
-            cell_flags: vec![CellFlags::new(); area].into_boxed_slice(),
-            cell_neighbors: CellNeighbors::grid(width, height),
+            partition_ids: vec![PartitionId(0); border_area].into_boxed_slice(),
+            cell_flags: vec![CellFlags::new(); border_area].into_boxed_slice(),
+            cell_neighbors,
             next_partition_id: PartitionId(1),
             pending: Vec::with_capacity(area / 4),
             desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVED_QUEUE),
@@ -153,9 +154,9 @@ impl MineField {
     /// ```
     /// # use minesweeper_solver::{MineField, Point, CellValue};
     /// // Creates a 4x2 MineField with 1 total mine:
-    /// // - Safe(1) at (1, 0)
+    /// // - Opened(1) at (1, 0)
     /// // - Mine at (2, 0)
-    /// // - Safe(1) at (3, 1)
+    /// // - Opened(1) at (3, 1)
     /// // - Unknown everywhere else
     /// let field = MineField::create(
     ///     ".1*.
@@ -163,9 +164,9 @@ impl MineField {
     /// );
     /// assert_eq!(field.width(), 4);
     /// assert_eq!(field.height(), 2);
-    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Safe(1));
+    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Opened(1));
     /// assert_eq!(field.cell(Point { x: 2, y: 0 }).value, CellValue::Mine);
-    /// assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Safe(1));
+    /// assert_eq!(field.cell(Point { x: 3, y: 1 }).value, CellValue::Opened(1));
     /// ```
     ///
     /// # Panics
@@ -180,7 +181,12 @@ impl MineField {
 
         // TODO: implement mine count into the spec
         let mut field = MineField::new(width, height).unwrap();
-        field.pending.extend(cell_iter);
+        for cell in cell_iter {
+            field.pending.push(IndexedCell {
+                idx: field.cell_idx(cell.point),
+                value: cell.value.into(),
+            });
+        }
         field.solve();
 
         field
@@ -189,13 +195,13 @@ impl MineField {
     /// Returns the width of the board in cells.
     #[inline]
     pub fn width(&self) -> u32 {
-        self.width
+        self.width_with_border - 1
     }
 
     /// Returns the height of the board in cells.
     #[inline]
     pub fn height(&self) -> u32 {
-        self.height
+        self.height_with_border - 2
     }
 
     /// Returns the total number of mines on the board.
@@ -206,6 +212,8 @@ impl MineField {
 
     /// Returns the [`crate::CellWithInference`] at the given coordinate `p`.
     pub fn cell(&self, p: Point) -> UserValueWithInference {
+        assert!(p.x < self.width());
+        assert!(p.y < self.height());
         self.cells[self.cell_idx(p)].into()
     }
 
@@ -226,13 +234,13 @@ impl MineField {
     ///      ....",
     /// );
     ///
-    /// // Reveal (1, 0) as Safe(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
+    /// // Reveal (1, 0) as Opened(2) and flag (2, 1) as a Mine, leaving all '.' cells untouched:
     /// field.update(
     ///     ".2
     ///      ..*",
     /// );
-    /// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Safe(1));
-    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Safe(2));
+    /// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Opened(1));
+    /// assert_eq!(field.cell(Point { x: 1, y: 0 }).value, CellValue::Opened(2));
     /// assert_eq!(field.cell(Point { x: 2, y: 1 }).value, CellValue::Mine);
     ///
     /// // Revert (1, 0) back to CellValue::Unknown using '_':
@@ -247,8 +255,12 @@ impl MineField {
     /// - Any non-skipped coordinate in `field_spec` lies outside `field`'s dimensions.
     #[track_caller]
     pub fn update(&mut self, field_spec: &str) {
-        self.pending
-            .extend(Self::cells_from_spec(field_spec, self.width));
+        for cell in Self::cells_from_spec(field_spec) {
+            self.pending.push(IndexedCell {
+                idx: self.cell_idx(cell.point),
+                value: cell.value.into(),
+            });
+        }
         self.solve();
     }
 
@@ -272,11 +284,11 @@ impl MineField {
         cells: impl IntoIterator<Item = UserCell>,
     ) -> Result<(), SolverError> {
         for cell in cells.into_iter() {
-            if cell.point.x >= self.width || cell.point.y >= self.height {
+            if cell.point.x >= self.width() || cell.point.y >= self.height() {
                 return Err(SolverError::CoordinatesOutOfBounds {
                     p: cell.point,
-                    width: self.width,
-                    height: self.height,
+                    width: self.width(),
+                    height: self.height(),
                 });
             }
             self.pending.push(IndexedCell {
@@ -289,55 +301,49 @@ impl MineField {
         Ok(())
     }
 
-    fn cell_iterator(&self) -> impl Iterator<Item = (CellIdx, CellValue)> {
-        self.cells
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (CellIdx(i as u32), v))
-    }
-
     /// Provide a user view into the cell array. Note: There is no direct, fast access to all
     /// "inferred" cells. This is intentional; For fast access, refer to `recent_inferred` after
     /// each solve pass.
-    pub fn cells(&self) -> impl Iterator<Item = UserCellWithInference> {
-        self.cell_iterator().map(|(i, c)| {
-            let v: UserValueWithInference = c.into();
-            UserCellWithInference {
-                cell: UserCell {
-                    point: coordinates(i, self.width),
-                    value: v.value,
-                },
-                inferred: v.inferred,
-            }
+    pub fn cells(&self) -> impl Iterator<Item = UserCellWithInference> + use<'_> {
+        (0..self.height()).flat_map(move |y| {
+            (0..self.width()).map(move |x| {
+                let point = Point { x, y };
+                let idx = self.cell_idx(point);
+                let v: UserValueWithInference = self.cells[idx].into();
+                UserCellWithInference {
+                    cell: UserCell {
+                        point,
+                        value: v.value,
+                    },
+                    inferred: v.inferred,
+                }
+            })
         })
     }
 
     pub fn recent_inferred(&self) -> impl Iterator<Item = Point> {
+        self.recent_inferred.iter().map(|&i| self.coordinates(i))
+    }
+
+    #[cfg(test)]
+    pub(self) fn recent_invalid(&self) -> impl Iterator<Item = Point> {
+        self.recent_invalid.iter().map(|&i| self.coordinates(i))
+    }
+
+    #[cfg(test)]
+    pub(self) fn recent_inferred_mines(&self) -> impl Iterator<Item = Point> {
         self.recent_inferred
             .iter()
-            .map(|&i| coordinates(i, self.width))
+            .filter(|&&i| self.cells[i].is_mine())
+            .map(|&i| self.coordinates(i))
     }
 
     #[cfg(test)]
-    pub(self) fn recent_inferred_cells(&self) -> impl Iterator<Item = CellIdx> {
-        self.recent_inferred.iter().copied()
-    }
-
-    #[cfg(test)]
-    pub(self) fn recent_invalid_cells(&self) -> impl Iterator<Item = CellIdx> {
-        self.recent_invalid.iter().copied()
-    }
-
-    #[cfg(test)]
-    pub(self) fn recent_inferred_mine_cells(&self) -> impl Iterator<Item = CellIdx> {
-        self.recent_inferred_cells()
-            .filter(|&i| self.cells[i].is_mine())
-    }
-
-    #[cfg(test)]
-    pub(self) fn recent_inferred_safe_cells(&self) -> impl Iterator<Item = CellIdx> {
-        self.recent_inferred_cells()
-            .filter(|&i| self.cells[i].is_safe())
+    pub(self) fn recent_inferred_safe(&self) -> impl Iterator<Item = Point> {
+        self.recent_inferred
+            .iter()
+            .filter(|&&i| self.cells[i].is_safe())
+            .map(|&i| self.coordinates(i))
     }
 
     #[cfg(test)]
@@ -382,17 +388,7 @@ impl MineField {
     /// Retractions (e.g. cell returning to `Unknown`) or conflicting changes route to
     /// [`Self::inference_breaking_change`], returning [`ChangeStatus::Breaking`].
     fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
-        CellValue::apply_change(
-            &mut self.cells,
-            &mut self.cell_flags,
-            &mut self.cell_neighbors,
-            &mut self.solved_queue,
-            &mut self.desolved_queue,
-            &mut self.metrics,
-            idx,
-            new_value,
-            self.width,
-        )
+        CellValue::apply_change(self, idx, new_value)
     }
 
     /// Increments the [`MineField::next_partition_id`] value. If needed, it first compacts all
@@ -563,7 +559,7 @@ impl MineField {
         neighbors: DirectionSet,
     ) -> impl Iterator<Item = Neighbor> + use<> {
         self.metrics.inc_neighbor_visits(neighbors);
-        idx.neighbor_iter(self.width, neighbors)
+        idx.neighbor_iter(self.width_with_border, neighbors)
     }
 
     /// From an open (`is_open`) cell, calls the visit function, then walks the neighboring `UNKNOWN` cells.
@@ -640,9 +636,10 @@ impl MineField {
         fn visit_known(field: &mut MineField, idx: CellIdx) {
             field.partitions.remove(&idx);
             // reset all inferred neighbors
-            for Neighbor { idx: n_idx, .. } in
-                idx.neighbor_iter(field.width, field.cell_neighbors[idx].inferred())
-            {
+            for Neighbor { idx: n_idx, .. } in idx.neighbor_iter(
+                field.width_with_border,
+                field.cell_neighbors[idx].inferred(),
+            ) {
                 let cell = field.cells[n_idx];
                 // remove this check when `inferred_neighbors` is just inferred
                 if cell.is_inferred() {
@@ -719,20 +716,28 @@ impl MineField {
     }
 
     /// Get the cell index for the given x/y coordinates.
-    fn cell_idx(&self, p: Point) -> CellIdx {
-        p.to_index(self.width)
+    fn cell_idx(&self, Point { x, y }: Point) -> CellIdx {
+        CellIdx(cell_idx(
+            Point { x: x + 1, y: y + 1 },
+            self.width_with_border,
+        ))
+    }
+
+    fn coordinates(&self, idx: CellIdx) -> Point {
+        let Point { x, y } = coordinates(idx.0, self.width_with_border);
+        Point { x: x - 1, y: y - 1 }
     }
 
     /// Parses `field_spec` into an iterator of [`Cell`] updates, omitting skipped (`'.'` and `' '`) positions.
-    fn cells_from_spec(field_spec: &str, width: u32) -> impl Iterator<Item = IndexedCell> {
-        Self::to_cell_iter(Self::spec_to_iter(field_spec), width)
+    fn cells_from_spec(field_spec: &str) -> impl Iterator<Item = UserCell> {
+        Self::to_cell_iter(Self::spec_to_iter(field_spec))
     }
 
     /// Parses `field_spec` and returns the inferred `(width, height)` board dimensions along with an
     /// iterator of [`Cell`] updates for all non-skipped positions.
     pub(self) fn cells_and_size_from_spec(
         field_spec: &str,
-    ) -> (u32, u32, impl Iterator<Item = IndexedCell> + use<>) {
+    ) -> (u32, u32, impl Iterator<Item = UserCell> + use<>) {
         let cells: Vec<_> = Self::spec_to_iter(field_spec).collect();
 
         let size = cells
@@ -740,32 +745,27 @@ impl MineField {
             .map(|(Point { x, y }, _)| (x + 1, y + 1))
             .fold((0, 0), |acc, r| (max(acc.0, r.0), max(acc.1, r.1)));
 
-        let cells = Self::to_cell_iter(cells, size.0);
+        let cells = Self::to_cell_iter(cells);
 
         (size.0, size.1, cells)
     }
 
     /// Converts `(x, y, Option<CellValue>)` tuples into [`Cell`]s, filtering out `None` entries.
     fn to_cell_iter(
-        iter: impl IntoIterator<Item = (Point, Option<CellValue>)>,
-        width: u32,
-    ) -> impl Iterator<Item = IndexedCell> {
-        iter.into_iter().filter_map(move |(p, v)| {
-            v.map(|value| IndexedCell {
-                idx: cell_idx(p, width),
-                value,
-            })
-        })
+        iter: impl IntoIterator<Item = (Point, Option<UserCellValue>)>,
+    ) -> impl Iterator<Item = UserCell> {
+        iter.into_iter()
+            .filter_map(move |(point, v)| v.map(|value| UserCell { point, value }))
     }
 
     /// Parses `field_spec` into `(x, y, Option<CellValue>)` tuples for every character position in the spec.
-    fn spec_to_iter(field_spec: &str) -> impl Iterator<Item = (Point, Option<CellValue>)> {
-        fn char_to_value(c: char) -> Option<CellValue> {
+    fn spec_to_iter(field_spec: &str) -> impl Iterator<Item = (Point, Option<UserCellValue>)> {
+        fn char_to_value(c: char) -> Option<UserCellValue> {
             match c {
-                '*' => Some(CellValue::MINE),
-                n @ '0'..='8' => Some(CellValue::for_mine_count(n as u8 - b'0')),
-                '_' | 'x' | '#' => Some(CellValue::UNKNOWN),
-                '@' => Some(CellValue::WALL),
+                '*' => Some(UserCellValue::Mine),
+                n @ '0'..='8' => Some(UserCellValue::Opened(n as u8 - b'0')),
+                '_' | 'x' | '#' => Some(UserCellValue::Unknown),
+                '@' => Some(UserCellValue::Wall),
                 ' ' | '.' => None,
                 _ => panic!("Invalid field character: {c:?}"),
             }
@@ -795,13 +795,13 @@ impl MineField {
 
 impl Display for MineField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for y in 0..self.height {
-            for x in 0..self.width {
+        for y in 0..self.height() {
+            for x in 0..self.width() {
                 let UserValueWithInference { value, inferred } = self.cell(Point { x, y });
                 let char = match (value, inferred) {
                     (UserCellValue::Mine, _) => '*',
                     (UserCellValue::Wall, _) => '@',
-                    (UserCellValue::Safe(n), _) => n.to_string().chars().next().unwrap(),
+                    (UserCellValue::Opened(n), _) => n.to_string().chars().next().unwrap(),
                     (UserCellValue::Unknown, InferredValue::None) => '.',
                     (UserCellValue::Unknown, InferredValue::Safe) => '#',
                     (UserCellValue::Unknown, InferredValue::Mine) => 'x',
@@ -820,12 +820,13 @@ impl MineField {
     pub(super) fn rebuild_from_scratch(&self) -> Self {
         let cells = self.cells.clone();
         let mut pending = Vec::with_capacity(self.pending.capacity());
-        for (idx, &cell) in cells.iter().enumerate() {
-            if !cell.is_inferred() && cell != CellValue::UNKNOWN {
-                pending.push(IndexedCell {
-                    idx: CellIdx(idx as u32),
-                    value: cell,
-                });
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let idx = self.cell_idx(Point { x, y });
+                let cell = cells[idx];
+                if !cell.is_inferred() && cell != CellValue::UNKNOWN {
+                    pending.push(IndexedCell { idx, value: cell });
+                }
             }
         }
         let mut cell_neighbors = self.cell_neighbors.clone();
@@ -834,14 +835,14 @@ impl MineField {
         }
 
         let mut field = Self {
-            width: self.width,
-            height: self.height,
+            width_with_border: self.width_with_border,
+            height_with_border: self.height_with_border,
             mine_count: self.mine_count,
             cells,
             partitions: self.partitions.clone(),
             partition_ids: self.partition_ids.clone(),
             cell_flags: self.cell_flags.clone(),
-            cell_neighbors: self.cell_neighbors.clone(),
+            cell_neighbors,
             next_partition_id: PartitionId(1),
             pending,
             desolved_queue: self.desolved_queue.clone(),
@@ -958,7 +959,6 @@ mod tests {
     use super::*;
     use crate::solver::{
         cell::InferredValue,
-        display::DetailMineField,
         grid::{E, NE, NW, S, SE, W},
     };
 
@@ -1005,68 +1005,74 @@ mod tests {
     fn test_cell_change_value_updates_neighbor_masks() {
         // 3x1 strip, change the middle cell and watch both neighbors
         let mut field = MineField::new(3, 1).unwrap();
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
 
-        field.change_cell_value(CellIdx(1), CellValue::MINE);
-        assert_eq!(field.cells[1], CellValue::MINE);
-        assert_eq!(field.cell_neighbors[0].mine(), !!E);
-        assert!(field.cell_neighbors[0].opened().is_empty());
-        assert!(field.cell_neighbors[0].inferred().is_empty());
-        assert_eq!(field.cell_neighbors[2].mine(), !!W);
-        assert!(field.cell_neighbors[2].opened().is_empty());
-        assert!(field.cell_neighbors[2].inferred().is_empty());
+        field.change_cell_value(c1, CellValue::MINE);
+        assert_eq!(field.cells[c1], CellValue::MINE);
+        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert!(field.cell_neighbors[c0].opened().is_empty());
+        assert!(field.cell_neighbors[c0].inferred().is_empty());
+        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert!(field.cell_neighbors[c2].opened().is_empty());
+        assert!(field.cell_neighbors[c2].inferred().is_empty());
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
-        field.change_cell_value(CellIdx(1), CellValue::for_mine_count(1));
-        assert!(field.cell_neighbors[0].mine().is_empty());
-        assert!(field.cell_neighbors[0].inferred().is_empty());
-        assert_eq!(field.cell_neighbors[0].opened(), !!E);
+        field.change_cell_value(c1, CellValue::for_mine_count(1));
+        assert!(field.cell_neighbors[c0].mine().is_empty());
+        assert!(field.cell_neighbors[c0].inferred().is_empty());
+        assert_eq!(field.cell_neighbors[c0].opened(), !!E);
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
-        field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
-        assert!(field.cell_neighbors[0].mine().is_empty());
-        assert!(field.cell_neighbors[0].opened().is_empty());
-        assert!(field.cell_neighbors[2].mine().is_empty());
-        assert!(field.cell_neighbors[2].opened().is_empty());
+        field.change_cell_value(c1, CellValue::UNKNOWN);
+        assert!(field.cell_neighbors[c0].mine().is_empty());
+        assert!(field.cell_neighbors[c0].opened().is_empty());
+        assert!(field.cell_neighbors[c2].mine().is_empty());
+        assert!(field.cell_neighbors[c2].opened().is_empty());
     }
 
     #[test]
     fn test_streamlined_cell_value_transitions() {
         // Grid 3x1: [0, 1, 2]
         let mut field = MineField::new(3, 1).unwrap();
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
 
         // 1. Unknown -> Count(1) on cell 0
-        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+        let status = field.change_cell_value(c0, CellValue::for_mine_count(1));
         assert_eq!(status, ChangeStatus::NonBreaking);
-        assert_eq!(field.cells[0], CellValue::for_mine_count(1));
+        assert_eq!(field.cells[c0], CellValue::for_mine_count(1));
         // Cell 0 is Count, so alt_neighbors points to unknown neighbors (Cell 1)
-        assert_eq!(field.cell_neighbors[0].unknown(), !!E);
+        assert_eq!(field.cell_neighbors[c0].unknown(), !!E);
         // Cell 1 is Unknown, so alt_neighbors points to count neighbors (Cell 0)
-        assert_eq!(field.cell_neighbors[1].opened(), !!W);
+        assert_eq!(field.cell_neighbors[c1].opened(), !!W);
 
         // 2. Unknown -> InferredSafe on cell 2
-        let status = field.change_cell_value(CellIdx(2), CellValue::CLEARED);
+        let status = field.change_cell_value(c2, CellValue::CLEARED);
         assert_eq!(status, ChangeStatus::NonBreaking);
-        assert_eq!(field.cells[2], CellValue::CLEARED);
+        assert_eq!(field.cells[c2], CellValue::CLEARED);
         // Cell 1 is Unknown, so safe_neighbors points to clear neighbors (Cell 2)
-        assert_eq!(field.cell_neighbors[1].inferred(), !!E);
+        assert_eq!(field.cell_neighbors[c1].inferred(), !!E);
 
         // 3. InferredSafe -> Open(0) on cell 2
-        let status = field.change_cell_value(CellIdx(2), CellValue::for_mine_count(0));
+        let status = field.change_cell_value(c2, CellValue::for_mine_count(0));
         assert_eq!(status, ChangeStatus::NonBreaking);
-        assert_eq!(field.cells[2], CellValue::for_mine_count(0));
+        assert_eq!(field.cells[c2], CellValue::for_mine_count(0));
         // Cell 1 is Unknown: safe_neighbors has Cell 2 cleared, alt_neighbors has Cell 2 set
-        assert!(field.cell_neighbors[1].inferred().is_empty());
-        assert_eq!(field.cell_neighbors[1].opened(), W | E);
+        assert!(field.cell_neighbors[c1].inferred().is_empty());
+        assert_eq!(field.cell_neighbors[c1].opened(), W | E);
 
         // 4. Unknown -> Mine on cell 1
-        let status = field.change_cell_value(CellIdx(1), CellValue::MINE);
+        let status = field.change_cell_value(c1, CellValue::MINE);
         assert_eq!(status, ChangeStatus::NonBreaking);
-        assert_eq!(field.cells[1], CellValue::MINE);
+        assert_eq!(field.cells[c1], CellValue::MINE);
         // Both cell 0 and cell 2 are Open cells: alt_neighbors drops cell 1, mine_neighbors gets cell 1
-        assert!(field.cell_neighbors[0].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[0].mine(), !!E);
-        assert!(field.cell_neighbors[2].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[2].mine(), !!W);
+        assert!(field.cell_neighbors[c0].unknown().is_empty());
+        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert!(field.cell_neighbors[c2].unknown().is_empty());
+        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1076,32 +1082,33 @@ mod tests {
     #[test]
     fn test_breaking_cell_value_transitions() {
         let mut field = MineField::new(3, 1).unwrap();
-        field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+        let c0 = field.cell_idx(Point::new(0, 0));
+        field.change_cell_value(c0, CellValue::for_mine_count(1));
 
         // Count -> different Count is Breaking
-        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(2));
+        let status = field.change_cell_value(c0, CellValue::for_mine_count(2));
         assert_eq!(status, ChangeStatus::Breaking);
 
         // Count -> Unknown is Breaking
-        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
         assert_eq!(status, ChangeStatus::Breaking);
 
         // Unknown -> Mine is NonBreaking
-        let status = field.change_cell_value(CellIdx(0), CellValue::MINE);
+        let status = field.change_cell_value(c0, CellValue::MINE);
         assert_eq!(status, ChangeStatus::NonBreaking);
 
         // Mine -> Unknown is Breaking
-        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
         assert_eq!(status, ChangeStatus::Breaking);
 
         // InferredSafe -> Unknown is Breaking
-        field.change_cell_value(CellIdx(0), CellValue::CLEARED);
-        let status = field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        field.change_cell_value(c0, CellValue::CLEARED);
+        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
         assert_eq!(status, ChangeStatus::Breaking);
 
         // Mine -> Count is Breaking
-        field.change_cell_value(CellIdx(0), CellValue::MINE);
-        let status = field.change_cell_value(CellIdx(0), CellValue::for_mine_count(1));
+        field.change_cell_value(c0, CellValue::MINE);
+        let status = field.change_cell_value(c0, CellValue::for_mine_count(1));
         assert_eq!(status, ChangeStatus::Breaking);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
@@ -1124,32 +1131,33 @@ mod tests {
         );
         assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Wall);
         assert_eq!(
-            field.cells[cell_idx(Point { x: 1, y: 0 }, 3)],
+            field.cells[field.cell_idx(Point { x: 1, y: 0 })],
             CellValue::WALL
         );
-        assert!(field.cells[cell_idx(Point { x: 0, y: 1 }, 3)].is_safe());
+        assert!(field.cells[field.cell_idx(Point { x: 0, y: 1 })].is_safe());
 
         // 3x1 board:
         // 1 @ _
         // (0,0) is count 1. Neighbor (1,0) is Wall. (2,0) is Unknown but not adjacent to (0,0).
         // (0,0) needs 1 mine but has 0 available unknown neighbors -> invalid!
         let field = MineField::create("1@_");
-        assert_eq!(field.recent_invalid_cells().next(), Some(CellIdx(0)));
+        assert_eq!(field.recent_invalid().next(), Some(Point { x: 0, y: 0 }));
     }
 
     #[test]
     fn test_wall_cell_value_transitions() {
         let mut field = MineField::new(3, 1).unwrap();
+        let c1 = field.cell_idx(Point::new(1, 0));
 
         // Unknown -> Wall is Breaking
-        let status = field.change_cell_value(CellIdx(1), CellValue::WALL);
+        let status = field.change_cell_value(c1, CellValue::WALL);
         assert_eq!(status, ChangeStatus::Breaking);
-        assert_eq!(field.cells[1], CellValue::WALL);
+        assert_eq!(field.cells[c1], CellValue::WALL);
 
         // Wall -> Unknown is Breaking
-        let status = field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
+        let status = field.change_cell_value(c1, CellValue::UNKNOWN);
         assert_eq!(status, ChangeStatus::Breaking);
-        assert_eq!(field.cells[1], CellValue::UNKNOWN);
+        assert_eq!(field.cells[c1], CellValue::UNKNOWN);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1176,7 +1184,7 @@ mod tests {
         );
         assert_eq!(
             field.cell(Point { x: 1, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(field.cell(Point { x: 2, y: 0 }).value, UserCellValue::Mine);
         assert_eq!(
@@ -1198,7 +1206,7 @@ mod tests {
         );
         assert_eq!(
             field.cell(Point { x: 3, y: 1 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
 
         // Verify the solver ran on the populated cells:
@@ -1211,7 +1219,7 @@ mod tests {
             Point { x: 1, y: 1 },
             Point { x: 2, y: 1 },
         ] {
-            let idx = pt.to_index(field.width());
+            let idx = field.cell_idx(pt);
             assert!(field.cells[idx].is_safe());
         }
     }
@@ -1232,13 +1240,13 @@ mod tests {
         for x in 0..5u32 {
             assert_eq!(
                 field.cell(Point { x, y: 0 }).value,
-                UserCellValue::Safe(x as u8)
+                UserCellValue::Opened(x as u8)
             );
         }
         for x in 0..4u32 {
             assert_eq!(
                 field.cell(Point { x, y: 1 }).value,
-                UserCellValue::Safe((x + 5) as u8)
+                UserCellValue::Opened((x + 5) as u8)
             );
         }
         assert_eq!(field.cell(Point { x: 4, y: 1 }).value, UserCellValue::Mine);
@@ -1271,33 +1279,33 @@ mod tests {
     fn test_cells_from_spec_and_update_minefield() {
         // Verify ' ' and '.' are filtered out while '_', 'x', '#', '*', '@', and digits emit Cells.
         // Leading unspecified cell must use '.' because leading spaces are trimmed.
-        let cells: Vec<IndexedCell> = MineField::cells_from_spec(". 1_x#*@", 8).collect();
+        let cells: Vec<UserCell> = MineField::cells_from_spec(". 1_x#*@").collect();
         assert_eq!(
             cells,
             vec![
-                IndexedCell {
-                    idx: CellIdx(2),
-                    value: CellValue::for_mine_count(1)
+                UserCell {
+                    point: Point { x: 2, y: 0 },
+                    value: UserCellValue::Opened(1)
                 },
-                IndexedCell {
-                    idx: CellIdx(3),
-                    value: CellValue::UNKNOWN
+                UserCell {
+                    point: Point { x: 3, y: 0 },
+                    value: UserCellValue::Unknown
                 },
-                IndexedCell {
-                    idx: CellIdx(4),
-                    value: CellValue::UNKNOWN
+                UserCell {
+                    point: Point { x: 4, y: 0 },
+                    value: UserCellValue::Unknown
                 },
-                IndexedCell {
-                    idx: CellIdx(5),
-                    value: CellValue::UNKNOWN
+                UserCell {
+                    point: Point { x: 5, y: 0 },
+                    value: UserCellValue::Unknown
                 },
-                IndexedCell {
-                    idx: CellIdx(6),
-                    value: CellValue::MINE
+                UserCell {
+                    point: Point { x: 6, y: 0 },
+                    value: UserCellValue::Mine
                 },
-                IndexedCell {
-                    idx: CellIdx(7),
-                    value: CellValue::WALL
+                UserCell {
+                    point: Point { x: 7, y: 0 },
+                    value: UserCellValue::Wall
                 },
             ]
         );
@@ -1309,11 +1317,11 @@ mod tests {
         );
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             field.cell(Point { x: 2, y: 0 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
 
         // Update with '.' at (0, 0) and (2, 0) (preserving their values),
@@ -1324,16 +1332,16 @@ mod tests {
         );
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(field.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
         assert_eq!(
             field.cell(Point { x: 2, y: 0 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
         assert_eq!(
             field.cell(Point { x: 0, y: 1 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             field.cell(Point { x: 3, y: 1 }).value,
@@ -1345,7 +1353,7 @@ mod tests {
         field.update(".__");
         assert_eq!(
             field.cell(Point { x: 0, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             field.cell(Point { x: 1, y: 0 }).value,
@@ -1369,7 +1377,7 @@ mod tests {
         assert_eq!(ragged.height(), 2);
         assert_eq!(
             ragged.cell(Point { x: 0, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(ragged.cell(Point { x: 1, y: 0 }).value, UserCellValue::Mine);
         assert_eq!(
@@ -1378,7 +1386,7 @@ mod tests {
         );
         assert_eq!(
             ragged.cell(Point { x: 4, y: 1 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
 
         // 1x4 vertical strip
@@ -1392,7 +1400,7 @@ mod tests {
         assert_eq!(vertical.height(), 4);
         assert_eq!(
             vertical.cell(Point { x: 0, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             vertical.cell(Point { x: 0, y: 1 }).value,
@@ -1404,7 +1412,7 @@ mod tests {
         );
         assert_eq!(
             vertical.cell(Point { x: 0, y: 3 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
     }
 
@@ -1472,7 +1480,7 @@ mod tests {
         let err = field
             .set_cell(UserCell {
                 point: Point { x: 3, y: 0 },
-                value: UserCellValue::Safe(1),
+                value: UserCellValue::Opened(1),
             })
             .unwrap_err();
         assert!(matches!(
@@ -1488,7 +1496,7 @@ mod tests {
         let err_y = field
             .set_cell(UserCell {
                 point: Point { x: 0, y: 3 },
-                value: UserCellValue::Safe(1),
+                value: UserCellValue::Opened(1),
             })
             .unwrap_err();
         assert!(matches!(err_y, SolverError::CoordinatesOutOfBounds { .. }));
@@ -1556,13 +1564,18 @@ mod tests {
             "1...1
              .....",
         );
+        let c00 = field.cell_idx(Point::new(0, 0));
+        let c40 = field.cell_idx(Point::new(4, 0));
+        let c20 = field.cell_idx(Point::new(2, 0));
+        let c10 = field.cell_idx(Point::new(1, 0));
+        let c30 = field.cell_idx(Point::new(3, 0));
 
         // Two disconnected frontier components:
         // Left: {(0,0), (1,0), (0,1), (1,1)} (4 cells)
         // Right: {(4,0), (3,0), (4,1), (3,1)} (4 cells)
         assert_eq!(field.partitions.len(), 2);
-        let p_left = field.partition_ids[0].get();
-        let p_right = field.partition_ids[4].get();
+        let p_left = field.partition_ids[c00].get();
+        let p_right = field.partition_ids[c40].get();
         assert_ne!(p_left, 0);
         assert_ne!(p_right, 0);
         assert_ne!(p_left, p_right);
@@ -1578,15 +1591,15 @@ mod tests {
                 .count(),
             4
         );
-        assert_eq!(field.partition_ids[2].0, 0);
-        assert!(field.cell_neighbors[2].opened().is_empty());
-        assert!(field.cell_neighbors[2].inferred().is_empty());
+        assert_eq!(field.partition_ids[c20].0, 0);
+        assert!(field.cell_neighbors[c20].opened().is_empty());
+        assert!(field.cell_neighbors[c20].inferred().is_empty());
 
         // Reveal the middle top cell (2, 0) as Count(2): now both components are bridged
         // into a single 10-cell partition!
         field.update("..2");
         assert_eq!(field.partitions.len(), 1);
-        let merged_pid = field.partition_ids[2];
+        let merged_pid = field.partition_ids[c20];
         assert_ne!(merged_pid.0, 0);
         assert_eq!(
             field
@@ -1596,8 +1609,8 @@ mod tests {
                 .count(),
             10
         );
-        assert_eq!(field.cell_neighbors[1].opened(), W | E);
-        assert_eq!(field.cell_neighbors[3].opened(), W | E);
+        assert_eq!(field.cell_neighbors[c10].opened(), W | E);
+        assert_eq!(field.cell_neighbors[c30].opened(), W | E);
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1611,10 +1624,22 @@ mod tests {
             ".1.1.
              .....",
         );
+        let c00 = field.cell_idx(Point::new(0, 0));
+        let c10 = field.cell_idx(Point::new(1, 0));
+        let c20 = field.cell_idx(Point::new(2, 0));
+        let c30 = field.cell_idx(Point::new(3, 0));
+        let c40 = field.cell_idx(Point::new(4, 0));
+        let c01 = field.cell_idx(Point::new(0, 1));
+        let c41 = field.cell_idx(Point::new(4, 1));
+
         assert_eq!(field.partitions.len(), 1);
-        let initial_pid = field.partition_ids[0];
+        let initial_pid = field.partition_ids[c00];
         assert_ne!(initial_pid.0, 0);
-        assert!(field.partition_ids.iter().all(|&p| p == initial_pid));
+        for y in 0..field.height() {
+            for x in 0..field.width() {
+                assert_eq!(field.partition_ids[field.cell_idx(Point::new(x, y))], initial_pid);
+            }
+        }
 
         // Now reveal the bridge cell (2, 0) as Count(0).
         // `basic_solve` infers (1, 1), (2, 1), and (3, 1) as InferredValue::Safe,
@@ -1624,23 +1649,17 @@ mod tests {
         field.update("..0");
 
         assert_eq!(field.partitions.len(), 2);
-        assert!(field.cell_neighbors[2].unknown().is_empty());
+        assert!(field.cell_neighbors[c20].unknown().is_empty());
 
-        let left_pid = field.partition_ids[0];
-        let right_pid = field.partition_ids[4];
+        let left_pid = field.partition_ids[c00];
+        let right_pid = field.partition_ids[c40];
         assert_ne!(left_pid.0, 0);
         assert_ne!(right_pid.0, 0);
         assert_ne!(left_pid, right_pid);
-        assert_eq!(field.partition_ids[1], left_pid);
-        assert_eq!(
-            field.partition_ids[field.cell_idx(Point::new(0, 1))],
-            left_pid
-        );
-        assert_eq!(field.partition_ids[3], right_pid);
-        assert_eq!(
-            field.partition_ids[field.cell_idx(Point::new(4, 1))],
-            right_pid
-        );
+        assert_eq!(field.partition_ids[c10], left_pid);
+        assert_eq!(field.partition_ids[c01], left_pid);
+        assert_eq!(field.partition_ids[c30], right_pid);
+        assert_eq!(field.partition_ids[c41], right_pid);
         assert_eq!(
             field
                 .partition_ids
@@ -1669,20 +1688,24 @@ mod tests {
         // 3x1 board: [(0,0) = Unknown, (1,0) = Count(1), (2,0) = Unknown]
         // (1,0) has 2 unknown neighbors (choose(2, 1) = 2 > 1), so 1 partition of 3 cells remains.
         let mut field = MineField::create(".1.");
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
+
         assert_eq!(field.partitions.len(), 1);
-        assert_eq!(field.cell_neighbors[1].unknown(), W | E);
-        assert_eq!(field.cell_neighbors[0].opened(), !!E);
-        assert_eq!(field.cell_neighbors[2].opened(), !!W);
+        assert_eq!(field.cell_neighbors[c1].unknown(), W | E);
+        assert_eq!(field.cell_neighbors[c0].opened(), !!E);
+        assert_eq!(field.cell_neighbors[c2].opened(), !!W);
 
         // Flag (0, 0) as a Mine: basic_solve infers (2, 0) is Safe, and the post-basic_solve
         // repartition pass dissolves the partition completely.
         field.update("*");
 
         assert!(field.partitions.is_empty());
-        assert!(field.cells[2].is_safe());
-        assert_eq!(field.cells[1].remaining_mines(field.cell_neighbors[1]), 0);
-        assert!(field.cell_neighbors[1].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[1].mine(), !!W);
+        assert!(field.cells[c2].is_safe());
+        assert_eq!(field.cells[c1].remaining_mines(field.cell_neighbors[c1]), 0);
+        assert!(field.cell_neighbors[c1].unknown().is_empty());
+        assert_eq!(field.cell_neighbors[c1].mine(), !!W);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1696,7 +1719,8 @@ mod tests {
             ".2.
              ...",
         );
-        assert_eq!(field.cells[1].remaining_mines(field.cell_neighbors[1]), 2);
+        let c10 = field.cell_idx(Point::new(1, 0));
+        assert_eq!(field.cells[c10].remaining_mines(field.cell_neighbors[c10]), 2);
 
         // In one batch, set both (0, 0) and (2, 0) to Mine, and (1, 1) to Count(2).
         // (1, 0) is a non-dirty neighbor of all three pending cells, so it appears 3 times
@@ -1729,7 +1753,8 @@ mod tests {
     #[test]
     fn test_repeated_and_reverted_staging_on_same_cell() {
         let mut field = MineField::create(".1.");
-        assert_eq!(field.cells[1].remaining_mines(field.cell_neighbors[1]), 1);
+        let c1 = field.cell_idx(Point::new(1, 0));
+        assert_eq!(field.cells[c1].remaining_mines(field.cell_neighbors[c1]), 1);
 
         // Stage (0, 0) as Mine -> revert to Unknown -> stage again as Mine in one batch.
         // Neighbor (1, 0)'s mine_neighbors and unknown_neighbors must update cleanly.
@@ -1751,15 +1776,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Mine);
-        assert_eq!(field.cell_neighbors[1].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c1].mine(), !!W);
         // basic_solve now infers (2,0) is safe. Inferred cells are folded into the neighbor
         // masks, so it moves from `unknown_neighbors` to `safe_neighbors`.
         assert_eq!(
             field.cell(Point { x: 2, y: 0 }).inferred,
             InferredValue::Safe
         );
-        assert!(field.cell_neighbors[1].unknown().is_empty());
-        assert_eq!(field.cells[1].remaining_mines(field.cell_neighbors[1]), 0);
+        assert!(field.cell_neighbors[c1].unknown().is_empty());
+        assert_eq!(field.cells[c1].remaining_mines(field.cell_neighbors[c1]), 0);
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1771,15 +1796,19 @@ mod tests {
         // 1. (0,0)=Count(1) has only 1 unknown neighbor (1,0) -> infers (1,0) is Mine.
         // 2. That satisfies (2,0)=Count(1), which then infers (3,0) is Safe!
         let field = MineField::create("1.1.");
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
+        let c3 = field.cell_idx(Point::new(3, 0));
 
-        assert!(field.cells[1].is_mine());
-        assert!(field.cells[3].is_safe());
+        assert!(field.cells[c1].is_mine());
+        assert!(field.cells[c3].is_safe());
 
         // Verify inferred neighbor sets reflect the deductions
-        assert_eq!(field.cell_neighbors[0].mine(), !!E);
-        assert!(field.cell_neighbors[0].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[2].mine(), !!W);
-        assert!(field.cell_neighbors[2].unknown().is_empty());
+        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert!(field.cell_neighbors[c0].unknown().is_empty());
+        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert!(field.cell_neighbors[c2].unknown().is_empty());
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1793,10 +1822,13 @@ mod tests {
         // Hop 2: (2,0)=2 now has 1 mine at (1,0), so 1 remaining mine for (3,0) -> infers (3,0) is Mine.
         // Hop 3: (4,0)=1 now has 1 mine at (3,0), so 0 remaining mines for (5,0) -> infers (5,0) is Safe.
         let field = MineField::create("1.2.1.");
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c3 = field.cell_idx(Point::new(3, 0));
+        let c5 = field.cell_idx(Point::new(5, 0));
 
-        assert!(field.cells[1].is_mine() && field.cells[1].is_inferred());
-        assert!(field.cells[3].is_mine() && field.cells[3].is_inferred());
-        assert!(field.cells[5].is_safe() && field.cells[5].is_inferred());
+        assert!(field.cells[c1].is_mine() && field.cells[c1].is_inferred());
+        assert!(field.cells[c3].is_mine() && field.cells[c3].is_inferred());
+        assert!(field.cells[c5].is_safe() && field.cells[c5].is_inferred());
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1809,12 +1841,14 @@ mod tests {
         // (0,0)=Count(0) infers (1,0) is Safe, leaving (2,0)=Count(1) with 0 available cells
         // and 1 remaining mine (solution_count == 0).
         let field = MineField::create("0.1");
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
 
         assert_ne!(
-            field.cells[0].is_invalid(field.cell_neighbors[0]),
-            field.cells[2].is_invalid(field.cell_neighbors[2])
+            field.cells[c0].is_invalid(field.cell_neighbors[c0]),
+            field.cells[c2].is_invalid(field.cell_neighbors[c2])
         );
-        let invalid: Vec<_> = field.recent_invalid_cells().collect();
+        let invalid: Vec<_> = field.recent_invalid().collect();
         assert_eq!(invalid.len(), 1);
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1827,15 +1861,18 @@ mod tests {
         // Round 1: Reveal (0,0)=Count(1) -> infers (1,0) is Mine, and updates (2,0)'s
         // inferred_mine_neighbors to include W.
         let mut field = MineField::create("1...");
-        assert!(field.cells[1].is_mine());
-        assert_eq!(field.cell_neighbors[2].mine(), !!W);
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
+        let c3 = field.cell_idx(Point::new(3, 0));
+        assert!(field.cells[c1].is_mine());
+        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
 
         // Round 2 (inference-compatible): Reveal (2,0) as Count(1).
         // Because (1,0)'s Mine inference is preserved, (2,0) immediately knows its 1 mine is at W
         // and infers (3,0) is Safe!
         field.update("..1");
-        assert!(field.cells[1].is_mine());
-        assert!(field.cells[3].is_safe());
+        assert!(field.cells[c1].is_mine());
+        assert!(field.cells[c3].is_safe());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1846,31 +1883,34 @@ mod tests {
         // 3x1 strip: [(0,0), (1,0), (2,0)]
         // Round 1: Reveal (1,0) as Count(2) -> both (0,0) and (2,0) are inferred as Mine.
         let mut field = MineField::create(".2.");
-        assert!(field.cells[0].is_mine());
-        assert!(field.cells[2].is_mine());
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
+        assert!(field.cells[c0].is_mine());
+        assert!(field.cells[c2].is_mine());
 
         // Round 2 (Inference-breaking Case A): Change (1,0) from Count(2) to Count(1).
         // Neither (0,0) nor (2,0) can be inferred anymore; both must reset to InferredState::None!
         field.update(".1");
-        assert!(!field.cells[0].is_inferred());
-        assert!(!field.cells[2].is_inferred());
-        assert_eq!(field.cell_neighbors[1].unknown(), W | E);
-        assert!(field.cell_neighbors[1].mine().is_empty());
+        assert!(!field.cells[c0].is_inferred());
+        assert!(!field.cells[c2].is_inferred());
+        assert_eq!(field.cell_neighbors[c1].unknown(), W | E);
+        assert!(field.cell_neighbors[c1].mine().is_empty());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
 
         // Round 3: Change (1,0) to Count(0) -> both (0,0) and (2,0) are inferred as Safe.
         field.update(".0");
-        assert!(field.cells[0].is_safe());
-        assert!(field.cells[2].is_safe());
+        assert!(field.cells[c0].is_safe());
+        assert!(field.cells[c2].is_safe());
 
         // Round 4 (Inference-breaking Case B): Directly violate inference on (0,0) by setting it to Mine,
         // and simultaneously change (1,0) to Count(1).
         // (2,0) must remain/be recomputed as Safe, and all neighbor invariants must hold.
         field.update("*1");
-        assert!(!field.cells[0].is_inferred());
-        assert!(field.cells[2].is_safe());
+        assert!(!field.cells[c0].is_inferred());
+        assert!(field.cells[c2].is_safe());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1893,18 +1933,21 @@ mod tests {
         // - Left partition {(0,0), (1,0)} infers (1,0) is Mine.
         // - Right partition {(3,0), (4,0)} infers (3,0) is Mine.
         let mut field = MineField::create("1...1");
-        assert!(field.cells[1].is_mine());
-        assert!(field.cells[3].is_mine());
-        let right_pid = field.partition_ids[4];
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c3 = field.cell_idx(Point::new(3, 0));
+        let c4 = field.cell_idx(Point::new(4, 0));
+        assert!(field.cells[c1].is_mine());
+        assert!(field.cells[c3].is_mine());
+        let right_pid = field.partition_ids[c4];
 
         // Trigger an inference-breaking update on the LEFT partition only:
         // change (0,0) from Count(1) to Count(0).
         // Left cell (1,0) must change from InferredValue::Mine to InferredValue::Safe,
         // while the untouched RIGHT partition (and cell (3,0)'s Mine inference) remains intact!
         field.update("0");
-        assert!(field.cells[1].is_safe());
-        assert!(field.cells[3].is_mine());
-        assert_eq!(field.partition_ids[4], right_pid);
+        assert!(field.cells[c1].is_safe());
+        assert!(field.cells[c3].is_mine());
+        assert_eq!(field.partition_ids[c4], right_pid);
         assert_eq!(
             field
                 .cells()
@@ -1930,20 +1973,21 @@ mod tests {
         // (0,0) is visited first (mine_count = 0), inferring (1,0) is Safe.
         // (2,0) is visited last (mine_count = 1), and index 2 is added to `field.invalid`.
         let mut field = MineField::create("0.1");
-        let invalid: Vec<_> = field.recent_invalid_cells().collect();
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let invalid: Vec<_> = field.recent_invalid().collect();
         // solver is free to mark the center as either  a mine or not
-        if field.cells[1].is_mine() {
-            assert_eq!(invalid, vec![CellIdx(0)]);
+        if field.cells[c1].is_mine() {
+            assert_eq!(invalid, vec![(0, 0).into()]);
         } else {
-            assert_eq!(invalid, vec![CellIdx(2)]);
+            assert_eq!(invalid, vec![(2, 0).into()]);
         }
 
         // Case A: Resolve the inconsistency by editing (0,0) (index 0, NOT index 2!)
         // from Count(0) to Count(1). Index 2 must be removed from `field.invalid`,
         // and (1,0) must now be inferred as Mine.
         field.update("1");
-        assert!(field.recent_invalid_cells().next().is_none());
-        assert!(field.cells[1].is_mine());
+        assert!(field.recent_invalid().next().is_none());
+        assert!(field.cells[c1].is_mine());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1951,19 +1995,19 @@ mod tests {
         // Re-introduce the inconsistency sequentially: set (0,0) back to Count(0).
         // Index 2 (highest mine_count) is again recorded in `field.invalid`.
         field.update("0");
-        let invalid: Vec<_> = field.recent_invalid_cells().collect();
-        if field.cells[1].is_mine() {
-            assert_eq!(invalid, vec![CellIdx(0)]);
+        let invalid: Vec<_> = field.recent_invalid().collect();
+        if field.cells[c1].is_mine() {
+            assert_eq!(invalid, vec![(0, 0).into()]);
         } else {
-            assert_eq!(invalid, vec![CellIdx(2)]);
-            assert!(field.cells[1].is_safe());
+            assert_eq!(invalid, vec![(2, 0).into()]);
+            assert!(field.cells[c1].is_safe());
         }
 
         // Case B: Resolve the inconsistency by editing (2,0) (index 2 itself)
         // from Count(1) to Count(0).
         field.update("..0");
-        assert!(field.recent_invalid_cells().next().is_none());
-        assert!(field.cells[1].is_safe());
+        assert!(field.recent_invalid().next().is_none());
+        assert!(field.cells[c1].is_safe());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -1977,11 +2021,14 @@ mod tests {
         // Step 1: Set (2,0) = Count(1) first (infers (1,0) = Mine),
         // and set (4,0) = Count(0), (6,0) = Count(1) (marks index 6 invalid).
         let mut field = MineField::create("..1.0.1");
-        assert!(field.cells[1].is_mine());
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c4 = field.cell_idx(Point::new(4, 0));
+        let c6 = field.cell_idx(Point::new(6, 0));
+        assert!(field.cells[c1].is_mine());
         // one of id: 4 or id: 6 is invalid
         assert_ne!(
-            field.cells[4].is_invalid(field.cell_neighbors[4]),
-            field.cells[6].is_invalid(field.cell_neighbors[6])
+            field.cells[c4].is_invalid(field.cell_neighbors[c4]),
+            field.cells[c6].is_invalid(field.cell_neighbors[c6])
         );
 
         // Step 2: Reveal (0,0) = Count(0) on the left partition.
@@ -1998,8 +2045,8 @@ mod tests {
         // Index 2 must be removed from `invalid`, while untouched index 6 remains in `invalid`!
         field.update("1*");
         assert_ne!(
-            field.cells[4].is_invalid(field.cell_neighbors[4]),
-            field.cells[6].is_invalid(field.cell_neighbors[6])
+            field.cells[c4].is_invalid(field.cell_neighbors[c4]),
+            field.cells[c6].is_invalid(field.cell_neighbors[c6])
         );
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -2017,7 +2064,6 @@ mod tests {
             ".333.
              .....",
         );
-        DetailMineField::eprintln(&field);
 
         // (1,1), (2,1), (3,1) are inferred as Mine and removed from partitions (partition_id == 0).
         // (2,0) has no remaining unknown neighbors and gets partition_id == 0.
@@ -2025,15 +2071,18 @@ mod tests {
         // Left:  {(0,0), (0,1), (1,0)}
         // Right: {(3,0), (4,0), (4,1)}
         assert_eq!(field.partitions.len(), 2);
-        assert_eq!(field.partition_ids[2].0, 0);
+        let c20 = field.cell_idx(Point::new(2, 0));
+        assert_eq!(field.partition_ids[c20].0, 0);
         for x in 1..=3 {
             let idx = field.cell_idx(Point { x, y: 1 });
             assert!(field.cells[idx].is_mine());
             assert_eq!(field.partition_ids[idx].0, 0);
         }
 
-        let left_pid = field.partition_ids[0];
-        let right_pid = field.partition_ids[4];
+        let c00 = field.cell_idx(Point::new(0, 0));
+        let c40 = field.cell_idx(Point::new(4, 0));
+        let left_pid = field.partition_ids[c00];
+        let right_pid = field.partition_ids[c40];
         assert_ne!(left_pid.0, 0);
         assert_ne!(right_pid.0, 0);
         assert_ne!(left_pid, right_pid);
@@ -2075,8 +2124,11 @@ mod tests {
     #[test]
     fn test_index_pending_updates_masks_and_logs_neighbors() {
         let mut field = MineField::new(3, 1).unwrap();
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
         field.pending.push(IndexedCell {
-            idx: CellIdx(1),
+            idx: c1,
             value: CellValue::for_mine_count(1),
         });
 
@@ -2084,26 +2136,27 @@ mod tests {
 
         // pending is drained and the neighbors' masks reflect the new known cell
         assert!(field.pending.is_empty());
-        assert_eq!(field.cells[1], CellValue::for_mine_count(1));
-        assert_eq!(field.cell_neighbors[0].opened(), !!E);
-        assert_eq!(field.cell_neighbors[2].opened(), !!W);
-        assert_eq!(field.cell_neighbors[1].unknown(), W | E);
+        assert_eq!(field.cells[c1], CellValue::for_mine_count(1));
+        assert_eq!(field.cell_neighbors[c0].opened(), !!E);
+        assert_eq!(field.cell_neighbors[c2].opened(), !!W);
+        assert_eq!(field.cell_neighbors[c1].unknown(), W | E);
 
         // only the changed cell will be queued for repartitioning
         let queued: Vec<CellIdx> = field.solved_queue.iter().collect();
-        assert_eq!(queued, vec![CellIdx(1)]);
+        assert_eq!(queued, vec![c1]);
     }
 
     #[test]
     fn test_index_pending_routes_breaking_changes_to_breaking_log() {
         let mut field = MineField::new(3, 1).unwrap();
+        let c1 = field.cell_idx(Point::new(1, 0));
         // Simulate a previously inferred-safe cell in the middle.
-        field.cells[1] = CellValue::CLEARED;
-        field.cell_neighbors[1].set_unknown(E | W);
+        field.cells[c1] = CellValue::CLEARED;
+        field.cell_neighbors[c1].set_unknown(E | W);
 
         // Confirming the inference (Safe(n)) is non-breaking...
         field.pending.push(IndexedCell {
-            idx: CellIdx(1),
+            idx: c1,
             value: CellValue::for_mine_count(1),
         });
         field.index_pending();
@@ -2113,7 +2166,7 @@ mod tests {
 
         // ...whereas contradicting it (Mine) is breaking.
         field.pending.push(IndexedCell {
-            idx: CellIdx(1),
+            idx: c1,
             value: CellValue::MINE,
         });
         field.index_pending();
@@ -2145,7 +2198,8 @@ mod tests {
         // Reverting cell 1 to Unknown leaves only {2, 3, 4} connected.
         field.update("._");
         assert_eq!(field.partitions.len(), 1);
-        assert!(field.partition_ids[1] < field.next_partition_id);
+        let c1 = field.cell_idx(Point::new(1, 0));
+        assert!(field.partition_ids[c1] < field.next_partition_id);
         assert_partition_invariants(&field);
     }
 
@@ -2180,28 +2234,30 @@ mod tests {
             "2.13
              2.1.",
         );
-        assert!(field.recent_invalid_cells().next().is_some());
+        assert!(field.recent_invalid().next().is_some());
     }
 
     #[test]
     fn test_partition_create_connected_bipartite_component() {
         // 3x1 board: [Count(1), Unknown, Count(2)]
         let mut field = MineField::new(3, 1).unwrap();
-        field.cells[0] = CellValue::for_mine_count(1);
+        let c0 = field.cell_idx(Point::new(0, 0));
+        let c1 = field.cell_idx(Point::new(1, 0));
+        let c2 = field.cell_idx(Point::new(2, 0));
+        field.cells[c0] = CellValue::for_mine_count(1);
 
-        field.cells[1] = CellValue::UNKNOWN;
-        field.cell_neighbors[1].set_opened(W | E);
-        field.cell_neighbors[1].set_unknown(!!E - E);
+        field.cells[c1] = CellValue::UNKNOWN;
+        field.cell_neighbors[c1].set_opened(W | E);
+        field.cell_neighbors[c1].set_unknown(!!E - E);
 
-        field.cells[2] = CellValue::for_mine_count(2);
+        field.cells[c2] = CellValue::for_mine_count(2);
 
-        let members = field.members(CellIdx(0), 3);
-        assert_eq!(members, vec![CellIdx(0), CellIdx(1), CellIdx(2)]);
-        let id = field.partition_ids[0];
+        let members = field.members(c0, 3);
+        assert_eq!(members, vec![c0, c1, c2]);
+        let id = field.partition_ids[c0];
         assert_ne!(id.0, 0);
-        for pid in field.partition_ids {
-            assert_eq!(pid, id);
-        }
+        assert_eq!(field.partition_ids[c1], id);
+        assert_eq!(field.partition_ids[c2], id);
     }
 
     #[test]
@@ -2252,7 +2308,7 @@ mod tests {
         field
             .set_cell(UserCell {
                 point: Point { x: 0, y: 0 },
-                value: UserCellValue::Safe(2),
+                value: UserCellValue::Opened(2),
             })
             .unwrap();
         field.solve();
@@ -2267,8 +2323,8 @@ mod tests {
 
         // Exact clone preserves all internal cell states and partition structures
         let cloned = field.clone();
-        assert_eq!(cloned.width, field.width);
-        assert_eq!(cloned.height, field.height);
+        assert_eq!(cloned.width_with_border, field.width_with_border);
+        assert_eq!(cloned.height_with_border, field.height_with_border);
         assert_eq!(cloned.mine_count, field.mine_count);
         assert_eq!(cloned.next_partition_id, field.next_partition_id);
         assert_eq!(cloned.partitions.len(), field.partitions.len());
@@ -2278,8 +2334,8 @@ mod tests {
 
         // rebuild_from_scratch resets inferences and re-solves
         let rebuilt = field.rebuild_from_scratch();
-        assert_eq!(rebuilt.width, field.width);
-        assert_eq!(rebuilt.height, field.height);
+        assert_eq!(rebuilt.width_with_border, field.width_with_border);
+        assert_eq!(rebuilt.height_with_border, field.height_with_border);
         assert_eq!(rebuilt.mine_count, field.mine_count);
         for (c1, c2) in field.cells.iter().zip(rebuilt.cells.iter()) {
             assert_eq!(c1, c2);

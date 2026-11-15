@@ -23,15 +23,15 @@
 use crate::{
     MineField, Point,
     solver::{
-        CellIdx, CellValue, FastNumberHasherBuilder, IndexedCell,
-        cell::{UserCellValue, cell_idx, coordinates},
-        grid::{DirectionSet, Neighbor},
+        CellIdx, CellValue,
+        cell::{UserCell, UserCellValue},
+        cell_idx, coordinates,
+        grid::DirectionSet,
     },
 };
 
 use core::slice;
 use std::{
-    collections::HashSet,
     fmt::{self, Debug, Display},
     ops::{Index, IndexMut},
 };
@@ -42,8 +42,8 @@ use std::{
 /// Unlike [`MineField::create`], which directly sets cell states on a [`MineField`] without
 /// requiring all mines to be placed, `FieldBuilder` maintains the complete ground-truth board
 /// (`mines`)—computing the exact adjacent mine count for every non-mine cell—while keeping
-/// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until `expose_cells`
-/// or `expand_cells` is called.
+/// the underlying [`MineField`] cells unexposed ([`crate::CellValue::Unknown`]) until `expose_points`
+/// or `expand_points` is called.
 ///
 /// # Examples
 ///
@@ -52,13 +52,13 @@ use std::{
 /// // Build a 3x3 board with a single mine at the bottom-right corner (2, 2):
 /// let mut builder = FieldBuilder::from_points(3, 3, [Point { x: 2, y: 2 }]);
 ///
-/// // Flood-fill from top-left (0, 0), which has Safe(0), automatically exposing
+/// // Flood-fill from top-left (0, 0), which has Opened(0), automatically exposing
 /// // the connected zero region and its clue boundary:
 /// builder.expand_points([Point { x: 0, y: 0 }]);
 ///
 /// let field = builder.into_mine_field();
-/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Safe(0));
-/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Safe(1));
+/// assert_eq!(field.cell(Point { x: 0, y: 0 }).value, CellValue::Opened(0));
+/// assert_eq!(field.cell(Point { x: 1, y: 1 }).value, CellValue::Opened(1));
 /// assert_eq!(field.cell(Point { x: 2, y: 2 }).value, CellValue::Unknown);
 /// ```
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl From<MineOrCount> for CellValue {
 impl From<MineOrCount> for UserCellValue {
     fn from(value: MineOrCount) -> Self {
         match value.0 {
-            n @ 0..=8 => UserCellValue::Safe(n as u8),
+            n @ 0..=8 => UserCellValue::Opened(n as u8),
             MineOrCount::MINE_VALUE => UserCellValue::Mine,
             _ => unreachable!(),
         }
@@ -157,7 +157,7 @@ impl FieldBuilder {
                 pt.x,
                 pt.y
             );
-            field[cell_idx(pt, width)] = MineOrCount::MINE;
+            field[(pt.x + pt.y * width) as usize] = MineOrCount::MINE;
         }
 
         Self::from_vec(width, height, field)
@@ -201,7 +201,7 @@ impl FieldBuilder {
     /// # use minesweeper_solver::{CellValue, FieldBuilder, Point};
     /// // 3x2 board with a mine at (0, 0), separated by '===':
     /// // - Upper section: ground-truth layout (*.. / ...)
-    /// // - Lower section: (1, 0) is revealed as Safe(1)
+    /// // - Lower section: (1, 0) is revealed as Opened(1)
     /// let mut builder = FieldBuilder::from_spec(
     ///     "*..
     ///      ...
@@ -213,10 +213,10 @@ impl FieldBuilder {
     /// assert_eq!(builder.mine_field().width(), 3);
     /// assert_eq!(builder.mine_field().height(), 2);
     ///
-    /// // The underlying MineField has (1, 0) revealed as Safe(1):
+    /// // The underlying MineField has (1, 0) revealed as Opened(1):
     /// assert_eq!(
     ///     builder.mine_field().cell(Point { x: 1, y: 0 }).value,
-    ///     CellValue::Safe(1)
+    ///     CellValue::Opened(1)
     /// );
     /// assert_eq!(
     ///     builder.mine_field().cell(Point { x: 0, y: 0 }).value,
@@ -250,21 +250,21 @@ impl FieldBuilder {
         let (width, height, cell_iter) = MineField::cells_and_size_from_spec(mine_spec);
         let mut field = vec![MineOrCount::ZERO; width as usize * height as usize];
         let mut user_checks = Vec::new();
-        for IndexedCell { idx, value } in cell_iter {
-            if value.is_mine() {
-                field[idx] = MineOrCount::MINE;
-            } else if value.is_open() {
-                user_checks.push((idx, value.mine_count()));
+        for UserCell { point, value } in cell_iter {
+            if value == UserCellValue::Mine {
+                field[cell_idx(point, width) as usize] = MineOrCount::MINE;
+            } else if let UserCellValue::Opened(value) = value {
+                user_checks.push((point, value));
             }
         }
         let mut builder = Self::from_vec(width, height, field);
-        for (idx, expected) in user_checks {
-            let actual = builder.mines[idx];
+        for (pt, expected) in user_checks {
+            let actual = builder.mines[cell_idx(pt, width) as usize];
             assert!(
                 actual.0 == expected as i8,
                 "Invalid user provided value: {expected} at coordinates {}. \
                  It does not reflect the actual mine count {}",
-                coordinates(idx, width),
+                pt,
                 actual.count()
             );
         }
@@ -315,7 +315,7 @@ impl FieldBuilder {
     ///     FieldBuilder::random_with_zero_region(5, 5, 3, zero_pt, |cells| cells.reverse());
     /// builder.expand_points([zero_pt]);
     /// let field = builder.into_mine_field();
-    /// assert_eq!(field.cell(zero_pt).value, CellValue::Safe(0));
+    /// assert_eq!(field.cell(zero_pt).value, CellValue::Opened(0));
     /// ```
     pub fn random_with_zero_region(
         width: u32,
@@ -334,10 +334,10 @@ impl FieldBuilder {
             width,
             height,
             mine_count,
-            cell_idx(zero_cell, width)
-                .neighbor_iter(width, DirectionSet::all_neighbors(zero_cell, width, height))
-                .map(|n| n.idx)
-                .chain([cell_idx(zero_cell, width)]),
+            DirectionSet::all_neighbors(zero_cell, width, height)
+                .iter()
+                .map(|d| zero_cell.neighbor(d))
+                .chain([zero_cell]),
             shuffle,
         )
     }
@@ -348,15 +348,15 @@ impl FieldBuilder {
         width: u32,
         height: u32,
         mine_count: u32,
-        reserved_points: impl IntoIterator<Item = CellIdx>,
+        reserved_points: impl IntoIterator<Item = Point>,
         mut shuffle: impl FnMut(&mut [i8]),
     ) -> Self {
         let len = width as usize * height as usize;
         let mut field = vec![MineOrCount::ZERO; len];
-        let mut reserved_indices: Vec<_> = reserved_points.into_iter().collect();
-        reserved_indices.sort_unstable();
-        reserved_indices.dedup();
-        let end_shuffle = len - reserved_indices.len();
+        let mut reserved_points: Vec<_> = reserved_points.into_iter().collect();
+        reserved_points.sort_unstable();
+        reserved_points.dedup();
+        let end_shuffle = len - reserved_points.len();
         assert!(
             mine_count as usize <= end_shuffle,
             "Too many mines for reserved region"
@@ -371,8 +371,8 @@ impl FieldBuilder {
         let bytes = unsafe { slice::from_raw_parts_mut(ptr, end_shuffle) };
         shuffle(bytes);
 
-        for (i, reserve_idx) in (end_shuffle..).zip(reserved_indices) {
-            field.swap(i, reserve_idx.0 as usize);
+        for (i, reserve_pt) in (end_shuffle..).zip(reserved_points) {
+            field.swap(i, cell_idx(reserve_pt, width) as usize);
         }
 
         Self::from_vec(width, height, field)
@@ -386,14 +386,12 @@ impl FieldBuilder {
 
         for idx in 0..field.len() {
             if field[idx].is_mine() {
-                let idx = CellIdx(idx as u32);
                 mine_count += 1;
-                let pt = coordinates(idx, width);
-                for Neighbor { idx: neighbor, .. } in
-                    idx.neighbor_iter(width, DirectionSet::all_neighbors(pt, width, height))
-                {
-                    if !field[neighbor].is_mine() {
-                        field[neighbor] = MineOrCount(field[neighbor].count() + 1);
+                let pt = coordinates(idx as u32, width);
+                for dir in DirectionSet::all_neighbors(pt, width, height) {
+                    let idx = cell_idx(pt.neighbor(dir), width) as usize;
+                    if field[idx] != MineOrCount::MINE {
+                        field[idx] = MineOrCount(field[idx].count() + 1);
                     }
                 }
             }
@@ -415,54 +413,47 @@ impl FieldBuilder {
         self.field
     }
 
-    /// Reveals the ground-truth [`CellValue`](crate::CellValue)s for the specified `points` on the underlying [`MineField`].
-    pub(super) fn expose_cells(&mut self, points: impl IntoIterator<Item = CellIdx>) -> &mut Self {
-        self.field
-            .pending
-            .extend(points.into_iter().map(|idx| IndexedCell {
-                idx,
-                value: self.mines[idx].into(),
-            }));
-        self.field.solve();
-        self
-    }
-
     pub fn expose_points(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
-        let width = self.field.width;
-        self.expose_cells(points.into_iter().map(|p| cell_idx(p, width)))
-    }
-
-    /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
-    /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
-    pub(super) fn expand_cells(&mut self, ids: impl IntoIterator<Item = CellIdx>) -> &mut Self {
-        let mut all_ids =
-            HashSet::with_capacity_and_hasher(self.mines.len(), FastNumberHasherBuilder);
-        let mut zero_queue = Vec::with_capacity(self.mines.len());
-
-        for idx in ids {
-            all_ids.insert(idx);
-            if self.mines[idx].count() == 0 {
-                zero_queue.push(idx);
-            }
-        }
-        while let Some(idx) = zero_queue.pop() {
-            for Neighbor { idx: n_idx, .. } in
-                idx.neighbor_iter(self.field.width, self.field.cell_neighbors[idx].all())
-            {
-                if all_ids.insert(n_idx) && self.mines[n_idx].count() == 0 {
-                    zero_queue.push(n_idx);
-                }
-            }
-        }
-
-        self.expose_cells(all_ids)
+        let width = self.field.width();
+        self.field
+            .set_cells(points.into_iter().map(|point| UserCell {
+                point,
+                value: self.mines[(point.x + point.y * width) as usize].into(),
+            }))
+            .unwrap();
+        self
     }
 
     /// Reveals `points` on the underlying [`MineField`] and recursively flood-fills any revealed
     /// `0`-count cells to expose their entire connected zero-region and its adjacent clue boundary.
     pub fn expand_points(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
-        let width = self.field.width;
-        self.expand_cells(points.into_iter().map(|p| cell_idx(p, width)))
+        use std::collections::HashSet;
+
+        let mut all_pts = HashSet::with_capacity(self.mines.len());
+        let mut zero_queue = Vec::with_capacity(self.mines.len());
+
+        let width = self.field.width();
+        let height = self.field.height();
+
+        for pt in points {
+            all_pts.insert(pt);
+            if self.mines[(pt.x + pt.y * width) as usize].count() == 0 {
+                zero_queue.push(pt);
+            }
+        }
+        while let Some(pt) = zero_queue.pop() {
+            for dir in DirectionSet::all_neighbors(pt, width, height) {
+                let n_pt = pt.neighbor(dir);
+
+                if all_pts.insert(n_pt)
+                    && self.mines[(n_pt.x + n_pt.y * width) as usize].count() == 0
+                {
+                    zero_queue.push(n_pt);
+                }
+            }
+        }
+
+        self.expose_points(all_pts)
     }
 
     // Selects a random member of a live partition to expose.
@@ -472,9 +463,13 @@ impl FieldBuilder {
         members: &[CellIdx],
         mut idx_selector: impl FnMut(usize) -> usize,
     ) -> Option<CellIdx> {
+        let width = self.field.width();
         let members: Vec<_> = members
             .iter()
-            .filter(|&i| self.mines[i.0 as usize] != MineOrCount::MINE)
+            .filter(|&&i| {
+                let pt = self.field.coordinates(i);
+                self.mines[(pt.x + pt.y * width) as usize] != MineOrCount::MINE
+            })
             .filter_map(|&i| self.field.cells[i].is_unknown().then_some(i))
             .collect();
         (!members.is_empty()).then_some(members[idx_selector(members.len())])
@@ -484,8 +479,8 @@ impl FieldBuilder {
 impl Display for FieldBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut idx = 0;
-        for _ in 0..self.field.height {
-            for _ in 0..self.field.width {
+        for _ in 0..self.field.height() {
+            for _ in 0..self.field.width() {
                 match self.mines[idx] {
                     MineOrCount::MINE => write!(f, "*"),
                     _ => write!(f, "."),
@@ -494,7 +489,7 @@ impl Display for FieldBuilder {
             }
             writeln!(f)?;
         }
-        for _ in 0..self.field.width {
+        for _ in 0..self.field.width() {
             write!(f, "=")?;
         }
         writeln!(f)?;
@@ -550,7 +545,7 @@ mod tests {
         assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Mine);
         assert_eq!(
             field.cell(Point { x: 1, y: 0 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
         assert_eq!(
             field.cell(Point { x: 2, y: 0 }).value,
@@ -573,7 +568,7 @@ mod tests {
         builder.expose_points([Point { x: 1, y: 1 }]);
         assert_eq!(
             builder.mine_field().cell(Point { x: 1, y: 1 }).value,
-            UserCellValue::Safe(8)
+            UserCellValue::Opened(8)
         );
 
         // Also test a valid spec with mixed counts (0, 1, 2, 7) and '_'
@@ -593,19 +588,19 @@ mod tests {
         let field7 = builder7.into_mine_field();
         assert_eq!(
             field7.cell(Point { x: 1, y: 1 }).value,
-            UserCellValue::Safe(7)
+            UserCellValue::Opened(7)
         );
         assert_eq!(
             field7.cell(Point { x: 1, y: 2 }).value,
-            UserCellValue::Safe(4)
+            UserCellValue::Opened(4)
         );
         assert_eq!(
             field7.cell(Point { x: 1, y: 3 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
         assert_eq!(
             field7.cell(Point { x: 1, y: 4 }).value,
-            UserCellValue::Safe(0)
+            UserCellValue::Opened(0)
         );
     }
 
@@ -633,7 +628,7 @@ mod tests {
         builder.expand_points([Point { x: 2, y: 1 }]);
         assert_eq!(
             builder.mine_field().cell(Point { x: 2, y: 1 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             builder.mine_field().cell(Point { x: 0, y: 0 }).value,
@@ -650,14 +645,11 @@ mod tests {
                 if pt == (Point { x: 3, y: 2 }) {
                     assert_eq!(field.cell(pt).value, UserCellValue::Unknown);
                     assert_eq!(
-                        field
-                            .recent_inferred_mine_cells()
-                            .map(|i| coordinates(i, 4))
-                            .collect::<Vec<Point>>(),
+                        field.recent_inferred_mines().collect::<Vec<Point>>(),
                         vec![pt]
                     );
                 } else {
-                    assert!(matches!(field.cell(pt).value, UserCellValue::Safe(_)));
+                    assert!(matches!(field.cell(pt).value, UserCellValue::Opened(_)));
                 }
             }
         }
@@ -677,16 +669,16 @@ mod tests {
         assert_eq!(actual_mines, 7);
 
         let zero_pt = Point { x: 2, y: 2 };
-        let zero_cell_idx = cell_idx(zero_pt, 6);
         let mut zero_builder =
             FieldBuilder::random_with_zero_region(6, 5, 10, zero_pt, shuffle(&mut rng()));
         zero_builder.expand_points([zero_pt]);
         let field = zero_builder.into_mine_field();
-        assert_eq!(field.cell(zero_pt).value, UserCellValue::Safe(0));
-        for Neighbor { idx, .. } in
-            zero_cell_idx.neighbor_iter(6, DirectionSet::all_neighbors(zero_pt, 6, 5))
-        {
-            assert!(matches!(field.cells[idx].cell_type(), CellType::Opened));
+        assert_eq!(field.cell(zero_pt).value, UserCellValue::Opened(0));
+        for dir in DirectionSet::all_neighbors(zero_pt, 6, 5) {
+            assert!(matches!(
+                field.cells[field.cell_idx(zero_pt.neighbor(dir))].cell_type(),
+                CellType::Opened
+            ));
         }
     }
 
@@ -715,11 +707,11 @@ mod tests {
         // Underlying MineField state check: pre-revealed cells from lower spec
         assert_eq!(
             builder.field.cell(Point { x: 1, y: 0 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             builder.field.cell(Point { x: 2, y: 2 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
         assert_eq!(
             builder.field.cell(Point { x: 0, y: 0 }).value,
@@ -734,7 +726,7 @@ mod tests {
         builder.expose_points([Point { x: 1, y: 1 }]);
         assert_eq!(
             builder.field.cell(Point { x: 1, y: 1 }).value,
-            UserCellValue::Safe(1)
+            UserCellValue::Opened(1)
         );
     }
 
@@ -784,7 +776,7 @@ mod tests {
         assert_eq!(builder_short_sep.field.mine_count(), Some(2));
         assert_eq!(
             builder_short_sep.field.cell(Point { x: 1, y: 0 }).value,
-            UserCellValue::Safe(2)
+            UserCellValue::Opened(2)
         );
 
         // Test with inferred display characters ('x' and '#') in the lower spec
@@ -926,7 +918,7 @@ mod tests {
                 DetailMineField::eprintln(&builder.field);
                 ColoredMineField::println(&builder.field);
             }
-            let inferred: Vec<_> = builder.field.recent_inferred_safe_cells().collect();
+            let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
             if inferred.is_empty() {
                 let partition = builder
                     .field
@@ -959,16 +951,19 @@ mod tests {
                         panic!();
                     }
                     assert_eq!(builder.field.cells[idx], CellValue::UNKNOWN);
-                    builder.expand_cells([idx]);
+                    builder.expand_points([builder.field.coordinates(idx)]);
                     assert_ne!(builder.field.cells[idx], CellValue::UNKNOWN);
                 } else {
                     break;
                 }
             } else {
-                for &i in inferred.iter() {
-                    assert_eq!(builder.field.cells[i], CellValue::CLEARED);
+                for &p in inferred.iter() {
+                    assert_eq!(
+                        builder.field.cells[builder.field.cell_idx(p)],
+                        CellValue::CLEARED
+                    );
                 }
-                builder.expand_cells(inferred);
+                builder.expand_points(inferred);
             }
 
             // compare against a fresh (non incremental) MineField

@@ -2,14 +2,13 @@
 
 //! 2D grid coordinates, compass directions, and bitset-backed neighbor iteration.
 
-use crate::solver::CellIdx;
 use std::{
     fmt::{self, Display, Formatter},
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
 /// A 2D coordinate (`x`, `y`) on the Minesweeper grid, with `(0, 0)` at the top-left corner.
-#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
     /// Zero-based column index from the left edge.
     pub x: u32,
@@ -25,18 +24,33 @@ impl Point {
 
     /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
     /// width field. This is the corollary to [`Point::to_index`].
-    pub(super) const fn from_index(cell_idx: CellIdx, width: u32) -> Point {
-        let cell_idx: u32 = cell_idx.0;
-        let y = cell_idx / width;
-        let x = cell_idx - y * width;
+    pub(super) const fn from_index(idx: u32, width: u32) -> Point {
+        let y = idx / width;
+        let x = idx - y * width;
         Point { x, y }
     }
 
     /// Get a unique ID for the point in a given-width field. Useful for indexing in
     /// a Vector or Array. This is the corollary to [`Point::from_index`].
     #[inline]
-    pub(super) const fn to_index(self, width: u32) -> CellIdx {
-        CellIdx(self.x + self.y * width)
+    pub(super) const fn to_index(self, width: u32) -> u32 {
+        self.x + self.y * width
+    }
+
+    #[inline]
+    pub(super) const fn neighbor(self, d: Direction) -> Point {
+        let Point { x, y } = self;
+        match d.index() {
+            0 => Point { x: x - 1, y: y - 1 },
+            1 => Point { x, y: y - 1 },
+            2 => Point { x: x + 1, y: y - 1 },
+            3 => Point { x: x - 1, y },
+            4 => Point { x: x + 1, y },
+            5 => Point { x: x - 1, y: y + 1 },
+            6 => Point { x, y: y + 1 },
+            7 => Point { x: x + 1, y: y + 1 },
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -56,16 +70,6 @@ impl From<Point> for (u32, u32) {
     fn from(Point { x, y }: Point) -> Self {
         (x, y)
     }
-}
-
-/// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
-/// [`Direction`] pointing from that neighbor back to the origin cell.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct Neighbor {
-    /// The neighboring value or coordinate.
-    pub idx: CellIdx,
-    /// The direction from `neighbor` back to the origin cell.
-    pub from: Direction,
 }
 
 /// Human-readable compass abbreviations ordered by bit position (`0..8`).
@@ -490,7 +494,7 @@ mod tests {
         let width = 10;
         let p = Point { x: 4, y: 7 };
         let idx = p.to_index(width);
-        assert_eq!(idx.0, 74);
+        assert_eq!(idx, 74);
         assert_eq!(Point::from_index(idx, width), p);
         assert_eq!(p.to_string(), "(4, 7)");
     }

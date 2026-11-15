@@ -9,21 +9,23 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::solver::{
-    Metrics,
-    grid::{DirectionSet, DirectionSetIterator, E, N, NE, NW, Neighbor, Point, S, SE, SW, W},
-    stats,
+use crate::{
+    MineField,
+    solver::{
+        grid::{Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Point, S, SE, SW, W},
+        stats,
+    },
 };
 
 /// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
 /// width field. This is the corollary to `cell_id`.
-pub(super) fn coordinates(cell_idx: CellIdx, width: u32) -> Point {
-    Point::from_index(cell_idx, width)
+pub(super) fn coordinates(idx: u32, width: u32) -> Point {
+    Point::from_index(idx, width)
 }
 
 /// Get a unique ID for the cell in a given-width field. Useful for indexing in
 /// a Vector or Array. This is the corollary to `coordinates`.
-pub(super) fn cell_idx(p: Point, width: u32) -> CellIdx {
+pub(super) fn cell_idx(p: Point, width: u32) -> u32 {
     p.to_index(width)
 }
 
@@ -63,7 +65,7 @@ pub enum UserCellValue {
     /// The cell contains a mine.
     Mine,
     /// The cell is revealed and has the given number of adjacent mines (`0..=8`).
-    Safe(u8),
+    Opened(u8),
 }
 
 impl Display for UserCellValue {
@@ -72,7 +74,7 @@ impl Display for UserCellValue {
             UserCellValue::Unknown => write!(f, "Unknown"),
             UserCellValue::Wall => write!(f, "Wall"),
             UserCellValue::Mine => write!(f, "MINE"),
-            UserCellValue::Safe(c) => write!(f, "{c}"),
+            UserCellValue::Opened(c) => write!(f, "{c}"),
         }
     }
 }
@@ -338,17 +340,11 @@ impl CellValue {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_change(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
+        field: &mut MineField,
         idx: CellIdx,
         new_value: CellValue,
-        width: u32,
     ) -> ChangeStatus {
-        let prev_value = cells[idx];
+        let prev_value = field.cells[idx];
 
         let change_function = match prev_value.cell_type() {
             CellType::Unknown => match new_value.cell_type() {
@@ -387,259 +383,167 @@ impl CellValue {
             CellType::Wall => Self::general_change_value,
         };
 
-        change_function(
-            cells,
-            flags,
-            neighbors,
-            solved_queue,
-            desolved_queue,
-            metrics,
-            idx,
-            new_value,
-            width,
-        )
+        change_function(field, idx, new_value)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn no_change(
-        _cells: &mut [CellValue],
-        _flags: &mut [CellFlags],
-        _neighbors: &mut [CellNeighbors],
-        _solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        _metrics: &mut Metrics,
-        _idx: CellIdx,
-        _new_value: CellValue,
-        _width: u32,
-    ) -> ChangeStatus {
+    fn no_change(_field: &mut MineField, _idx: CellIdx, _new_value: CellValue) -> ChangeStatus {
         ChangeStatus::NoChange
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn flag_to_mine(
-        cells: &mut [CellValue],
-        _flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        _solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let unknown_neighbors = neighbors[idx].all();
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
-            let neighbors = &mut neighbors[neighbor.idx];
+    fn flag_to_mine(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
+        let unknown_neighbors = field.cell_neighbors[idx].all();
+        field.metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, unknown_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.inferred -= neighbor.from;
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
         ChangeStatus::NoChange
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mine_to_flag(
-        cells: &mut [CellValue],
-        _flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        _solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let unknown_neighbors = neighbors[idx].all();
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
-            let neighbors = &mut neighbors[neighbor.idx];
+    fn mine_to_flag(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
+        let unknown_neighbors = field.cell_neighbors[idx].all();
+        field.metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, unknown_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.inferred |= neighbor.from;
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
         ChangeStatus::NoChange
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn open_to_open(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        _neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        _metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        _width: u32,
-    ) -> ChangeStatus {
+    fn open_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // count -> count (diff counts) - it could be de-solved, or solved
-        cells[idx] = new_value;
-        solved_queue.push(flags, idx);
-        desolved_queue.push(flags, idx);
+        field.cells[idx] = new_value;
+        field.solved_queue.push(&mut field.cell_flags, idx);
+        field.desolved_queue.push(&mut field.cell_flags, idx);
         ChangeStatus::Breaking
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn unknown_to_mine(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let open_neighbors = cell_neighbors[idx].opened;
-        metrics.inc_neighbor_visits(open_neighbors);
-        for neighbor in idx.neighbor_iter(width, open_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+    fn unknown_to_mine(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
+        let open_neighbors = field.cell_neighbors[idx].opened;
+        field.metrics.inc_neighbor_visits(open_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, open_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.mine |= neighbor.from;
             neighbors.unknown -= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
+            field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining =
-            cell_neighbors[idx].mine | cell_neighbors[idx].unknown | cell_neighbors[idx].inferred;
-        metrics.inc_neighbor_visits(remaining);
-        for neighbor in idx.neighbor_iter(width, remaining) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let remaining = field.cell_neighbors[idx].mine
+            | field.cell_neighbors[idx].unknown
+            | field.cell_neighbors[idx].inferred;
+        field.metrics.inc_neighbor_visits(remaining);
+        for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.mine |= neighbor.from;
             neighbors.unknown -= neighbor.from;
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
         ChangeStatus::NonBreaking
     }
 
     #[allow(clippy::too_many_arguments)]
     fn unknown_to_flagged(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
+        field: &mut MineField,
         idx: CellIdx,
         new_value: CellValue,
-        width: u32,
     ) -> ChangeStatus {
-        let open_neighbors = cell_neighbors[idx].opened;
-        metrics.inc_neighbor_visits(open_neighbors);
-        for neighbor in idx.neighbor_iter(width, open_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let open_neighbors = field.cell_neighbors[idx].opened;
+        field.metrics.inc_neighbor_visits(open_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, open_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.mine |= neighbor.from;
             neighbors.inferred |= neighbor.from;
             neighbors.unknown -= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
+            field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining =
-            cell_neighbors[idx].mine | cell_neighbors[idx].unknown | cell_neighbors[idx].inferred;
-        metrics.inc_neighbor_visits(remaining);
-        for neighbor in idx.neighbor_iter(width, remaining) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let remaining = field.cell_neighbors[idx].mine
+            | field.cell_neighbors[idx].unknown
+            | field.cell_neighbors[idx].inferred;
+        field.metrics.inc_neighbor_visits(remaining);
+        for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.mine |= neighbor.from;
             neighbors.inferred |= neighbor.from;
             neighbors.unknown -= neighbor.from;
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
         ChangeStatus::NonBreaking
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn unknown_to_clear(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
-        let open_neighbors = cell_neighbors[idx].opened;
-        metrics.inc_neighbor_visits(open_neighbors);
-        for neighbor in idx.neighbor_iter(width, open_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+    fn unknown_to_clear(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
+        let open_neighbors = field.cell_neighbors[idx].opened;
+        field.metrics.inc_neighbor_visits(open_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, open_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.unknown -= neighbor.from;
             neighbors.inferred |= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
+            field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining =
-            cell_neighbors[idx].mine | cell_neighbors[idx].unknown | cell_neighbors[idx].inferred;
-        metrics.inc_neighbor_visits(remaining);
-        for neighbor in idx.neighbor_iter(width, remaining) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let remaining = field.cell_neighbors[idx].mine
+            | field.cell_neighbors[idx].unknown
+            | field.cell_neighbors[idx].inferred;
+        field.metrics.inc_neighbor_visits(remaining);
+        for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.unknown -= neighbor.from;
             neighbors.inferred |= neighbor.from;
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
 
         ChangeStatus::NonBreaking
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn unknown_to_open(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
+    fn unknown_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // opened:  -unknown, +solve
         // cleared: -unknown
         // unknown: -unknown,+opened
         // self: alt = unknown, +solve
-        let opened_neighbors = cell_neighbors[idx].opened;
-        metrics.inc_neighbor_visits(opened_neighbors);
-        for neighbor in idx.neighbor_iter(width, opened_neighbors) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let opened_neighbors = field.cell_neighbors[idx].opened;
+        field.metrics.inc_neighbor_visits(opened_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, opened_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.unknown -= neighbor.from;
             neighbors.opened |= neighbor.from;
-            solved_queue.push(flags, neighbor.idx);
+            field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining =
-            cell_neighbors[idx].mine | cell_neighbors[idx].unknown | cell_neighbors[idx].inferred;
-        metrics.inc_neighbor_visits(remaining);
-        for neighbor in idx.neighbor_iter(width, remaining) {
-            let neighbors = &mut cell_neighbors[neighbor.idx];
+        let remaining = field.cell_neighbors[idx].mine
+            | field.cell_neighbors[idx].unknown
+            | field.cell_neighbors[idx].inferred;
+        field.metrics.inc_neighbor_visits(remaining);
+        for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.unknown -= neighbor.from;
             neighbors.opened |= neighbor.from;
         }
-        cells[idx] = new_value;
-        solved_queue.push(flags, idx);
+        field.cells[idx] = new_value;
+        field.solved_queue.push(&mut field.cell_flags, idx);
 
         ChangeStatus::NonBreaking
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn clear_to_open(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        _desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
-        idx: CellIdx,
-        new_value: CellValue,
-        width: u32,
-    ) -> ChangeStatus {
+    fn clear_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // opened: n/a
         // cleared: n/a
         // unknown:  -cleared, +opened
         // self: +solve
-        let unknown_neighbors = neighbors[idx].all();
-        metrics.inc_neighbor_visits(unknown_neighbors);
-        for neighbor in idx.neighbor_iter(width, unknown_neighbors) {
-            let neighbors = &mut neighbors[neighbor.idx];
+        let unknown_neighbors = field.cell_neighbors[idx].all();
+        field.metrics.inc_neighbor_visits(unknown_neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, unknown_neighbors) {
+            let neighbors = &mut field.cell_neighbors[neighbor.idx];
             neighbors.inferred -= neighbor.from;
             neighbors.opened |= neighbor.from;
         }
-        cells[idx] = new_value;
-        solved_queue.push(flags, idx);
+        field.cells[idx] = new_value;
+        field.solved_queue.push(&mut field.cell_flags, idx);
 
         ChangeStatus::NonBreaking
     }
@@ -648,17 +552,11 @@ impl CellValue {
     // a loop over all neighbors with a decent amount of branching
     #[allow(clippy::too_many_arguments)]
     fn general_change_value(
-        cells: &mut [CellValue],
-        flags: &mut [CellFlags],
-        cell_neighbors: &mut [CellNeighbors],
-        solved_queue: &mut GuardedQueue,
-        desolved_queue: &mut GuardedQueue,
-        metrics: &mut Metrics,
+        field: &mut MineField,
         idx: CellIdx,
         new_value: CellValue,
-        width: u32,
     ) -> ChangeStatus {
-        let prev_value = cells[idx];
+        let prev_value = field.cells[idx];
         if prev_value == new_value {
             return ChangeStatus::NoChange;
         }
@@ -673,53 +571,56 @@ impl CellValue {
             ChangeStatus::Breaking
         };
 
-        let height = cells.len() as u32 / width;
         let neighbors = if prev_value.is_wall() {
-            let pt = Point::from_index(idx, width);
-            cell_neighbors[idx].unknown.clear();
-            cell_neighbors[idx].opened.clear();
-            cell_neighbors[idx].mine.clear();
-            cell_neighbors[idx].inferred.clear();
-            DirectionSet::all_neighbors(pt, width, height)
+            let pt = coordinates(idx.0, field.width_with_border);
+            field.cell_neighbors[idx].unknown.clear();
+            field.cell_neighbors[idx].opened.clear();
+            field.cell_neighbors[idx].mine.clear();
+            field.cell_neighbors[idx].inferred.clear();
+            DirectionSet::all_neighbors(pt, field.width_with_border, field.height_with_border)
         } else {
-            cell_neighbors[idx].all()
+            field.cell_neighbors[idx].all()
         };
 
-        metrics.inc_neighbor_visits(neighbors);
-        for neighbor in idx.neighbor_iter(width, neighbors) {
+        field.metrics.inc_neighbor_visits(neighbors);
+        for neighbor in idx.neighbor_iter(field.width_with_border, neighbors) {
             let dir = neighbor.from.reverse();
-            let n_value = cells[neighbor.idx];
+            let n_value = field.cells[neighbor.idx];
             if n_value.is_mine() {
-                cell_neighbors[idx].mine |= dir;
+                field.cell_neighbors[idx].mine |= dir;
             } else if n_value.is_open() {
-                cell_neighbors[idx].opened |= dir;
+                field.cell_neighbors[idx].opened |= dir;
                 if change_status == ChangeStatus::Breaking {
-                    desolved_queue.push(flags, neighbor.idx);
+                    field
+                        .desolved_queue
+                        .push(&mut field.cell_flags, neighbor.idx);
                 }
-                solved_queue.push(flags, neighbor.idx);
+                field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
             } else if n_value.is_unknown() {
-                cell_neighbors[idx].unknown |= dir;
+                field.cell_neighbors[idx].unknown |= dir;
             }
             if n_value.is_inferred() {
-                cell_neighbors[idx].inferred |= dir;
+                field.cell_neighbors[idx].inferred |= dir;
             }
             match prev_value.cell_type() {
                 CellType::Unknown => {
-                    cell_neighbors[neighbor.idx].unknown -= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].unknown -= neighbor.from;
                 }
                 CellType::Mine => {
-                    cell_neighbors[neighbor.idx].mine -= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].mine -= neighbor.from;
                 }
                 CellType::Flag => {
-                    cell_neighbors[neighbor.idx].mine -= neighbor.from;
-                    cell_neighbors[neighbor.idx].inferred -= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].mine -= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].inferred -= neighbor.from;
                 }
                 CellType::Opened => {
-                    cell_neighbors[neighbor.idx].opened -= neighbor.from;
-                    desolved_queue.push(flags, neighbor.idx);
+                    field.cell_neighbors[neighbor.idx].opened -= neighbor.from;
+                    field
+                        .desolved_queue
+                        .push(&mut field.cell_flags, neighbor.idx);
                 }
                 CellType::Cleared => {
-                    cell_neighbors[neighbor.idx].inferred -= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].inferred -= neighbor.from;
                 }
                 CellType::Wall => {
                     // nothing to do
@@ -727,32 +628,32 @@ impl CellValue {
             }
             match new_value.cell_type() {
                 CellType::Unknown => {
-                    cell_neighbors[neighbor.idx].unknown |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].unknown |= neighbor.from;
                 }
                 CellType::Mine => {
-                    cell_neighbors[neighbor.idx].mine |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].mine |= neighbor.from;
                 }
                 CellType::Flag => {
-                    cell_neighbors[neighbor.idx].mine |= neighbor.from;
-                    cell_neighbors[neighbor.idx].inferred |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].mine |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].inferred |= neighbor.from;
                 }
                 CellType::Opened => {
-                    cell_neighbors[neighbor.idx].opened |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].opened |= neighbor.from;
                 }
                 CellType::Cleared => {
-                    cell_neighbors[neighbor.idx].inferred |= neighbor.from;
+                    field.cell_neighbors[neighbor.idx].inferred |= neighbor.from;
                 }
                 CellType::Wall => {
                     // nothing to add
                 }
             }
         }
-        cells[idx] = new_value;
+        field.cells[idx] = new_value;
         if prev_value.is_open() {
-            desolved_queue.push(flags, idx);
+            field.desolved_queue.push(&mut field.cell_flags, idx);
         }
         if new_value.is_open() {
-            solved_queue.push(flags, idx);
+            field.solved_queue.push(&mut field.cell_flags, idx);
         }
 
         change_status
@@ -765,7 +666,7 @@ impl From<UserCellValue> for CellValue {
             UserCellValue::Unknown => Self::UNKNOWN,
             UserCellValue::Wall => Self::WALL,
             UserCellValue::Mine => Self::MINE,
-            UserCellValue::Safe(c) => Self(c),
+            UserCellValue::Opened(c) => Self(c),
         }
     }
 }
@@ -794,7 +695,7 @@ impl From<UserValueWithInference> for CellValue {
                 inferred: InferredValue::None,
             } => CellValue::UNKNOWN,
             UserValueWithInference {
-                value: UserCellValue::Safe(c),
+                value: UserCellValue::Opened(c),
                 ..
             } => CellValue::for_mine_count(c),
             _ => unreachable!(),
@@ -826,7 +727,7 @@ impl From<CellValue> for UserValueWithInference {
                 inferred: InferredValue::None,
             },
             c => UserValueWithInference {
-                value: UserCellValue::Safe(c.0 & 0xf),
+                value: UserCellValue::Opened(c.0 & 0xf),
                 inferred: InferredValue::None,
             },
         }
@@ -890,6 +791,64 @@ impl CellType {
     const INFERRED_MASK: u8 = 0b1000;
 }
 
+/// Associates a neighboring item `T` (such as a [`Point`] or cell reference) with the
+/// [`Direction`] pointing from that neighbor back to the origin cell.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub(super) struct Neighbor {
+    /// The neighboring value or coordinate.
+    pub idx: CellIdx,
+    /// The direction from `neighbor` back to the origin cell.
+    pub from: Direction,
+}
+
+pub(super) fn create_grid_with_border(
+    width: u32,
+    height: u32,
+) -> (Box<[CellValue]>, Box<[CellNeighbors]>) {
+    let width = width as usize;
+    let height = height as usize;
+    let len = (width + 1) * (height + 2) + 1;
+    let mut values = vec![CellValue::UNKNOWN; len];
+    let mut neighbors = vec![CellNeighbors::all_unknown(); len];
+
+    // Set the border
+    values[0..width + 2].fill(CellValue::WALL);
+    values[len - width - 2..len].fill(CellValue::WALL);
+    for value in values.iter_mut().skip(width + 1).step_by(width + 1) {
+        *value = CellValue::WALL;
+    }
+
+    // Set the edge neighbors
+    for neighbors in neighbors.iter_mut().skip(width + 2).take(width) {
+        // top border row
+        neighbors.unknown -= DirectionSet::N_DIRECTIONS;
+    }
+    for neighbors in neighbors.iter_mut().skip(len - 2 * width - 2).take(width) {
+        // bottom row
+        neighbors.unknown -= DirectionSet::S_DIRECTIONS;
+    }
+    for neighbors in neighbors
+        .iter_mut()
+        .skip(width + 2)
+        .step_by(width + 1)
+        .take(height)
+    {
+        // left col
+        neighbors.unknown -= DirectionSet::W_DIRECTIONS;
+    }
+    for neighbors in neighbors
+        .iter_mut()
+        .skip(2 * width + 1)
+        .step_by(width + 1)
+        .take(height)
+    {
+        // right col
+        neighbors.unknown -= DirectionSet::E_DIRECTIONS;
+    }
+
+    (values.into_boxed_slice(), neighbors.into_boxed_slice())
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub(super) struct CellNeighbors {
     /// TODO
@@ -913,32 +872,6 @@ impl CellNeighbors {
             mine: DirectionSet::EMPTY,
             inferred: DirectionSet::EMPTY,
         }
-    }
-
-    pub(super) fn grid(width: u32, height: u32) -> Box<[CellNeighbors]> {
-        let width = width as usize;
-        let height = height as usize;
-        let len = width * height;
-        let mut grid: Vec<CellNeighbors> = vec![CellNeighbors::all_unknown(); len];
-        // fix up the edge neighbors
-        for neighbors in grid.iter_mut().take(width) {
-            // top row
-            neighbors.unknown -= DirectionSet::N_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().skip(len - width) {
-            // bottom row
-            neighbors.unknown -= DirectionSet::S_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().step_by(width) {
-            // left col
-            neighbors.unknown -= DirectionSet::W_DIRECTIONS;
-        }
-        for neighbors in grid.iter_mut().skip(width - 1).step_by(width) {
-            // right col
-            neighbors.unknown -= DirectionSet::E_DIRECTIONS;
-        }
-
-        grid.into_boxed_slice()
     }
 
     pub(super) fn unknown(&self) -> DirectionSet {
@@ -1340,21 +1273,12 @@ mod tests {
     use crate::solver::grid::{E, N, NW, S, SE, W};
 
     #[test]
-    fn test_coordinates_and_cell_idx_round_trip() {
-        let width = 7u32;
-        for idx in 0..35u32 {
-            let p = coordinates(CellIdx(idx), width);
-            assert_eq!(cell_idx(p, width).0, idx);
-        }
-    }
-
-    #[test]
     fn test_cell_value_is_known_and_display() {
         assert_eq!(UserCellValue::default(), UserCellValue::Unknown);
         assert_eq!(UserCellValue::Unknown.to_string(), "Unknown");
         assert_eq!(UserCellValue::Wall.to_string(), "Wall");
         assert_eq!(UserCellValue::Mine.to_string(), "MINE");
-        assert_eq!(UserCellValue::Safe(4).to_string(), "4");
+        assert_eq!(UserCellValue::Opened(4).to_string(), "4");
 
         assert_eq!(CellValue::UNKNOWN.to_string(), "??");
         assert_eq!(CellValue::WALL.to_string(), "@@");
@@ -1366,8 +1290,10 @@ mod tests {
 
     #[test]
     fn test_processed_cell_initialization_and_display() {
-        let grid = CellNeighbors::grid(3, 3);
-        let pc = grid[0];
+        let width = 3;
+        let (_, grid) = create_grid_with_border(width, 3);
+        let idx = Point { x: 1, y: 1 }.to_index(width + 1) as usize;
+        let pc = grid[idx];
         assert_eq!(pc.unknown, E | S | SE);
         assert_eq!(pc.opened, DirectionSet::EMPTY);
         assert_eq!(pc.mine, DirectionSet::EMPTY);
@@ -1418,9 +1344,9 @@ mod tests {
             UserCellValue::Unknown,
             UserCellValue::Wall,
             UserCellValue::Mine,
-            UserCellValue::Safe(0),
-            UserCellValue::Safe(4),
-            UserCellValue::Safe(8),
+            UserCellValue::Opened(0),
+            UserCellValue::Opened(4),
+            UserCellValue::Opened(8),
         ] {
             let internal: CellValue = user_value.into();
             let with_inference: UserValueWithInference = internal.into();
@@ -1443,31 +1369,33 @@ mod tests {
     #[test]
     fn test_cell_is_invalid_detects_unsatisfiable_counts() {
         // 2x1 strip [Count(2), Unknown]: needs 2 mines but only 1 unknown neighbor -> invalid
-        let neighbors = CellNeighbors::grid(2, 1);
+        let (_, neighbors) = create_grid_with_border(2, 1);
+        let idx = Point { x: 1, y: 1 }.to_index(3) as usize;
         let cell = CellValue::for_mine_count(2);
         assert!(
-            cell.is_invalid(neighbors[0]),
+            cell.is_invalid(neighbors[idx]),
             "needs 2 mines but only 1 unknown neighbor"
         );
 
-        let mut neighbors = CellNeighbors::grid(2, 1);
-        neighbors[0].unknown = !!E;
+        let (_, mut neighbors) = create_grid_with_border(2, 1);
+        neighbors[idx].unknown = !!E;
         let cell = CellValue::for_mine_count(1);
-        assert!(!cell.is_invalid(neighbors[0]));
+        assert!(!cell.is_invalid(neighbors[idx]));
     }
 
     #[test]
     fn test_cell_is_invalid_handles_excess_mine_neighbors() {
         // a Count(0) next to a known mine is over-satisfied
-        let mut neighbors = CellNeighbors::grid(2, 1);
-        neighbors[0].mine |= E;
+        let (_, mut neighbors) = create_grid_with_border(2, 1);
+        let idx = Point { x: 1, y: 1 }.to_index(3) as usize;
+        neighbors[idx].mine |= E;
         let cell = CellValue::for_mine_count(0);
-        assert!(cell.is_invalid(neighbors[0]));
+        assert!(cell.is_invalid(neighbors[idx]));
     }
 
     #[test]
     fn test_ordered_cell_from_cell_and_ordering() {
-        let grid = CellNeighbors::grid(3, 3);
+        let (_, grid) = create_grid_with_border(3, 3);
         let neighbors = grid[0];
         assert!(CellOrdering::from_cell(CellIdx(0), CellValue::UNKNOWN, neighbors).is_none());
 
