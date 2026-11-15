@@ -646,7 +646,11 @@ impl MineField {
                 let cell = field.cells[n_idx];
                 // remove this check when `inferred_neighbors` is just inferred
                 if cell.is_inferred() {
+                    // note: masking idx before changing our neighbor prevents idx from needlessly
+                    // being added to the desolved queue again
+                    field.cell_flags[idx].mark(FlagMask::DESOLVED_QUEUE);
                     field.change_cell_value(n_idx, CellValue::UNKNOWN);
+                    field.cell_flags[idx].clear(FlagMask::DESOLVED_QUEUE);
                 }
             }
             // mark field for partitioning
