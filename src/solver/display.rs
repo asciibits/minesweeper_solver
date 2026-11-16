@@ -290,11 +290,7 @@ impl<'a> Display for DetailMineField<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let spacer = if f.alternate() { "\n  " } else { " " };
         let cell_spacer = if f.alternate() { "\n    " } else { " " };
-        write!(
-            f,
-            "MineField ({}x{}",
-            self.0.width(), self.0.height()
-        )?;
+        write!(f, "MineField ({}x{}", self.0.width(), self.0.height())?;
         if let Some(mine_count) = self.0.mine_count {
             write!(f, ", {mine_count}*")?;
         }

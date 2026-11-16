@@ -12,7 +12,7 @@ use std::{
 use crate::{
     MineField,
     solver::{
-        grid::{Direction, DirectionSet, DirectionSetIterator, E, N, NE, NW, Point, S, SE, SW, W},
+        grid::{ALL_DIRECTIONS, Direction, DirectionSet, Point},
         stats,
     },
 };
@@ -117,49 +117,52 @@ pub struct UserCellWithInference {
 pub(super) struct CellIdx(pub(super) u32);
 
 impl CellIdx {
-    pub(super) fn neighbor_iter(
-        &self,
-        width: u32,
-        directions: DirectionSet,
-    ) -> impl Iterator<Item = Neighbor> + use<> {
-        let idx = *self;
-        DirectionSetIterator::new(directions).map(move |d| match d.index() {
-            0 => Neighbor {
-                idx: CellIdx(idx.0 - width - 1),
-                from: SE,
-            },
-            1 => Neighbor {
-                idx: CellIdx(idx.0 - width),
-                from: S,
-            },
-            2 => Neighbor {
-                idx: CellIdx(idx.0 - width + 1),
-                from: SW,
-            },
-            3 => Neighbor {
-                idx: CellIdx(idx.0 - 1),
-                from: E,
-            },
-            4 => Neighbor {
-                idx: CellIdx(idx.0 + 1),
-                from: W,
-            },
-            5 => Neighbor {
-                idx: CellIdx(idx.0 + width - 1),
-                from: NE,
-            },
-            6 => Neighbor {
-                idx: CellIdx(idx.0 + width),
-                from: N,
-            },
-            7 => Neighbor {
-                idx: CellIdx(idx.0 + width + 1),
-                from: NW,
-            },
-            _ => unreachable!(),
-        })
+    pub(super) fn neighbor_iter(&self, width: u32, directions: DirectionSet) -> NeighborIterator {
+        let idx = self.0;
+        let idx_u = idx - width;
+        let idx_d = idx + width;
+
+        NeighborIterator {
+            mask: directions.mask(),
+            neighbor_indices: [
+                CellIdx(idx_u - 1),
+                CellIdx(idx_u),
+                CellIdx(idx_u + 1),
+                CellIdx(idx - 1),
+                CellIdx(idx + 1),
+                CellIdx(idx_d - 1),
+                CellIdx(idx_d),
+                CellIdx(idx_d + 1),
+            ],
+        }
     }
 }
+
+pub(super) struct NeighborIterator {
+    mask: u8,
+    neighbor_indices: [CellIdx; 8],
+}
+
+impl Iterator for NeighborIterator {
+    type Item = Neighbor;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.mask == 0 {
+            return None;
+        }
+        let t = self.mask;
+        self.mask &= t - 1;
+        let i = t.trailing_zeros() as usize;
+        Some(Neighbor {
+            idx: self.neighbor_indices[i],
+            from: ALL_DIRECTIONS[i].reverse(),
+        })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.mask.count_ones() as usize;
+        (len, Some(len))
+    }
+}
+impl ExactSizeIterator for NeighborIterator {}
 
 impl From<u32> for CellIdx {
     fn from(value: u32) -> Self {
@@ -1270,7 +1273,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::solver::grid::{E, N, NW, S, SE, W};
+    use crate::solver::grid::{E, N, NW, S, SE, SW, W};
 
     #[test]
     fn test_cell_value_is_known_and_display() {

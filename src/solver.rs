@@ -12,10 +12,15 @@ use std::{
 #[cfg(feature = "debug")]
 use crate::solver::display::DetailMineField;
 use crate::{
-    InferredValue, solver::{
+    InferredValue,
+    solver::{
         cell::{
-            CellFlags, CellIdx, CellNeighbors, CellValue, ChangeStatus, FastNumberHasherBuilder, FlagMask, GuardedQueue, IndexedCell, Neighbor, UserCellWithInference, UserValueWithInference, cell_idx, coordinates, create_grid_with_border,
-        }, grid::DirectionSet, metrics::Metrics,
+            CellFlags, CellIdx, CellNeighbors, CellValue, ChangeStatus, FastNumberHasherBuilder,
+            FlagMask, GuardedQueue, IndexedCell, Neighbor, UserCellWithInference,
+            UserValueWithInference, cell_idx, coordinates, create_grid_with_border,
+        },
+        grid::DirectionSet,
+        metrics::Metrics,
     },
 };
 
@@ -1637,7 +1642,10 @@ mod tests {
         assert_ne!(initial_pid.0, 0);
         for y in 0..field.height() {
             for x in 0..field.width() {
-                assert_eq!(field.partition_ids[field.cell_idx(Point::new(x, y))], initial_pid);
+                assert_eq!(
+                    field.partition_ids[field.cell_idx(Point::new(x, y))],
+                    initial_pid
+                );
             }
         }
 
@@ -1720,7 +1728,10 @@ mod tests {
              ...",
         );
         let c10 = field.cell_idx(Point::new(1, 0));
-        assert_eq!(field.cells[c10].remaining_mines(field.cell_neighbors[c10]), 2);
+        assert_eq!(
+            field.cells[c10].remaining_mines(field.cell_neighbors[c10]),
+            2
+        );
 
         // In one batch, set both (0, 0) and (2, 0) to Mine, and (1, 1) to Count(2).
         // (1, 0) is a non-dirty neighbor of all three pending cells, so it appears 3 times
@@ -2406,12 +2417,12 @@ mod tests {
     #[test]
     fn test_adjacent_walls_solve_isolation_and_reversion() {
         let mut field = MineField::new(3, 1).unwrap();
-        field.change_cell_value(CellIdx(0), CellValue::WALL);
-        field.change_cell_value(CellIdx(1), CellValue::WALL);
-        field.change_cell_value(CellIdx(0), CellValue::UNKNOWN);
+        field.change_cell_value(field.cell_idx((0, 0).into()), CellValue::WALL);
+        field.change_cell_value(field.cell_idx((1, 0).into()), CellValue::WALL);
+        field.change_cell_value(field.cell_idx((0, 0).into()), CellValue::UNKNOWN);
 
         // Solving an open cell adjacent to a wall must not overwrite the wall
-        field.change_cell_value(CellIdx(0), CellValue::for_mine_count(0));
+        field.change_cell_value(field.cell_idx((0, 0).into()), CellValue::for_mine_count(0));
         field.solve();
         assert_eq!(
             field.cells[1],
@@ -2420,7 +2431,7 @@ mod tests {
         );
 
         // Reverting the second wall restores bidirectional connections between playable cells
-        field.change_cell_value(CellIdx(1), CellValue::UNKNOWN);
+        field.change_cell_value(field.cell_idx((1, 0).into()), CellValue::UNKNOWN);
         assert!(
             !(field.cell_neighbors[0].all() & crate::solver::grid::E).is_empty(),
             "Cell 0 should have reconnected to Cell 1 (E)"

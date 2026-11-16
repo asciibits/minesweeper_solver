@@ -162,6 +162,12 @@ impl DirectionSet {
         self.0.count_ones() as u8
     }
 
+    /// Returns the number of directions currently in the set (`0..=8`).
+    #[inline]
+    pub fn mask(&self) -> u8 {
+        self.0
+    }
+
     #[inline]
     pub fn clear(&mut self) {
         self.0 = 0
@@ -432,12 +438,6 @@ impl Sub<DirectionSet> for Direction {
 /// An iterator over the [`Direction`]s contained in a [`DirectionSet`].
 #[derive(Debug, Clone, Copy)]
 pub struct DirectionSetIterator(BinaryIterator);
-
-impl DirectionSetIterator {
-    pub fn new(directions: DirectionSet) -> DirectionSetIterator {
-        DirectionSetIterator(BinaryIterator(directions.0))
-    }
-}
 
 impl Iterator for DirectionSetIterator {
     type Item = Direction;
