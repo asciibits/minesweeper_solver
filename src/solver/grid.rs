@@ -440,7 +440,7 @@ impl Iterator for DirectionSetIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         let b = self.0.next()?;
-        Some(ALL_DIRECTIONS[b.trailing_zeros() as usize])
+        Some(ALL_DIRECTIONS[b as usize])
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.0.size_hint()
@@ -464,7 +464,7 @@ impl Iterator for BinaryIterator {
         }
         let t = self.0;
         self.0 &= t - 1;
-        Some(self.0 ^ t)
+        Some(t.trailing_zeros() as u8)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         let len = self.0.count_ones() as usize;
@@ -481,10 +481,7 @@ mod tests {
     fn binary_iterator_iterates() {
         let iter = BinaryIterator(0b1011001);
         assert_eq!(iter.len(), 4);
-        assert_eq!(
-            iter.collect::<Vec<u8>>(),
-            vec![0b1, 0b1000, 0b10000, 0b1000000]
-        );
+        assert_eq!(iter.collect::<Vec<u8>>(), vec![0, 3, 4, 6]);
         assert_eq!(BinaryIterator(0).collect::<Vec<u8>>(), vec![]);
     }
 
