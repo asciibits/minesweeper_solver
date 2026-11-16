@@ -9,8 +9,6 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-#[cfg(feature = "debug")]
-use crate::solver::display::DetailMineField;
 use crate::{
     InferredValue,
     solver::{
@@ -485,15 +483,8 @@ impl MineField {
     fn process_desolved(&mut self) {
         let mut has_partition = false;
         while let Some(idx) = self.desolved_queue.pop(&mut self.cell_flags) {
-            let cell = &mut self.cells[idx];
-
             if self.partition_ids[idx] == self.next_partition_id {
                 continue;
-            }
-            if cell.is_open() {
-                self.pending_partition_queue.push(&mut self.cell_flags, idx);
-            } else {
-                self.partitions.remove(&idx);
             }
 
             let len = self.desolve_partition(idx);
@@ -511,7 +502,7 @@ impl MineField {
         while let Some(idx) = self.solved_queue.pop(&mut self.cell_flags) {
             let cell = self.cells[idx];
             let neighbors = self.cell_neighbors[idx];
-            if !cell.is_open() {
+            if !cell.is_opened() {
                 continue;
             }
             let unknown_neighbors = neighbors.unknown();
@@ -535,7 +526,7 @@ impl MineField {
         self.recent_invalid.clear();
         while let Some(idx) = self.pending_partition_queue.pop(&mut self.cell_flags) {
             let cell = self.cells[idx];
-            debug_assert!(cell.is_open());
+            debug_assert!(cell.is_opened());
             if cell.is_invalid(self.cell_neighbors[idx]) {
                 self.recent_invalid.push(idx);
             }
@@ -575,7 +566,7 @@ impl MineField {
         visit_known: &mut impl FnMut(&mut MineField, CellIdx),
         visit_unknown: &mut impl FnMut(&mut MineField, CellIdx),
     ) -> u32 {
-        debug_assert!(self.cells[idx].is_open());
+        debug_assert!(self.cells[idx].is_opened());
         if self.partition_ids[idx] == self.next_partition_id {
             return 0;
         }
@@ -643,7 +634,11 @@ impl MineField {
             // reset all inferred neighbors
             for Neighbor { idx: n_idx, .. } in idx.neighbor_iter(
                 field.width_with_border,
-                field.cell_neighbors[idx].inferred(),
+                // Note: `OPEN` cells don't track `inferred`, so step through all non-unknown
+                // cells and check
+                field.cell_neighbors[idx].opened()
+                    | field.cell_neighbors[idx].mines()
+                    | field.cell_neighbors[idx].inferred(),
             ) {
                 let cell = field.cells[n_idx];
                 // remove this check when `inferred_neighbors` is just inferred
@@ -673,7 +668,7 @@ impl MineField {
 
         let len = if cell == CellValue::UNKNOWN {
             self.walk_partition_unknown(idx, None, &mut visit_known, &mut visit_unknown)
-        } else if cell.is_open() {
+        } else if cell.is_opened() {
             self.walk_partition_known(idx, None, &mut visit_known, &mut visit_unknown)
         } else {
             0
@@ -974,10 +969,10 @@ mod tests {
             let all_neighbors = neighbors.all();
             // all direction sets are subsets of all_neighbors
             assert_eq!(neighbors.unknown() | all_neighbors, all_neighbors);
-            assert_eq!(neighbors.mine() | all_neighbors, all_neighbors);
+            assert_eq!(neighbors.mines() | all_neighbors, all_neighbors);
 
             // all but inferred direction sets are disjoint
-            assert_eq!(neighbors.mine() & neighbors.unknown(), DirectionSet::EMPTY);
+            assert_eq!(neighbors.mines() & neighbors.unknown(), DirectionSet::EMPTY);
 
             if cell.is_unknown() {
                 assert_eq!(neighbors.opened() | all_neighbors, all_neighbors);
@@ -993,7 +988,7 @@ mod tests {
                     neighbors.opened() & neighbors.inferred(),
                     DirectionSet::EMPTY
                 );
-                assert_eq!(neighbors.opened() & neighbors.mine(), DirectionSet::EMPTY);
+                assert_eq!(neighbors.opened() & neighbors.mines(), DirectionSet::EMPTY);
                 assert_eq!(
                     neighbors.opened() & neighbors.unknown(),
                     DirectionSet::EMPTY
@@ -1016,24 +1011,24 @@ mod tests {
 
         field.change_cell_value(c1, CellValue::MINE);
         assert_eq!(field.cells[c1], CellValue::MINE);
-        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert_eq!(field.cell_neighbors[c0].mines(), !!E);
         assert!(field.cell_neighbors[c0].opened().is_empty());
         assert!(field.cell_neighbors[c0].inferred().is_empty());
-        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c2].mines(), !!W);
         assert!(field.cell_neighbors[c2].opened().is_empty());
         assert!(field.cell_neighbors[c2].inferred().is_empty());
 
         // Mine -> Safe(1): neighbors drop the mine but stay known (not unknown)
         field.change_cell_value(c1, CellValue::for_mine_count(1));
-        assert!(field.cell_neighbors[c0].mine().is_empty());
+        assert!(field.cell_neighbors[c0].mines().is_empty());
         assert!(field.cell_neighbors[c0].inferred().is_empty());
         assert_eq!(field.cell_neighbors[c0].opened(), !!E);
 
         // Safe(1) -> Unknown: neighbors regain an unknown neighbor
         field.change_cell_value(c1, CellValue::UNKNOWN);
-        assert!(field.cell_neighbors[c0].mine().is_empty());
+        assert!(field.cell_neighbors[c0].mines().is_empty());
         assert!(field.cell_neighbors[c0].opened().is_empty());
-        assert!(field.cell_neighbors[c2].mine().is_empty());
+        assert!(field.cell_neighbors[c2].mines().is_empty());
         assert!(field.cell_neighbors[c2].opened().is_empty());
     }
 
@@ -1075,9 +1070,9 @@ mod tests {
         assert_eq!(field.cells[c1], CellValue::MINE);
         // Both cell 0 and cell 2 are Open cells: alt_neighbors drops cell 1, mine_neighbors gets cell 1
         assert!(field.cell_neighbors[c0].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert_eq!(field.cell_neighbors[c0].mines(), !!E);
         assert!(field.cell_neighbors[c2].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c2].mines(), !!W);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1451,7 +1446,7 @@ mod tests {
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert!(neighbors.opened().is_empty());
             assert!(neighbors.inferred().is_empty());
-            assert!(neighbors.mine().is_empty());
+            assert!(neighbors.mines().is_empty());
             assert_neighbor_invariants(cell, neighbors);
         }
 
@@ -1523,20 +1518,20 @@ mod tests {
         let (c00, n00) = cell(&field, 0, 0);
         assert_eq!(c00.remaining_mines(n00), 2);
         assert_eq!(n00.unknown(), E | S | SE);
-        assert!(n00.mine().is_empty());
+        assert!(n00.mines().is_empty());
         assert_neighbor_invariants(c00, n00);
 
         // Neighbor (1, 0) is Unknown and should move W from unknown_neighbors to safe_neighbors
         let (c10, n10) = cell(&field, 1, 0);
         assert_eq!(n10.opened(), !!W);
-        assert!(n10.mine().is_empty());
+        assert!(n10.mines().is_empty());
         assert_neighbor_invariants(c10, n10);
 
         // Mark (1, 0) as a Mine: (0, 0) moves E from unknown_neighbors to
         // mine_neighbors (remaining_mines == 1)
         field.update(".*");
         let (c00, n00) = cell(&field, 0, 0);
-        assert_eq!(n00.mine(), !!E);
+        assert_eq!(n00.mines(), !!E);
         assert_eq!(n00.unknown(), S | SE);
         assert_eq!(c00.remaining_mines(n00), 1);
         assert_neighbor_invariants(c00, n00);
@@ -1547,7 +1542,7 @@ mod tests {
         field.update(".1");
         let (c00, n00) = cell(&field, 0, 0);
         assert!(n00.unknown().is_empty());
-        assert_eq!(n00.mine(), S | SE);
+        assert_eq!(n00.mines(), S | SE);
         assert_eq!(c00.remaining_mines(n00), 0);
         assert_neighbor_invariants(c00, n00);
 
@@ -1555,7 +1550,7 @@ mod tests {
         // back to unknown_neighbors, and the inferences on S and SE are cleared!
         field.update("._");
         let (c00, n00) = cell(&field, 0, 0);
-        assert!(n00.mine().is_empty());
+        assert!(n00.mines().is_empty());
         assert_eq!(n00.unknown(), E | S | SE);
         assert_eq!(c00.remaining_mines(n00), 2);
         assert_neighbor_invariants(c00, n00);
@@ -1713,7 +1708,7 @@ mod tests {
         assert!(field.cells[c2].is_safe());
         assert_eq!(field.cells[c1].remaining_mines(field.cell_neighbors[c1]), 0);
         assert!(field.cell_neighbors[c1].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[c1].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c1].mines(), !!W);
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
@@ -1749,10 +1744,10 @@ mod tests {
         assert_eq!(c10.remaining_mines(n10), 0);
         assert_eq!(c11.remaining_mines(n11), 0);
 
-        assert_eq!(n10.mine(), W | E);
+        assert_eq!(n10.mines(), W | E);
         assert!(n10.unknown().is_empty());
 
-        assert_eq!(n11.mine(), NW | NE);
+        assert_eq!(n11.mines(), NW | NE);
         assert!(n11.unknown().is_empty());
 
         assert!(field.partitions.is_empty());
@@ -1787,7 +1782,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(field.cell(Point { x: 0, y: 0 }).value, UserCellValue::Mine);
-        assert_eq!(field.cell_neighbors[c1].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c1].mines(), !!W);
         // basic_solve now infers (2,0) is safe. Inferred cells are folded into the neighbor
         // masks, so it moves from `unknown_neighbors` to `safe_neighbors`.
         assert_eq!(
@@ -1816,9 +1811,9 @@ mod tests {
         assert!(field.cells[c3].is_safe());
 
         // Verify inferred neighbor sets reflect the deductions
-        assert_eq!(field.cell_neighbors[c0].mine(), !!E);
+        assert_eq!(field.cell_neighbors[c0].mines(), !!E);
         assert!(field.cell_neighbors[c0].unknown().is_empty());
-        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c2].mines(), !!W);
         assert!(field.cell_neighbors[c2].unknown().is_empty());
 
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
@@ -1876,7 +1871,7 @@ mod tests {
         let c2 = field.cell_idx(Point::new(2, 0));
         let c3 = field.cell_idx(Point::new(3, 0));
         assert!(field.cells[c1].is_mine());
-        assert_eq!(field.cell_neighbors[c2].mine(), !!W);
+        assert_eq!(field.cell_neighbors[c2].mines(), !!W);
 
         // Round 2 (inference-compatible): Reveal (2,0) as Count(1).
         // Because (1,0)'s Mine inference is preserved, (2,0) immediately knows its 1 mine is at W
@@ -1906,7 +1901,7 @@ mod tests {
         assert!(!field.cells[c0].is_inferred());
         assert!(!field.cells[c2].is_inferred());
         assert_eq!(field.cell_neighbors[c1].unknown(), W | E);
-        assert!(field.cell_neighbors[c1].mine().is_empty());
+        assert!(field.cell_neighbors[c1].mines().is_empty());
         for (&cell, &neighbors) in field.cells.iter().zip(field.cell_neighbors.iter()) {
             assert_neighbor_invariants(cell, neighbors);
         }
@@ -2360,13 +2355,13 @@ mod tests {
         let mut field = MineField::create(spec);
         for idx in field.pending_partition_queue.iter() {
             assert!(
-                field.cells[idx].is_open(),
+                field.cells[idx].is_opened(),
                 "pending_partition_queue must only contain cells with is_open"
             );
         }
         for idx in field.solved_queue.iter() {
             assert!(
-                field.cells[idx].is_open(),
+                field.cells[idx].is_opened(),
                 "solved_queue must only contain cells with is_open"
             );
         }
@@ -2375,13 +2370,13 @@ mod tests {
         field.update("._*\n...\n1.1");
         for idx in field.pending_partition_queue.iter() {
             assert!(
-                field.cells[idx].is_open(),
+                field.cells[idx].is_opened(),
                 "pending_partition_queue must strictly maintain is_open after updates"
             );
         }
         for idx in field.solved_queue.iter() {
             assert!(
-                field.cells[idx].is_open(),
+                field.cells[idx].is_opened(),
                 "solved_queue must strictly maintain is_open after updates"
             );
         }

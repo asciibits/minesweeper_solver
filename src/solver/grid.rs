@@ -168,11 +168,6 @@ impl DirectionSet {
         self.0
     }
 
-    #[inline]
-    pub fn clear(&mut self) {
-        self.0 = 0
-    }
-
     /// Returns `true` if the set contains no directions.
     #[inline]
     pub fn is_empty(&self) -> bool {

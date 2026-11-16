@@ -245,7 +245,7 @@ impl CellValue {
     }
 
     #[inline]
-    pub(super) fn is_open(&self) -> bool {
+    pub(super) fn is_opened(&self) -> bool {
         self.0 < Self::CLEARED.0
     }
 
@@ -270,8 +270,6 @@ impl CellValue {
     }
 
     #[inline]
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn is_wall_or_mine(&self) -> bool {
         self.0 >= Self::WALL.0
     }
@@ -279,14 +277,14 @@ impl CellValue {
     /// For open cells, this returns the mine count.
     #[inline]
     pub(super) fn mine_count(&self) -> u8 {
-        debug_assert!(self.is_open());
+        debug_assert!(self.is_opened());
         self.0
     }
 
     /// For open cells, this returns the mine count as `Some(count)`.
     /// For all other cell types, returns `None`.
     pub(super) fn safe_mine_count(&self) -> Option<u8> {
-        self.is_open().then_some(self.0)
+        self.is_opened().then_some(self.0)
     }
 
     /// Returns the high-level [`CellType`] classification for this cell value.
@@ -304,8 +302,8 @@ impl CellValue {
 
     pub(super) fn remaining_mines(&self, neighbors: CellNeighbors) -> i8 {
         // only valid for count cells
-        debug_assert!(self.is_open());
-        self.mine_count() as i8 - neighbors.mine.len() as i8
+        debug_assert!(self.is_opened());
+        self.mine_count() as i8 - neighbors.mines.len() as i8
     }
 
     /// Returns `true` if this cell's count cannot be satisfied by its neighbors, i.e. it needs
@@ -313,8 +311,8 @@ impl CellValue {
     /// mines than remaining spaces
     pub(super) fn is_invalid(&self, neighbors: CellNeighbors) -> bool {
         // only valid for count cells
-        debug_assert!(self.is_open());
-        let mine_neighbors = neighbors.mine.len() as i8;
+        debug_assert!(self.is_opened());
+        let mine_neighbors = neighbors.mines.len() as i8;
         let unknown_neighbors = neighbors.unknown.len() as i8;
         self.safe_mine_count().is_some_and(|mine_count| {
             let mines_remaining = mine_count as i8 - mine_neighbors;
@@ -326,11 +324,11 @@ impl CellValue {
     // either a Mine or Safe...
     pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
         // only valid for count cells
-        debug_assert!(self.is_open());
+        debug_assert!(self.is_opened());
         let unknown_count = neighbors.unknown.len() as i8;
 
         self.safe_mine_count().and_then(|mine_count| {
-            let remaining = mine_count as i8 - neighbors.mine.len() as i8;
+            let remaining = mine_count as i8 - neighbors.mines.len() as i8;
             if remaining <= 0 {
                 Some(CellValue::CLEARED)
             } else if remaining >= unknown_count {
@@ -341,14 +339,12 @@ impl CellValue {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_change(
         field: &mut MineField,
         idx: CellIdx,
         new_value: CellValue,
     ) -> ChangeStatus {
         let prev_value = field.cells[idx];
-
         let change_function = match prev_value.cell_type() {
             CellType::Unknown => match new_value.cell_type() {
                 CellType::Unknown => Self::no_change,
@@ -389,12 +385,10 @@ impl CellValue {
         change_function(field, idx, new_value)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn no_change(_field: &mut MineField, _idx: CellIdx, _new_value: CellValue) -> ChangeStatus {
         ChangeStatus::NoChange
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn flag_to_mine(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         let unknown_neighbors = field.cell_neighbors[idx].all();
         field.metrics.inc_neighbor_visits(unknown_neighbors);
@@ -406,7 +400,6 @@ impl CellValue {
         ChangeStatus::NoChange
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn mine_to_flag(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         let unknown_neighbors = field.cell_neighbors[idx].all();
         field.metrics.inc_neighbor_visits(unknown_neighbors);
@@ -418,7 +411,6 @@ impl CellValue {
         ChangeStatus::NoChange
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn open_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // count -> count (diff counts) - it could be de-solved, or solved
         field.cells[idx] = new_value;
@@ -427,30 +419,28 @@ impl CellValue {
         ChangeStatus::Breaking
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn unknown_to_mine(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         let open_neighbors = field.cell_neighbors[idx].opened;
         field.metrics.inc_neighbor_visits(open_neighbors);
         for neighbor in idx.neighbor_iter(field.width_with_border, open_neighbors) {
             let neighbors = &mut field.cell_neighbors[neighbor.idx];
-            neighbors.mine |= neighbor.from;
+            neighbors.mines |= neighbor.from;
             neighbors.unknown -= neighbor.from;
             field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining = field.cell_neighbors[idx].mine
+        let remaining = field.cell_neighbors[idx].mines
             | field.cell_neighbors[idx].unknown
             | field.cell_neighbors[idx].inferred;
         field.metrics.inc_neighbor_visits(remaining);
         for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
             let neighbors = &mut field.cell_neighbors[neighbor.idx];
-            neighbors.mine |= neighbor.from;
+            neighbors.mines |= neighbor.from;
             neighbors.unknown -= neighbor.from;
         }
         field.cells[idx] = new_value;
         ChangeStatus::NonBreaking
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn unknown_to_flagged(
         field: &mut MineField,
         idx: CellIdx,
@@ -460,18 +450,18 @@ impl CellValue {
         field.metrics.inc_neighbor_visits(open_neighbors);
         for neighbor in idx.neighbor_iter(field.width_with_border, open_neighbors) {
             let neighbors = &mut field.cell_neighbors[neighbor.idx];
-            neighbors.mine |= neighbor.from;
+            neighbors.mines |= neighbor.from;
             neighbors.inferred |= neighbor.from;
             neighbors.unknown -= neighbor.from;
             field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining = field.cell_neighbors[idx].mine
+        let remaining = field.cell_neighbors[idx].mines
             | field.cell_neighbors[idx].unknown
             | field.cell_neighbors[idx].inferred;
         field.metrics.inc_neighbor_visits(remaining);
         for neighbor in idx.neighbor_iter(field.width_with_border, remaining) {
             let neighbors = &mut field.cell_neighbors[neighbor.idx];
-            neighbors.mine |= neighbor.from;
+            neighbors.mines |= neighbor.from;
             neighbors.inferred |= neighbor.from;
             neighbors.unknown -= neighbor.from;
         }
@@ -479,7 +469,6 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn unknown_to_clear(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         let open_neighbors = field.cell_neighbors[idx].opened;
         field.metrics.inc_neighbor_visits(open_neighbors);
@@ -489,7 +478,7 @@ impl CellValue {
             neighbors.inferred |= neighbor.from;
             field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining = field.cell_neighbors[idx].mine
+        let remaining = field.cell_neighbors[idx].mines
             | field.cell_neighbors[idx].unknown
             | field.cell_neighbors[idx].inferred;
         field.metrics.inc_neighbor_visits(remaining);
@@ -503,7 +492,6 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn unknown_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // opened:  -unknown, +solve
         // cleared: -unknown
@@ -517,7 +505,7 @@ impl CellValue {
             neighbors.opened |= neighbor.from;
             field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
         }
-        let remaining = field.cell_neighbors[idx].mine
+        let remaining = field.cell_neighbors[idx].mines
             | field.cell_neighbors[idx].unknown
             | field.cell_neighbors[idx].inferred;
         field.metrics.inc_neighbor_visits(remaining);
@@ -532,7 +520,6 @@ impl CellValue {
         ChangeStatus::NonBreaking
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn clear_to_open(field: &mut MineField, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
         // opened: n/a
         // cleared: n/a
@@ -553,13 +540,13 @@ impl CellValue {
 
     // The slower, not-unrolled general purpose function for the rest of the values. Always involves
     // a loop over all neighbors with a decent amount of branching
-    #[allow(clippy::too_many_arguments)]
     fn general_change_value(
         field: &mut MineField,
         idx: CellIdx,
         new_value: CellValue,
     ) -> ChangeStatus {
         let prev_value = field.cells[idx];
+
         if prev_value == new_value {
             return ChangeStatus::NoChange;
         }
@@ -567,95 +554,128 @@ impl CellValue {
             // going to/from flagged/mine is a no-change from all inference perspective
             ChangeStatus::NoChange
         } else if prev_value.is_unknown() && !new_value.is_wall()
-            || prev_value.is_cleared() && new_value.is_open()
+            || prev_value.is_cleared() && new_value.is_opened()
         {
             ChangeStatus::NonBreaking
         } else {
             ChangeStatus::Breaking
         };
 
-        let neighbors = if prev_value.is_wall() {
-            let pt = coordinates(idx.0, field.width_with_border);
-            field.cell_neighbors[idx].unknown.clear();
-            field.cell_neighbors[idx].opened.clear();
-            field.cell_neighbors[idx].mine.clear();
-            field.cell_neighbors[idx].inferred.clear();
-            DirectionSet::all_neighbors(pt, field.width_with_border, field.height_with_border)
-        } else {
-            field.cell_neighbors[idx].all()
-        };
+        let mut unknown = DirectionSet::new();
+        let mut opened = DirectionSet::new();
+        let mut mines = DirectionSet::new();
+        let mut inferred = DirectionSet::new();
 
+        let neighbors = field.cell_neighbors[idx].all();
         field.metrics.inc_neighbor_visits(neighbors);
         for neighbor in idx.neighbor_iter(field.width_with_border, neighbors) {
-            let dir = neighbor.from.reverse();
-            let n_value = field.cells[neighbor.idx];
-            if n_value.is_mine() {
-                field.cell_neighbors[idx].mine |= dir;
-            } else if n_value.is_open() {
-                field.cell_neighbors[idx].opened |= dir;
-                if change_status == ChangeStatus::Breaking {
+            let neighbor_value = field.cells[neighbor.idx];
+
+            if change_status == ChangeStatus::Breaking {
+                // We only track the minimal neighbor sets, so that "non-breaking" changes will
+                // always have the accurate neighbor states upon update. Breaking changes, however
+                // require the neighbor states to be updated.
+                if !new_value.is_wall_or_mine() {
+                    let dir = neighbor.from.reverse();
+                    match neighbor_value.cell_type() {
+                        CellType::Flag => {
+                            mines |= dir;
+                            inferred |= dir;
+                        }
+                        CellType::Mine => mines |= dir,
+                        CellType::Cleared => inferred |= dir,
+                        CellType::Unknown => unknown |= dir,
+                        CellType::Opened => {
+                            opened |= dir;
+                            field
+                                .desolved_queue
+                                .push(&mut field.cell_flags, neighbor.idx);
+                            field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
+                        }
+                        CellType::Wall => (),
+                    }
+                } else if neighbor_value.is_opened() {
                     field
                         .desolved_queue
                         .push(&mut field.cell_flags, neighbor.idx);
+                    field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
                 }
+            } else if neighbor_value.is_opened() {
                 field.solved_queue.push(&mut field.cell_flags, neighbor.idx);
-            } else if n_value.is_unknown() {
-                field.cell_neighbors[idx].unknown |= dir;
             }
-            if n_value.is_inferred() {
-                field.cell_neighbors[idx].inferred |= dir;
-            }
-            match prev_value.cell_type() {
-                CellType::Unknown => {
-                    field.cell_neighbors[neighbor.idx].unknown -= neighbor.from;
+
+            let neighbor_neighbors = &mut field.cell_neighbors[neighbor.idx];
+            if !neighbor_value.is_wall_or_mine() {
+                let mut neighbor_missing = false;
+                match prev_value.cell_type() {
+                    CellType::Unknown => {
+                        neighbor_missing = true;
+                        neighbor_neighbors.unknown -= neighbor.from;
+                    }
+                    CellType::Mine | CellType::Flag => {
+                        neighbor_missing = true;
+                        neighbor_neighbors.mines -= neighbor.from;
+                    }
+                    CellType::Opened => {
+                        field
+                            .desolved_queue
+                            .push(&mut field.cell_flags, neighbor.idx);
+                    }
+                    _ => (),
                 }
-                CellType::Mine => {
-                    field.cell_neighbors[neighbor.idx].mine -= neighbor.from;
+                match new_value.cell_type() {
+                    CellType::Unknown => {
+                        neighbor_missing = false;
+                        neighbor_neighbors.unknown |= neighbor.from;
+                    }
+                    CellType::Mine | CellType::Flag => {
+                        neighbor_missing = false;
+                        neighbor_neighbors.mines |= neighbor.from;
+                    }
+                    _ => (),
                 }
-                CellType::Flag => {
-                    field.cell_neighbors[neighbor.idx].mine -= neighbor.from;
-                    field.cell_neighbors[neighbor.idx].inferred -= neighbor.from;
-                }
-                CellType::Opened => {
-                    field.cell_neighbors[neighbor.idx].opened -= neighbor.from;
-                    field
-                        .desolved_queue
-                        .push(&mut field.cell_flags, neighbor.idx);
-                }
-                CellType::Cleared => {
-                    field.cell_neighbors[neighbor.idx].inferred -= neighbor.from;
-                }
-                CellType::Wall => {
-                    // nothing to do
-                }
-            }
-            match new_value.cell_type() {
-                CellType::Unknown => {
-                    field.cell_neighbors[neighbor.idx].unknown |= neighbor.from;
-                }
-                CellType::Mine => {
-                    field.cell_neighbors[neighbor.idx].mine |= neighbor.from;
-                }
-                CellType::Flag => {
-                    field.cell_neighbors[neighbor.idx].mine |= neighbor.from;
-                    field.cell_neighbors[neighbor.idx].inferred |= neighbor.from;
-                }
-                CellType::Opened => {
-                    field.cell_neighbors[neighbor.idx].opened |= neighbor.from;
-                }
-                CellType::Cleared => {
-                    field.cell_neighbors[neighbor.idx].inferred |= neighbor.from;
-                }
-                CellType::Wall => {
-                    // nothing to add
+                if neighbor_value.is_unknown() || neighbor_missing {
+                    match prev_value.cell_type() {
+                        CellType::Flag => {
+                            neighbor_neighbors.inferred -= neighbor.from;
+                        }
+                        CellType::Opened => {
+                            neighbor_neighbors.opened -= neighbor.from;
+                        }
+                        CellType::Cleared => {
+                            neighbor_neighbors.inferred -= neighbor.from;
+                        }
+                        _ => (),
+                    }
+                    match new_value.cell_type() {
+                        CellType::Flag => {
+                            neighbor_neighbors.inferred |= neighbor.from;
+                        }
+                        CellType::Opened => {
+                            neighbor_neighbors.opened |= neighbor.from;
+                        }
+                        CellType::Cleared => {
+                            neighbor_neighbors.inferred |= neighbor.from;
+                        }
+                        _ => (),
+                    }
                 }
             }
         }
+        if change_status == ChangeStatus::Breaking && !new_value.is_wall_or_mine() {
+            // for breaking changes, update all neighbor references.
+            let neighbors = &mut field.cell_neighbors[idx];
+            neighbors.set_unknown(unknown);
+            neighbors.set_mines(mines);
+            neighbors.set_opened(opened);
+            neighbors.set_inferred(inferred);
+        }
+
         field.cells[idx] = new_value;
-        if prev_value.is_open() {
+        if prev_value.is_opened() {
             field.desolved_queue.push(&mut field.cell_flags, idx);
         }
-        if new_value.is_open() {
+        if new_value.is_opened() {
             field.solved_queue.push(&mut field.cell_flags, idx);
         }
 
@@ -861,7 +881,7 @@ pub(super) struct CellNeighbors {
     opened: DirectionSet,
 
     /// TODO
-    mine: DirectionSet,
+    mines: DirectionSet,
 
     /// TODO
     inferred: DirectionSet,
@@ -872,7 +892,7 @@ impl CellNeighbors {
         Self {
             unknown: DirectionSet::ALL,
             opened: DirectionSet::EMPTY,
-            mine: DirectionSet::EMPTY,
+            mines: DirectionSet::EMPTY,
             inferred: DirectionSet::EMPTY,
         }
     }
@@ -881,7 +901,6 @@ impl CellNeighbors {
         self.unknown
     }
 
-    #[cfg(test)]
     pub(super) fn set_unknown(&mut self, unknown: DirectionSet) {
         self.unknown = unknown;
     }
@@ -890,42 +909,35 @@ impl CellNeighbors {
         self.opened
     }
 
-    #[cfg(test)]
     pub(super) fn set_opened(&mut self, open: DirectionSet) {
         self.opened = open;
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn cleared(&self) -> DirectionSet {
-        self.inferred - self.mine
-    }
-
     pub(super) fn inferred(&self) -> DirectionSet {
-        // cell.is_unknown
         self.inferred
     }
 
-    #[cfg(test)]
-    pub(super) fn mine(&self) -> DirectionSet {
-        self.mine
+    pub(super) fn set_inferred(&mut self, inferred: DirectionSet) {
+        self.inferred = inferred;
+    }
+
+    pub(super) fn mines(&self) -> DirectionSet {
+        self.mines
+    }
+
+    pub(super) fn set_mines(&mut self, mines: DirectionSet) {
+        self.mines = mines;
     }
 
     pub(super) fn all(&self) -> DirectionSet {
-        self.unknown | self.opened | self.mine | self.inferred
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn safe(&self) -> DirectionSet {
-        self.opened | self.cleared()
+        self.unknown | self.opened | self.mines | self.inferred
     }
 
     #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.unknown = self.all();
         self.opened = DirectionSet::EMPTY;
-        self.mine = DirectionSet::EMPTY;
+        self.mines = DirectionSet::EMPTY;
         self.inferred = DirectionSet::EMPTY;
     }
 }
@@ -935,7 +947,7 @@ impl Display for CellNeighbors {
         let spacer = if f.alternate() { "\n    " } else { " " };
         write!(f, "CellNeighbors{{{spacer}unknown: {},", self.unknown,)?;
         write!(f, "CellNeighbors{{{spacer}open: {},", self.opened,)?;
-        write!(f, "CellNeighbors{{{spacer}mine: {},", self.mine,)?;
+        write!(f, "CellNeighbors{{{spacer}mine: {},", self.mines,)?;
         write!(f, "CellNeighbors{{{spacer}inferred: {},", self.inferred,)?;
         if f.alternate() {
             writeln!(f)?;
@@ -971,7 +983,7 @@ pub(super) fn cells_equal(
         return false;
     }
     if !cell_a.is_wall_or_mine() {
-        if neighbors_a.mine != neighbors_b.mine || neighbors_a.unknown != neighbors_b.unknown {
+        if neighbors_a.mines != neighbors_b.mines || neighbors_a.unknown != neighbors_b.unknown {
             return false;
         }
         if cell_a.is_unknown()
@@ -1299,7 +1311,7 @@ mod tests {
         let pc = grid[idx];
         assert_eq!(pc.unknown, E | S | SE);
         assert_eq!(pc.opened, DirectionSet::EMPTY);
-        assert_eq!(pc.mine, DirectionSet::EMPTY);
+        assert_eq!(pc.mines, DirectionSet::EMPTY);
 
         let compact = format!("{pc}");
         let alternate = format!("{pc:#}");
@@ -1391,7 +1403,7 @@ mod tests {
         // a Count(0) next to a known mine is over-satisfied
         let (_, mut neighbors) = create_grid_with_border(2, 1);
         let idx = Point { x: 1, y: 1 }.to_index(3) as usize;
-        neighbors[idx].mine |= E;
+        neighbors[idx].mines |= E;
         let cell = CellValue::for_mine_count(0);
         assert!(cell.is_invalid(neighbors[idx]));
     }
@@ -1413,7 +1425,7 @@ mod tests {
         let mut neighbor_b = grid[1];
         let cell_b = CellValue::for_mine_count(1);
         neighbor_b.unknown = neighbor_b.all() - S;
-        neighbor_b.mine = !!S;
+        neighbor_b.mines = !!S;
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
         let mut neighbors_c = grid[2];
@@ -1526,7 +1538,7 @@ mod tests {
     fn test_cell_value_4bit_encoding() {
         for count in 0..=8 {
             let val = CellValue::for_mine_count(count);
-            assert!(val.is_open());
+            assert!(val.is_opened());
             assert!(val.is_safe());
             assert!(!val.is_mine());
             assert!(!val.is_inferred());
@@ -1537,7 +1549,7 @@ mod tests {
         }
 
         let inf_safe = CellValue::CLEARED;
-        assert!(!inf_safe.is_open());
+        assert!(!inf_safe.is_opened());
         assert!(inf_safe.is_safe());
         assert!(!inf_safe.is_mine());
         assert!(inf_safe.is_inferred());
@@ -1546,7 +1558,7 @@ mod tests {
         assert_eq!(inf_safe.safe_mine_count(), None);
 
         let unk = CellValue::UNKNOWN;
-        assert!(!unk.is_open());
+        assert!(!unk.is_opened());
         assert!(!unk.is_safe());
         assert!(!unk.is_mine());
         assert!(!unk.is_inferred());
@@ -1555,7 +1567,7 @@ mod tests {
         assert_eq!(unk.safe_mine_count(), None);
 
         let wall = CellValue::WALL;
-        assert!(!wall.is_open());
+        assert!(!wall.is_opened());
         assert!(!wall.is_safe());
         assert!(!wall.is_mine());
         assert!(!wall.is_inferred());
@@ -1565,7 +1577,7 @@ mod tests {
         assert_eq!(wall.safe_mine_count(), None);
 
         let mine = CellValue::MINE;
-        assert!(!mine.is_open());
+        assert!(!mine.is_opened());
         assert!(!mine.is_safe());
         assert!(mine.is_mine());
         assert!(!mine.is_inferred());
@@ -1574,7 +1586,7 @@ mod tests {
         assert_eq!(mine.safe_mine_count(), None);
 
         let inf_mine = CellValue::FLAGGED;
-        assert!(!inf_mine.is_open());
+        assert!(!inf_mine.is_opened());
         assert!(!inf_mine.is_safe());
         assert!(inf_mine.is_mine());
         assert!(inf_mine.is_inferred());

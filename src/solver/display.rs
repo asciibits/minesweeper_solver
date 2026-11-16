@@ -296,12 +296,15 @@ impl<'a> Display for DetailMineField<'a> {
         }
         write!(f, ") {{")?;
         for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
+            if cell.is_wall() {
+                continue;
+            }
             let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
             write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
             write!(f, "{cell_spacer}unknown: {},", neighbors.unknown())?;
             write!(f, "{cell_spacer}opened: {},", neighbors.opened())?;
-            write!(f, "{cell_spacer}mine: {},", neighbors.mine())?;
+            write!(f, "{cell_spacer}mine: {},", neighbors.mines())?;
             write!(f, "{cell_spacer}inferred: {},", neighbors.inferred())?;
             write!(f, "{cell_spacer}flags: {flags},")?;
             write!(f, "{cell_spacer}pid: {pid},")?;
