@@ -3,6 +3,7 @@
 use crate::solver::{
     CellIdx, CellValue,
     cell::{InferredValue, UserCellValue, UserValueWithInference},
+    coordinates,
 };
 
 use super::MineField;
@@ -47,8 +48,8 @@ impl<'a> ColoredMineField<'a> {
             return Ok(());
         }
 
-        write!(f, "{:4}", row * self.width)?;
-        for col in 0..self.width {
+        write!(f, "{:4} ", row * self.width)?;
+        for col in 1..self.width {
             let idx = (col + row * self.width) as usize;
             if col == 0 || !self.cells[idx - 1].is_wall() || !self.cells[idx].is_wall() {
                 write!(f, "{}", "│ ".bold())?;
@@ -130,8 +131,8 @@ impl<'a> ColoredMineField<'a> {
         if self.width == 0 {
             return Ok(());
         }
-        write!(f, "     ")?;
-        for i in 0..self.width {
+        write!(f, "      ")?;
+        for i in 1..self.width {
             write!(f, "{:^4}", i)?;
         }
         writeln!(f)?;
@@ -140,13 +141,13 @@ impl<'a> ColoredMineField<'a> {
 
     /// Writes the top Unicode box border (`┌───┬───┐`).
     fn print_header(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width == 0 {
+        if self.width <= 1 {
             return Ok(());
         }
 
-        write!(f, "    ")?;
+        write!(f, "     ")?;
         write!(f, "{}", "┌───".bold())?;
-        for i in 1..self.width as usize {
+        for i in self.width as usize + 2..2 * self.width as usize {
             if self.cells[i - 1].is_wall() && self.cells[i].is_wall() {
                 write!(f, "{}", "────".bold())?;
             } else {
@@ -162,14 +163,14 @@ impl<'a> ColoredMineField<'a> {
             return Ok(());
         }
 
-        write!(f, "    ")?;
+        write!(f, "     ")?;
         let mut idx = row as usize * self.width as usize;
-        if self.cells[idx - self.width as usize].is_wall() && self.cells[idx].is_wall() {
+        if self.cells[idx - self.width as usize + 1].is_wall() && self.cells[idx + 1].is_wall() {
             write!(f, "{}{} ", "│ ".bold(), " ".on_white())?;
         } else {
             write!(f, "{}", "├───".bold())?;
         }
-        for _ in 1..self.width as usize {
+        for _ in 2..self.width as usize {
             idx += 1;
             let nw = self.cells[idx - self.width as usize - 1].is_wall();
             let ne = self.cells[idx - self.width as usize].is_wall();
@@ -221,10 +222,10 @@ impl<'a> ColoredMineField<'a> {
             return Ok(());
         }
 
-        write!(f, "    ")?;
+        write!(f, "     ")?;
         write!(f, "{}", "└───".bold())?;
-        let idx = self.cells.len() - self.width as usize - 2;
-        for i in 1..self.width as usize {
+        let idx = self.cells.len() - 2 * self.width as usize - 2;
+        for i in 2..self.width as usize {
             if self.cells[idx + i].is_wall() && self.cells[idx + i + 1].is_wall() {
                 write!(f, "{}", "────".bold())?;
             } else {
@@ -245,8 +246,8 @@ impl Display for ColoredMineField<'_> {
         // get the current partitions
         self.print_pre_header(f)?;
         self.print_header(f)?;
-        self.print_row(0, f)?;
-        for row in 1..self.height {
+        self.print_row(1, f)?;
+        for row in 2..self.height - 1 {
             self.print_separator(row, f)?;
             self.print_row(row, f)?;
         }
@@ -296,16 +297,14 @@ impl<'a> Display for DetailMineField<'a> {
         }
         write!(f, ") {{")?;
         for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
-            if cell.is_wall() {
+            let pt = coordinates(idx as u32, self.0.width_with_border);
+            if pt.x == 0 || pt.y == 0 || pt.y == self.0.height() + 1 {
                 continue;
             }
             let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
             write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
-            write!(f, "{cell_spacer}unknown: {},", neighbors.unknown())?;
-            write!(f, "{cell_spacer}opened: {},", neighbors.opened())?;
-            write!(f, "{cell_spacer}mine: {},", neighbors.mines())?;
-            write!(f, "{cell_spacer}inferred: {},", neighbors.inferred())?;
+            write!(f, "{cell_spacer}neighbors: {},", neighbors)?;
             write!(f, "{cell_spacer}flags: {flags},")?;
             write!(f, "{cell_spacer}pid: {pid},")?;
         }

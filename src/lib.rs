@@ -3,6 +3,7 @@
 //! This crate tracks known cell counts, mines, and unknown frontier cells on a
 //! [`MineField`], partitioning the active boundary into independent connected
 //! components to deduce safe cells and mine locations.
+#![feature(portable_simd)]
 
 mod solver;
 

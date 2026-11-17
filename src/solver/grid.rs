@@ -345,11 +345,6 @@ impl Direction {
     pub const fn index(&self) -> u8 {
         self.0.trailing_zeros() as u8
     }
-
-    #[inline]
-    pub const fn reverse(&self) -> Direction {
-        Direction(self.0.reverse_bits())
-    }
 }
 
 impl Display for Direction {
@@ -432,7 +427,7 @@ impl Sub<DirectionSet> for Direction {
 
 /// An iterator over the [`Direction`]s contained in a [`DirectionSet`].
 #[derive(Debug, Clone, Copy)]
-pub struct DirectionSetIterator(BinaryIterator);
+pub struct DirectionSetIterator(BinaryIterator<u8>);
 
 impl Iterator for DirectionSetIterator {
     type Item = Direction;
@@ -451,9 +446,9 @@ impl ExactSizeIterator for DirectionSetIterator {}
 /// Ex. the values 11 in binary is 0b1011; this iterator will generate the
 /// values: [0b0001, 0b0010, 0b1000]
 #[derive(Debug, Clone, Copy)]
-struct BinaryIterator(u8);
+pub(super) struct BinaryIterator<T>(pub(super) T);
 
-impl Iterator for BinaryIterator {
+impl Iterator for BinaryIterator<u8> {
     type Item = u8;
 
     #[inline]
@@ -470,7 +465,26 @@ impl Iterator for BinaryIterator {
         (len, Some(len))
     }
 }
-impl ExactSizeIterator for BinaryIterator {}
+impl ExactSizeIterator for BinaryIterator<u8> {}
+
+impl Iterator for BinaryIterator<usize> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0 == 0 {
+            return None;
+        }
+        let t = self.0;
+        self.0 &= t - 1;
+        Some(t.trailing_zeros() as usize)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.0.count_ones() as usize;
+        (len, Some(len))
+    }
+}
+impl ExactSizeIterator for BinaryIterator<usize> {}
 
 #[cfg(test)]
 mod tests {
@@ -478,10 +492,10 @@ mod tests {
 
     #[test]
     fn binary_iterator_iterates() {
-        let iter = BinaryIterator(0b1011001);
+        let iter = BinaryIterator(0b1011001u8);
         assert_eq!(iter.len(), 4);
         assert_eq!(iter.collect::<Vec<u8>>(), vec![0, 3, 4, 6]);
-        assert_eq!(BinaryIterator(0).collect::<Vec<u8>>(), vec![]);
+        assert_eq!(BinaryIterator(0u8).collect::<Vec<u8>>(), vec![]);
     }
 
     #[test]

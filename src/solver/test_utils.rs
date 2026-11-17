@@ -501,11 +501,11 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::cell::CellType;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
     #[cfg(test)]
-    use crate::solver::{cell::cells_equal, metrics::AggregatedMetrics};
+    use crate::solver::metrics::AggregatedMetrics;
+    use crate::solver::{cell::CellType, display::DetailMineField};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -828,6 +828,20 @@ mod tests {
         let fresh_field = inc_field.rebuild_from_scratch();
         validation_metrics.apply_metrics(&fresh_field.metrics);
 
+        if inc_field.partitions.len() != fresh_field.partitions.len() {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("Incremental:");
+                ColoredMineField::eprintln(inc_field);
+                eprintln!("Fresh:");
+                ColoredMineField::eprintln(&fresh_field);
+            }
+            panic!(
+                "Partition counts don't match: \n{:?}\nvs\n{:?}",
+                inc_field.partitions, fresh_field.partitions
+            );
+        }
+
         // validate cells are identical, aside from a partition_id remapping
         for (
             idx,
@@ -840,7 +854,8 @@ mod tests {
             .zip(inc_field.cell_data_iter())
             .enumerate()
         {
-            if !cells_equal(inc_cell, inc_neighbors, fresh_cell, fresh_neighbors)
+            if inc_cell != fresh_cell
+                || inc_neighbors != fresh_neighbors
                 || inc_flags != fresh_flags
             {
                 #[cfg(debug_assertions)]
@@ -911,11 +926,11 @@ mod tests {
 
         let mut loop_count = 0;
         loop {
-            #[cfg(feature = "debug")]
+            #[cfg(feature = "debug-playthrough")]
             {
-                use crate::solver::display::DetailMineField;
+                // use crate::solver::display::DetailMineField;
 
-                DetailMineField::eprintln(&builder.field);
+                // DetailMineField::eprintln(&builder.field);
                 ColoredMineField::println(&builder.field);
             }
             let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
@@ -928,6 +943,16 @@ mod tests {
                     .choose(rng);
                 if let Some((member, len)) = partition {
                     let members = builder.field.members(member, len);
+                    if len != members.len() as u32 {
+                        DetailMineField::eprintln(&builder.field);
+                        #[cfg(debug_assertions)]
+                        {
+                            ColoredMineField::eprintln(&builder.field);
+                        }
+                        panic!(
+                            "Partition lengths disagree. From partitions: {len}, from walking: [{member:?}]"
+                        );
+                    }
                     let idx = builder.hint(&members, selector(rng)).unwrap_or_else(|| {
                         panic!(
                             "Didn't get a hint from members: {:?}",
