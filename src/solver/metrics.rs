@@ -75,7 +75,7 @@ impl Metrics {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
         self.last_indexing_duration = duration;
-        self.indexing_duration.apply(duration.as_micros() as f64);
+        self.indexing_duration.apply(duration.as_nanos() as f64);
         self.mark_time = Some(now);
     }
 
@@ -86,7 +86,7 @@ impl Metrics {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
         self.last_desolved_duration = duration;
-        self.desolved_duration.apply(duration.as_micros() as f64);
+        self.desolved_duration.apply(duration.as_nanos() as f64);
         self.mark_time = Some(now);
     }
 
@@ -97,7 +97,7 @@ impl Metrics {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
         self.last_solve_duration = duration;
-        self.solve_duration.apply(duration.as_micros() as f64);
+        self.solve_duration.apply(duration.as_nanos() as f64);
         self.mark_time = Some(now);
     }
 
@@ -107,13 +107,13 @@ impl Metrics {
     pub(super) fn inc_partition_duration(&mut self) {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
-        self.partition_duration.apply(duration.as_micros() as f64);
+        self.partition_duration.apply(duration.as_nanos() as f64);
         self.total_time_duration.apply(
             (self.last_desolved_duration
                 + self.last_indexing_duration
                 + self.last_solve_duration
                 + duration)
-                .as_micros() as f64,
+                .as_nanos() as f64,
         );
         self.mark_time = Some(now);
     }
@@ -138,16 +138,16 @@ impl Display for Metrics {
             write!(
                 f,
                 "\n    {text}: {:?}",
-                Duration::from_micros(val.total() as u64)
+                Duration::from_nanos(val.total() as u64)
             )?;
             if val.count() > 1 {
                 write!(
                     f,
                     "({:?} +/- {:?} per solve - min/max: {:?}/{:?})",
-                    Duration::from_micros(val.mean() as u64),
-                    Duration::from_micros(val.stdev() as u64),
-                    Duration::from_micros(val.min as u64),
-                    Duration::from_micros(val.max as u64),
+                    Duration::from_nanos(val.mean() as u64),
+                    Duration::from_nanos(val.stdev() as u64),
+                    Duration::from_nanos(val.min as u64),
+                    Duration::from_nanos(val.max as u64),
                 )?;
             }
             write!(f, ",")
@@ -262,16 +262,16 @@ impl Display for AggregatedMetrics {
             write!(
                 f,
                 "\n    {text}: {:?}",
-                Duration::from_micros(val.total() as u64)
+                Duration::from_nanos(val.total() as u64)
             )?;
             if val.count() > 1 {
                 write!(
                     f,
                     "({:?} +/- {:?} per game, min/max: {:?}/{:?})",
-                    Duration::from_micros(val.mean() as u64),
-                    Duration::from_micros(val.stdev() as u64),
-                    Duration::from_micros(val.min as u64),
-                    Duration::from_micros(val.max as u64),
+                    Duration::from_nanos(val.mean() as u64),
+                    Duration::from_nanos(val.stdev() as u64),
+                    Duration::from_nanos(val.min as u64),
+                    Duration::from_nanos(val.max as u64),
                 )?;
             }
             write!(f, ",")
