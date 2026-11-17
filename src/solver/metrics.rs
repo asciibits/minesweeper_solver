@@ -15,11 +15,11 @@ pub(super) struct Metrics {
     max_partition_size: u32,
     partitions_created: usize,
     neighbor_visits: usize,
-    last_indexing_duration: Duration,
+    last_indexing_duration: u64,
     indexing_duration: AggregatedMetric,
-    last_desolved_duration: Duration,
+    last_desolved_duration: u64,
     desolved_duration: AggregatedMetric,
-    last_solve_duration: Duration,
+    last_solve_duration: u64,
     solve_duration: AggregatedMetric,
     partition_duration: AggregatedMetric,
     total_time_duration: AggregatedMetric,
@@ -74,8 +74,8 @@ impl Metrics {
     pub(super) fn inc_indexing_duration(&mut self) {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
-        self.last_indexing_duration = duration;
-        self.indexing_duration.apply(duration.as_nanos() as f64);
+        self.last_indexing_duration = duration.as_micros() as u64;
+        self.indexing_duration.apply(duration.as_micros() as f64);
         self.mark_time = Some(now);
     }
 
@@ -85,8 +85,8 @@ impl Metrics {
     pub(super) fn inc_desolved_duration(&mut self) {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
-        self.last_desolved_duration = duration;
-        self.desolved_duration.apply(duration.as_nanos() as f64);
+        self.last_desolved_duration = duration.as_micros() as u64;
+        self.desolved_duration.apply(duration.as_micros() as f64);
         self.mark_time = Some(now);
     }
 
@@ -96,8 +96,8 @@ impl Metrics {
     pub(super) fn inc_basic_solve_duration(&mut self) {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
-        self.last_solve_duration = duration;
-        self.solve_duration.apply(duration.as_nanos() as f64);
+        self.last_solve_duration = duration.as_micros() as u64;
+        self.solve_duration.apply(duration.as_micros() as f64);
         self.mark_time = Some(now);
     }
 
@@ -107,13 +107,12 @@ impl Metrics {
     pub(super) fn inc_partition_duration(&mut self) {
         let now = Instant::now();
         let duration = now - *self.mark_time.get_or_insert(Instant::now());
-        self.partition_duration.apply(duration.as_nanos() as f64);
+        self.partition_duration.apply(duration.as_micros() as f64);
         self.total_time_duration.apply(
             (self.last_desolved_duration
                 + self.last_indexing_duration
                 + self.last_solve_duration
-                + duration)
-                .as_nanos() as f64,
+                + duration.as_micros() as u64) as f64,
         );
         self.mark_time = Some(now);
     }
@@ -138,16 +137,16 @@ impl Display for Metrics {
             write!(
                 f,
                 "\n    {text}: {:?}",
-                Duration::from_nanos(val.total() as u64)
+                Duration::from_micros(val.total() as u64)
             )?;
             if val.count() > 1 {
                 write!(
                     f,
                     "({:?} +/- {:?} per solve - min/max: {:?}/{:?})",
-                    Duration::from_nanos(val.mean() as u64),
-                    Duration::from_nanos(val.stdev() as u64),
-                    Duration::from_nanos(val.min as u64),
-                    Duration::from_nanos(val.max as u64),
+                    Duration::from_micros(val.mean() as u64),
+                    Duration::from_micros(val.stdev() as u64),
+                    Duration::from_micros(val.min as u64),
+                    Duration::from_micros(val.max as u64),
                 )?;
             }
             write!(f, ",")
@@ -262,16 +261,16 @@ impl Display for AggregatedMetrics {
             write!(
                 f,
                 "\n    {text}: {:?}",
-                Duration::from_nanos(val.total() as u64)
+                Duration::from_micros(val.total() as u64)
             )?;
             if val.count() > 1 {
                 write!(
                     f,
                     "({:?} +/- {:?} per game, min/max: {:?}/{:?})",
-                    Duration::from_nanos(val.mean() as u64),
-                    Duration::from_nanos(val.stdev() as u64),
-                    Duration::from_nanos(val.min as u64),
-                    Duration::from_nanos(val.max as u64),
+                    Duration::from_micros(val.mean() as u64),
+                    Duration::from_micros(val.stdev() as u64),
+                    Duration::from_micros(val.min as u64),
+                    Duration::from_micros(val.max as u64),
                 )?;
             }
             write!(f, ",")
