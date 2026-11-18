@@ -349,7 +349,7 @@ impl MineField {
             .map(|&i| self.coordinates(i))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(self) fn cell_data_iter(
         &self,
     ) -> impl Iterator<Item = (CellValue, CellFlags, CellNeighbors, PartitionId)> {

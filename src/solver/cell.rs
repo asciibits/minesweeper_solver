@@ -200,7 +200,7 @@ impl Display for CellIdx {
 pub(super) struct CellValue(u8);
 
 impl CellValue {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     const INFERRED_MASK: u8 = 0b1001;
 
     /// The solver deduced the cell is safe.
@@ -237,7 +237,7 @@ impl CellValue {
     }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn is_inferred(&self) -> bool {
         self.0 & Self::INFERRED_MASK == Self::INFERRED_MASK
     }
@@ -248,7 +248,7 @@ impl CellValue {
     }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn is_wall(&self) -> bool {
         *self == Self::WALL
     }
@@ -789,12 +789,12 @@ impl CellNeighbors {
         self.inferred
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn mines(&self) -> DirectionSet {
         self.mines
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn all(&self) -> DirectionSet {
         self.unknown | self.opened | self.mines | self.inferred
     }
@@ -979,7 +979,7 @@ impl GuardedQueue {
             .inspect(|&i| flags[i].clear(self.mask))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn iter(&self) -> impl Iterator<Item = CellIdx> {
         self.queue.iter().copied()
     }

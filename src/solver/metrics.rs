@@ -26,9 +26,9 @@ pub(super) struct Metrics {
     mark_time: Option<Instant>,
 }
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 impl Metrics {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debug"))]
     pub(super) fn solve_passes(&self) -> usize {
         self.solve_passes
     }
