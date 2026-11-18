@@ -1,62 +1,51 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
 use crate::solver::{
-    CellIdx, CellValue,
+    CellIdx, Partition, PartitionId,
     cell::{InferredValue, UserCellValue, UserValueWithInference},
     coordinates,
 };
 
 use super::MineField;
 use colored::Colorize;
-use std::fmt::{self, Display, Formatter};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+};
 
 pub(super) struct ColoredMineField<'a> {
-    cells: &'a [CellValue],
-    width: u32,
-    height: u32,
+    field: &'a MineField,
 }
 
 impl<'a> ColoredMineField<'a> {
     #[allow(dead_code)]
     pub(super) fn eprintln(field: &'a MineField) {
-        eprintln!(
-            "{}",
-            ColoredMineField {
-                cells: &field.cells,
-                width: field.width_with_border,
-                height: field.height_with_border
-            }
-        );
+        eprintln!("{}", ColoredMineField { field });
     }
 
     #[cfg(debug_assertions)]
     #[allow(dead_code)]
     pub(super) fn println(field: &'a MineField) {
-        println!(
-            "{}",
-            ColoredMineField {
-                cells: &field.cells,
-                width: field.width_with_border,
-                height: field.height_with_border
-            }
-        );
+        println!("{}", ColoredMineField { field });
     }
 
     /// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
     fn print_row(&self, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width == 0 {
+        if self.field.width() == 0 {
             return Ok(());
         }
 
-        write!(f, "{:4} ", row * self.width)?;
-        for col in 1..self.width {
-            let idx = (col + row * self.width) as usize;
-            if col == 0 || !self.cells[idx - 1].is_wall() || !self.cells[idx].is_wall() {
+        let width = self.field.width_with_border;
+        write!(f, "{:4} ", row * width)?;
+        for col in 1..width {
+            let idx = (col + row * width) as usize;
+            if col == 0 || !self.field.cells[idx - 1].is_wall() || !self.field.cells[idx].is_wall()
+            {
                 write!(f, "{}", "│ ".bold())?;
             } else {
                 write!(f, "{}", "  ".on_white())?;
             }
-            let cell = self.cells[idx];
+            let cell = self.field.cells[idx];
             let user_value: UserValueWithInference = cell.into();
             let printable = match user_value {
                 UserValueWithInference {
@@ -95,27 +84,28 @@ impl<'a> ColoredMineField<'a> {
                 },
             };
 
-            // let partition_ids: HashMap<PartitionId, usize> = field
-            //     .partitions
-            //     .keys()
-            //     .copied()
-            //     .map(|i| field.partition_ids[i])
-            //     .enumerate()
-            //     .map(|(i, pid)| (pid, i))
-            //     .collect();
-            // let printable = if let Some(&i) = partition_ids.get(&field.partition_ids[idx]) {
-            //     match i % 2 {
-            //         0 => printable.bold().on_yellow(),
-            //         1 => printable.bold().on_magenta(),
-            //         _ => unreachable!(),
-            //     }
-            // } else {
-            //     printable
-            // };
+            let partition_ids: HashMap<PartitionId, usize> = self
+                .field
+                .partitions
+                .keys()
+                .enumerate()
+                .map(|(i, &pid)| (pid, i))
+                .collect();
+            let printable = if let Some(&i) = partition_ids.get(&self.field.partition_ids[idx]) {
+                match i % 2 {
+                    0 => printable.bold().on_yellow(),
+                    1 => printable.bold().on_magenta(),
+                    _ => unreachable!(),
+                }
+            } else {
+                printable
+            };
 
             write!(f, "{printable}")?;
 
-            if col == self.width - 1 || !self.cells[idx].is_wall() || !self.cells[idx + 1].is_wall()
+            if col == width - 1
+                || !self.field.cells[idx].is_wall()
+                || !self.field.cells[idx + 1].is_wall()
             {
                 write!(f, "{}", " ".bold())?;
             } else {
@@ -128,11 +118,11 @@ impl<'a> ColoredMineField<'a> {
 
     /// Writes the column coordinate header above the top border.
     fn print_pre_header(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width == 0 {
+        if self.field.width_with_border == 0 {
             return Ok(());
         }
         write!(f, "      ")?;
-        for i in 1..self.width {
+        for i in 1..self.field.width_with_border {
             write!(f, "{:^4}", i)?;
         }
         writeln!(f)?;
@@ -141,14 +131,15 @@ impl<'a> ColoredMineField<'a> {
 
     /// Writes the top Unicode box border (`┌───┬───┐`).
     fn print_header(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width <= 1 {
+        let width = self.field.width_with_border;
+        if width <= 1 {
             return Ok(());
         }
 
         write!(f, "     ")?;
         write!(f, "{}", "┌───".bold())?;
-        for i in self.width as usize + 2..2 * self.width as usize {
-            if self.cells[i - 1].is_wall() && self.cells[i].is_wall() {
+        for i in width as usize + 2..2 * width as usize {
+            if self.field.cells[i - 1].is_wall() && self.field.cells[i].is_wall() {
                 write!(f, "{}", "────".bold())?;
             } else {
                 write!(f, "{}", "┬───".bold())?;
@@ -159,28 +150,31 @@ impl<'a> ColoredMineField<'a> {
     }
     /// Writes an interior row separator (`├───┼───┤`).
     fn print_separator(&self, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width == 0 {
+        let width = self.field.width_with_border;
+        if width == 0 {
             return Ok(());
         }
 
         write!(f, "     ")?;
-        let mut idx = row as usize * self.width as usize;
-        if self.cells[idx - self.width as usize + 1].is_wall() && self.cells[idx + 1].is_wall() {
+        let mut idx = row as usize * width as usize + 1;
+        if self.field.cells[idx - width as usize + 1].is_wall()
+            && self.field.cells[idx + 1].is_wall()
+        {
             write!(f, "{}{} ", "│ ".bold(), " ".on_white())?;
         } else {
             write!(f, "{}", "├───".bold())?;
         }
-        for _ in 2..self.width as usize {
+        for _ in 2..width as usize {
             idx += 1;
-            let nw = self.cells[idx - self.width as usize - 1].is_wall();
-            let ne = self.cells[idx - self.width as usize].is_wall();
-            let sw = self.cells[idx - 1].is_wall();
-            let se = self.cells[idx].is_wall();
+            let nw = self.field.cells[idx - width as usize - 1].is_wall();
+            let ne = self.field.cells[idx - width as usize].is_wall();
+            let sw = self.field.cells[idx - 1].is_wall();
+            let se = self.field.cells[idx].is_wall();
             let post_bold = if ne
                 && se
-                && idx + 1 < self.cells.len()
-                && self.cells[idx - self.width as usize + 1].is_wall()
-                && self.cells[idx + 1].is_wall()
+                && idx + 1 < self.field.cells.len()
+                && self.field.cells[idx - width as usize + 1].is_wall()
+                && self.field.cells[idx + 1].is_wall()
             {
                 " ".on_white()
             } else {
@@ -208,7 +202,7 @@ impl<'a> ColoredMineField<'a> {
             };
             write!(f, "{}{}{}{}", lines.0, lines.1, lines.2, lines.3)?;
         }
-        if self.cells[idx - self.width as usize].is_wall() && self.cells[idx].is_wall() {
+        if self.field.cells[idx - width as usize].is_wall() && self.field.cells[idx].is_wall() {
             write!(f, "{}", "│".bold())?;
         } else {
             writeln!(f, "{}", "┤".bold())?;
@@ -218,15 +212,16 @@ impl<'a> ColoredMineField<'a> {
 
     /// Writes the bottom Unicode box border (`└───┴───┘`).
     fn print_footer(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.width == 0 {
+        let width = self.field.width_with_border;
+        if width == 0 {
             return Ok(());
         }
 
         write!(f, "     ")?;
         write!(f, "{}", "└───".bold())?;
-        let idx = self.cells.len() - 2 * self.width as usize - 2;
-        for i in 2..self.width as usize {
-            if self.cells[idx + i].is_wall() && self.cells[idx + i + 1].is_wall() {
+        let idx = self.field.cells.len() - 2 * width as usize - 2;
+        for i in 2..width as usize {
+            if self.field.cells[idx + i].is_wall() && self.field.cells[idx + i + 1].is_wall() {
                 write!(f, "{}", "────".bold())?;
             } else {
                 write!(f, "{}", "┴───".bold())?;
@@ -239,7 +234,7 @@ impl<'a> ColoredMineField<'a> {
 
 impl Display for ColoredMineField<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.height == 0 {
+        if self.field.height_with_border == 2 {
             return Ok(());
         }
 
@@ -247,7 +242,7 @@ impl Display for ColoredMineField<'_> {
         self.print_pre_header(f)?;
         self.print_header(f)?;
         self.print_row(1, f)?;
-        for row in 2..self.height - 1 {
+        for row in 2..self.field.height_with_border - 1 {
             self.print_separator(row, f)?;
             self.print_row(row, f)?;
         }
@@ -337,12 +332,8 @@ impl<'a> Display for DetailMineField<'a> {
         write_comma_separated(f, &self.0.recent_invalid, |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
         write!(f, "{spacer}partitions: [")?;
-        for (&idx, len) in self.0.partitions.iter() {
-            write!(
-                f,
-                "{spacer}  {}: member: {idx}, len: {len}",
-                self.0.partition_ids[idx]
-            )?;
+        for (&pid, Partition { member, len }) in self.0.partitions.iter() {
+            write!(f, "{spacer}  {pid}: member: {member}, len: {len}")?;
         }
         write!(f, "]")?;
         if f.alternate() {

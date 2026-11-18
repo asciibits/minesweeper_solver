@@ -7,8 +7,7 @@ use std::{
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
-    simd::{Mask, Simd, u32x8},
-    slice,
+    simd::{Mask, Simd, u32x8, usizex8},
 };
 
 use crate::{
@@ -90,12 +89,6 @@ pub enum InferredValue {
     Safe,
     /// The cell is certainly a mine.
     Mine,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SolveStatus {
-    Valid,
-    Invalid,
 }
 
 /// A user-visible cell value paired with whatever the solver has inferred about it.
@@ -301,37 +294,16 @@ impl CellValue {
 
     // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
     // either a Mine or Safe...
-    pub(super) fn infer_neighbors(
-        &self,
-        neighbors: CellNeighbors,
-    ) -> Option<(CellValue, SolveStatus)> {
+    pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
         // only valid for count cells
         debug_assert!(self.is_opened());
 
         self.safe_mine_count().and_then(|mine_count| {
             let unknown_count = neighbors.unknown.len() as i8;
             let remaining = mine_count as i8 - neighbors.mines.len() as i8;
-            if remaining <= 0 {
-                Some((
-                    CellValue::CLEARED,
-                    if remaining < 0 {
-                        SolveStatus::Invalid
-                    } else {
-                        SolveStatus::Valid
-                    },
-                ))
-            } else if remaining >= unknown_count {
-                Some((
-                    CellValue::FLAGGED,
-                    if remaining > unknown_count {
-                        SolveStatus::Invalid
-                    } else {
-                        SolveStatus::Valid
-                    },
-                ))
-            } else {
-                None
-            }
+            (remaining <= 0)
+                .then_some(CellValue::CLEARED)
+                .or((remaining >= unknown_count).then_some(CellValue::FLAGGED))
         })
     }
 
@@ -353,9 +325,10 @@ impl CellValue {
         }
 
         let indices = Self::neighbor_indices(field, idx);
-
-        let neighbor_vec = Self::gather_neighbors(&mut field.cell_neighbors, indices);
-        let neighbors = field.cell_neighbors[idx];
+        let neighbor_vec = CellNeighbors::gather_neighbors_neighbors(
+            &field.cell_neighbors,
+            Simd::from_array(indices),
+        );
 
         // Update the new value and all neighbor back references
         field.cells[idx] = new_value;
@@ -367,36 +340,26 @@ impl CellValue {
             indices,
         );
 
-        // Local updates are made, now handle any solve inferences. Only needed if the change
-        // allows for new inferences; I.e. it increases mine count, or decreases unknown count
-        if new_value.is_opened() {
-            field.solved_queue.push(&mut field.cell_flags, idx);
+        // We were previously solved iff we were opened with no unknown neighbors
+        if prev_value.is_opened() {
+            field.desolved_queue.push(&mut field.cell_flags, idx);
         }
-        if new_value.is_unknown() != prev_value.is_unknown()
-            || new_value.is_mine() != prev_value.is_mine()
-        {
-            for i in idx.neighbor_iter(field.width_with_border, neighbors.opened) {
-                field.solved_queue.push(&mut field.cell_flags, i);
+        let neighbors = field.cell_neighbors[idx];
+        // Queue neighbor desolves if we had a neighbor-desolving change (i.e. changing our
+        // neighbors' Unknown or Mine counts)
+        if !prev_value.is_unknown() && prev_value.is_mine() != new_value.is_mine() {
+            // this change affects neighbor solves
+            for n_idx in field.neighbor_iter(idx, neighbors.opened) {
+                field.desolved_queue.push(&mut field.cell_flags, n_idx);
             }
         }
 
-        // Repartition may be needed if this cell changed to opened.
-        if new_value.is_opened() != prev_value.is_opened()
-            || new_value.is_unknown() != prev_value.is_unknown()
-        {
-            field
-                .pending_partition_queue
-                .push(&mut field.cell_flags, idx);
+        if new_value.is_opened() {
+            field.solved_queue.push(&mut field.cell_flags, idx);
         }
-        // Repartition may be needed for neighbors if this cell's unknown status or opened status changed
-        if prev_value.is_unknown() != new_value.is_unknown()
-            || prev_value.is_opened() != new_value.is_opened()
-        {
-            for i in idx.neighbor_iter(
-                field.width_with_border,
-                neighbors.opened | neighbors.unknown,
-            ) {
-                field.pending_partition_queue.push(&mut field.cell_flags, i);
+        if prev_value.is_unknown() || new_value.is_mine() != prev_value.is_mine() {
+            for i in field.neighbor_iter(idx, neighbors.opened) {
+                field.solved_queue.push(&mut field.cell_flags, i);
             }
         }
 
@@ -425,27 +388,6 @@ impl CellValue {
         }
     }
 
-    fn as_mut_slice(cell_neighbors: &mut [CellNeighbors]) -> &mut [u32] {
-        unsafe {
-            slice::from_raw_parts_mut(
-                cell_neighbors.as_mut_ptr() as *mut u32,
-                cell_neighbors.len(),
-            )
-        }
-    }
-
-    fn gather_neighbors(cell_neighbors: &mut [CellNeighbors], indices: [usize; 8]) -> u32x8 {
-        let cell_neighbors = Self::as_mut_slice(cell_neighbors);
-        unsafe {
-            u32x8::gather_select_unchecked(
-                cell_neighbors,
-                Mask::splat(true),
-                Simd::from_array(indices),
-                Simd::splat(0),
-            )
-        }
-    }
-
     fn update_neighbors(
         cell_neighbors: &mut [CellNeighbors],
         neighbors: u32x8,
@@ -453,7 +395,7 @@ impl CellValue {
         new_value: CellValue,
         indices: [usize; 8],
     ) -> u8 {
-        let cell_neighbors = Self::as_mut_slice(cell_neighbors);
+        let cell_neighbors = CellNeighbors::as_mut_slice(cell_neighbors);
 
         // obtain the type bits that need to be toggled from the previous value to the new
         let toggle_bits = prev_value.cell_type().mask() ^ new_value.cell_type().mask();
@@ -661,38 +603,6 @@ impl Display for CellValue {
     }
 }
 
-/// High-level classification of a cell's value used to simplify traversal and neighbor updates.
-///
-/// Note: [`CellType::Open`] represents a user-provided open cell that has an adjacent mine count.
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
-#[repr(u8)]
-pub(super) enum CellType {
-    /// An interior wall
-    Wall = 0b000,
-    /// User-provided safe cell with an adjacent mine count (`is_open() == true`).
-    Opened = Self::OPENED_MASK,
-    /// Cell deduced by the solver to be safe.
-    Cleared = Self::INFERRED_MASK,
-    /// Cell whose state is unknown.
-    #[default]
-    Unknown = Self::UNKNOWN_MASK,
-    /// Cell deduced by the solver to be a mine.
-    Flag = Self::MINE_MASK | Self::INFERRED_MASK,
-    /// User-provided mine.
-    Mine = Self::MINE_MASK,
-}
-
-impl CellType {
-    const UNKNOWN_MASK: u8 = 0b0001;
-    const OPENED_MASK: u8 = 0b0010;
-    const MINE_MASK: u8 = 0b0100;
-    const INFERRED_MASK: u8 = 0b1000;
-
-    pub(super) const fn mask(&self) -> u8 {
-        *self as u8
-    }
-}
-
 pub(super) fn create_grid_with_border(
     width: u32,
     height: u32,
@@ -741,19 +651,53 @@ pub(super) fn create_grid_with_border(
     (values.into_boxed_slice(), neighbors.into_boxed_slice())
 }
 
+/// High-level classification of a cell's value used to simplify traversal and neighbor updates.
+///
+/// Note: [`CellType::Open`] represents a user-provided open cell that has an adjacent mine count.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum CellType {
+    /// An interior wall
+    Wall = 0,
+    /// User-provided safe cell with an adjacent mine count (`is_open() == true`).
+    Opened = Self::OPENED_MASK,
+    /// Cell deduced by the solver to be safe.
+    Cleared = Self::INFERRED_MASK,
+    /// Cell whose state is unknown.
+    #[default]
+    Unknown = Self::UNKNOWN_MASK,
+    /// Cell deduced by the solver to be a mine.
+    Flag = Self::MINE_MASK | Self::INFERRED_MASK,
+    /// User-provided mine.
+    Mine = Self::MINE_MASK,
+}
+
+impl CellType {
+    // NOTE: To allow vectorized bit operations on neighbor values, these MASK values *must* be
+    // kept in sync with the ordering of the corresponding DirectionSet values in CellNeighbors.
+    const UNKNOWN_MASK: u8 = 0b0001;
+    const OPENED_MASK: u8 = 0b0010;
+    const MINE_MASK: u8 = 0b0100;
+    const INFERRED_MASK: u8 = 0b1000;
+
+    pub(super) fn mask(&self) -> u8 {
+        *self as u8
+    }
+}
+
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(C, align(4))]
 pub(super) struct CellNeighbors {
-    /// TODO
+    /// The directions of neighboring [`CellType::Unknown`] cells
     unknown: DirectionSet,
 
-    /// TODO
+    /// The directions of neighboring [`CellType::Opened`] cells
     opened: DirectionSet,
 
-    /// TODO
+    /// The directions of neighboring [`CellType::Mine`] and [`CellType::Flag`] cells
     mines: DirectionSet,
 
-    /// TODO
+    /// The directions of neighboring [`CellType::Cleared`] and [`CellType::Flag`] cells
     inferred: DirectionSet,
 }
 
@@ -764,6 +708,26 @@ impl CellNeighbors {
             opened: DirectionSet::EMPTY,
             mines: DirectionSet::EMPTY,
             inferred: DirectionSet::EMPTY,
+        }
+    }
+
+    fn as_slice(slice: &[Self]) -> &[u32] {
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *mut u32, slice.len()) }
+    }
+
+    fn as_mut_slice(slice: &mut [Self]) -> &mut [u32] {
+        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len()) }
+    }
+
+    fn gather_neighbors_neighbors(slice: &[Self], indices: usizex8) -> u32x8 {
+        let cell_neighbors = Self::as_slice(slice);
+        unsafe {
+            u32x8::gather_select_unchecked(
+                cell_neighbors,
+                Mask::splat(true),
+                indices,
+                Simd::splat(0),
+            )
         }
     }
 
@@ -984,7 +948,6 @@ impl GuardedQueue {
         self.queue.iter().copied()
     }
 
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -1009,6 +972,10 @@ impl Hasher for FastNumberHasher {
         padded[..bytes.len().min(4)]
             .copy_from_slice(bytes[..bytes.len().min(4)].try_into().unwrap());
         self.0 = u32::from_le_bytes(padded);
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.0 = i as u32;
     }
 
     fn write_u16(&mut self, i: u16) {

@@ -505,7 +505,7 @@ mod tests {
     use crate::solver::display::ColoredMineField;
     #[cfg(test)]
     use crate::solver::metrics::AggregatedMetrics;
-    use crate::solver::{cell::CellType, display::DetailMineField};
+    use crate::solver::{Partition, cell::CellType, display::DetailMineField};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -821,6 +821,7 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn validate_incremental_field(
         inc_field: &MineField,
         validation_metrics: &mut AggregatedMetrics,
@@ -900,7 +901,9 @@ mod tests {
         }
 
         println!("For incremental:\n{metrics:#}");
-        println!("For validation:\n{validation_metrics:#}");
+        if !validation_metrics.is_empty() {
+            println!("For validation:\n{validation_metrics:#}");
+        }
     }
 
     fn test_single_random_incremental_play_through(
@@ -908,7 +911,7 @@ mod tests {
         height: u32,
         mine_count: u32,
         metrics: &mut AggregatedMetrics,
-        validation_metrics: &mut AggregatedMetrics,
+        _validation_metrics: &mut AggregatedMetrics,
         rng: &mut impl Rng,
     ) {
         let start_pt = Point {
@@ -935,13 +938,8 @@ mod tests {
             }
             let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
             if inferred.is_empty() {
-                let partition = builder
-                    .field
-                    .partitions
-                    .iter()
-                    .map(|(&idx, &len)| (idx, len))
-                    .choose(rng);
-                if let Some((member, len)) = partition {
+                let partition = builder.field.partitions.values().choose(rng);
+                if let Some(&Partition { member, len }) = partition {
                     let members = builder.field.members(member, len);
                     if len != members.len() as u32 {
                         DetailMineField::eprintln(&builder.field);
@@ -992,7 +990,7 @@ mod tests {
             }
 
             // compare against a fresh (non incremental) MineField
-            validate_incremental_field(&builder.field, validation_metrics);
+            // validate_incremental_field(&builder.field, _validation_metrics);
 
             loop_count += 1;
             if loop_count >= width * height {

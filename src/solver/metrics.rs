@@ -194,8 +194,8 @@ impl Display for Metrics {
 #[derive(Debug, Default, Copy, Clone)]
 pub(super) struct AggregatedMetrics {
     solve_passes: AggregatedMetric,
-    max_partitions: AggregatedMetric,
-    max_partition_size: AggregatedMetric,
+    max_partitions: usize,
+    max_partition_size: u32,
     partitions_created: AggregatedMetric,
     neighbor_visits: AggregatedMetric,
     indexing_duration: AggregatedMetric,
@@ -209,9 +209,8 @@ pub(super) struct AggregatedMetrics {
 impl AggregatedMetrics {
     pub(super) fn apply_metrics(&mut self, metrics: &Metrics) {
         self.solve_passes.apply(metrics.solve_passes as f64);
-        self.max_partitions.apply(metrics.max_partitions as f64);
-        self.max_partition_size
-            .apply(metrics.max_partition_size as f64);
+        self.max_partitions = self.max_partitions.max(metrics.max_partitions);
+        self.max_partition_size = self.max_partition_size.max(metrics.max_partition_size);
         self.partitions_created
             .apply(metrics.partitions_created as f64);
         self.neighbor_visits.apply(metrics.neighbor_visits as f64);
@@ -224,6 +223,10 @@ impl AggregatedMetrics {
             .apply(metrics.partition_duration.total());
         self.total_duration
             .apply(metrics.total_time_duration.total());
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.solve_passes.n == 0.0
     }
 }
 
@@ -277,8 +280,12 @@ impl Display for AggregatedMetrics {
         }
         write!(f, "Metrics {{")?;
         write_usize_field(f, "solves", self.solve_passes)?;
-        write_usize_field(f, "Max simultaneous partitions", self.max_partitions)?;
-        write_usize_field(f, "Max partition size", self.max_partition_size)?;
+        write!(
+            f,
+            "\n    Max simultaneous partitions: {}",
+            self.max_partitions
+        )?;
+        write!(f, "\n    Max partition size: {}", self.max_partition_size)?;
         write_usize_field(f, "Partitions created", self.partitions_created)?;
         write_usize_field(f, "Neighbor visits", self.neighbor_visits)?;
         write_duration_field(f, "Time spent on indexing", self.indexing_duration)?;
