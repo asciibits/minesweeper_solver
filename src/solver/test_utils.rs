@@ -457,6 +457,53 @@ impl FieldBuilder {
         self.expose_points(all_pts)
     }
 
+    /// Selects a random unknown, non-mine cell belonging to an active solver partition.
+    ///
+    /// Returns `None` if no active partitions remain.
+    pub fn safe_frontier_hint(
+        &mut self,
+        mut idx_selector: impl FnMut(usize) -> usize,
+    ) -> Option<Point> {
+        use std::{cell::RefCell, collections::HashSet, rc::Rc};
+
+        let n_partitions = self.field.partitions.len();
+        if n_partitions == 0 {
+            return None;
+        }
+        let &crate::solver::Partition { member, len } = self
+            .field
+            .partitions
+            .values()
+            .nth(idx_selector(n_partitions))?;
+
+        let visited = Rc::new(RefCell::new(HashSet::with_capacity_and_hasher(
+            len as usize,
+            crate::solver::cell::FastNumberHasherBuilder,
+        )));
+        self.field.visit_partition(
+            member,
+            &mut |_, idx| visited.borrow_mut().insert(idx),
+            &mut |_, idx| visited.borrow_mut().insert(idx),
+        );
+
+        let width = self.field.width();
+        let mut candidates: Vec<CellIdx> = Rc::into_inner(visited)
+            .unwrap()
+            .into_inner()
+            .into_iter()
+            .filter(|&i| {
+                if !self.field.cells[i].is_unknown() {
+                    return false;
+                }
+                let pt = self.field.coordinates(i);
+                self.mines[(pt.x + pt.y * width) as usize] != MineOrCount::MINE
+            })
+            .collect();
+        candidates.sort_unstable();
+        (!candidates.is_empty())
+            .then(|| self.field.coordinates(candidates[idx_selector(candidates.len())]))
+    }
+
     // Selects a random member of a live partition to expose.
     #[cfg(test)]
     pub(super) fn hint(
