@@ -331,20 +331,14 @@ impl CellValue {
             eprintln!("Applying change: ({idx}): {prev_value} -> {new_value}");
         }
 
-        let indices = Self::neighbor_indices(field, idx);
-        let neighbor_vec = CellNeighbors::gather_neighbors_neighbors(
-            &field.cell_neighbors,
-            Simd::from_array(indices),
-        );
-
         // Update the new value and all neighbor back references
         field.cells[idx] = new_value;
         Self::update_neighbors(
             &mut field.cell_neighbors,
-            neighbor_vec,
+            field.width_with_border,
+            idx,
             prev_value,
             new_value,
-            indices,
         );
         #[cfg(feature = "debug")]
         {
@@ -397,54 +391,54 @@ impl CellValue {
         }
     }
 
-    /// Applies a single SIMD XOR scatter across all 8 neighbor [`CellNeighbors`] structs.
+    /// Applies an in-place XOR across all 8 neighbor [`CellNeighbors`] structs using a
+    /// precomputed 16-entry lookup table indexed by the 4-bit [`CellType`] difference (`prev ^ new`).
     ///
-    /// Spreads the 4-bit [`CellType`] difference (`prev ^ new`) across the 4 bytes of a `u32`
-    /// and shifts left by `[7, 6, 5, 4, 3, 2, 1, 0]` for NW..SE respectively—because from a
-    /// neighbor's point of view at lane `k`, `idx` lies in the opposite direction (`7 - k`).
+    /// Lane `k` (`0..=7`, corresponding to NW..SE) toggles bit `7 - k` in the neighbor because
+    /// from that neighbor's point of view, `idx` lies in the opposite compass direction.
     fn update_neighbors(
         cell_neighbors: &mut [CellNeighbors],
-        neighbors: u32x8,
+        width: u32,
+        idx: CellIdx,
         prev_value: CellValue,
         new_value: CellValue,
-        indices: [usize; 8],
     ) {
-        let cell_neighbors = CellNeighbors::as_mut_slice(cell_neighbors);
+        const TOGGLE_MASKS: [[u32; 8]; 16] = {
+            let mut table = [[0u32; 8]; 16];
+            let mut bits = 0usize;
+            while bits < 16 {
+                let spread = ((bits as u32 * 0x204081) & 0x1010101).to_le();
+                let mut lane = 0usize;
+                while lane < 8 {
+                    table[bits][lane] = spread << (7 - lane);
+                    lane += 1;
+                }
+                bits += 1;
+            }
+            table
+        };
 
-        // obtain the type bits that need to be toggled from the previous value to the new
-        let toggle_bits = prev_value.cell_type().mask() ^ new_value.cell_type().mask();
-
-        // spread the four change bits out to the trailing bit in each of the four bytes in a u32
-        let spread = ((toggle_bits as u32 * 0x204081) & 0x1010101).to_le();
-        let neighbor_toggle =
-            neighbors ^ Simd::splat(spread) << Simd::from_array([7, 6, 5, 4, 3, 2, 1, 0]);
-        unsafe {
-            neighbor_toggle.scatter_select_unchecked(
-                cell_neighbors,
-                Mask::splat(true),
-                Simd::from_array(indices),
-            );
-        }
-    }
-
-    // Get all neighbor indices
-    fn neighbor_indices(field: &MineField, idx: CellIdx) -> [usize; 8] {
         let i = idx.0 as usize;
-        let width = field.width_with_border as usize;
+        let width = width as usize;
         let idx_up = i - width;
         let idx_down = i + width;
-        debug_assert!(idx_down + 1 < field.cell_neighbors.len());
+        debug_assert!(idx_up >= 1 && idx_down + 1 < cell_neighbors.len());
 
-        [
-            idx_up - 1,
-            idx_up,
-            idx_up + 1,
-            i - 1,
-            i + 1,
-            idx_down - 1,
-            idx_down,
-            idx_down + 1,
-        ]
+        let toggle_bits = (prev_value.cell_type().mask() ^ new_value.cell_type().mask()) as usize;
+        let masks = TOGGLE_MASKS[toggle_bits];
+
+        // SAFETY: Playable cells are padded by a border of WALL cells, guaranteeing
+        // `idx_up - 1 >= 0` and `idx_down + 1 < cell_neighbors.len()`.
+        unsafe {
+            *cell_neighbors.get_unchecked_mut(idx_up - 1).as_u32_mut() ^= masks[0];
+            *cell_neighbors.get_unchecked_mut(idx_up).as_u32_mut() ^= masks[1];
+            *cell_neighbors.get_unchecked_mut(idx_up + 1).as_u32_mut() ^= masks[2];
+            *cell_neighbors.get_unchecked_mut(i - 1).as_u32_mut() ^= masks[3];
+            *cell_neighbors.get_unchecked_mut(i + 1).as_u32_mut() ^= masks[4];
+            *cell_neighbors.get_unchecked_mut(idx_down - 1).as_u32_mut() ^= masks[5];
+            *cell_neighbors.get_unchecked_mut(idx_down).as_u32_mut() ^= masks[6];
+            *cell_neighbors.get_unchecked_mut(idx_down + 1).as_u32_mut() ^= masks[7];
+        }
     }
 
     #[cfg(feature = "debug")]
@@ -729,6 +723,7 @@ impl CellNeighbors {
         }
     }
 
+    #[allow(dead_code)]
     fn as_slice(slice: &[Self]) -> &[u32] {
         const {
             assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
@@ -736,6 +731,7 @@ impl CellNeighbors {
         unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
     }
 
+    #[allow(dead_code)]
     fn as_mut_slice(slice: &mut [Self]) -> &mut [u32] {
         const {
             assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
@@ -743,6 +739,22 @@ impl CellNeighbors {
         unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
     }
 
+    #[allow(dead_code)]
+    fn as_u32(&self) -> u32 {
+        const {
+            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
+        }
+        unsafe { *(self as *const CellNeighbors as *const u32) }
+    }
+
+    fn as_u32_mut(&mut self) -> &mut u32 {
+        const {
+            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
+        }
+        unsafe { &mut *(self as *mut CellNeighbors as *mut u32) }
+    }
+
+    #[allow(dead_code)]
     fn gather_neighbors_neighbors(slice: &[Self], indices: usizex8) -> u32x8 {
         let cell_neighbors = Self::as_slice(slice);
         unsafe {
