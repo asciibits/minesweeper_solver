@@ -170,10 +170,10 @@ impl Display for CellIdx {
 ///
 /// # Encoding
 ///
-/// | Value | Binary | Meaning | `is_open()` | `is_clear()` | `is_mine()` | `is_inferred()` | `cell_type()` |
+/// | Value | Binary | Meaning | `is_opened()` | `is_safe()` | `is_mine()` | `is_inferred()` | `cell_type()` |
 /// | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-/// | `0..=8` | `0000`..`1000` | Open with adjacent mine count (`0` to `8`) | `true` | `true` | `false` | `false` | [`CellType::Open`] |
-/// | `9` | `1001` | Inferred Clear | `false` | `true` | `false` | `true` | [`CellType::Clear`] |
+/// | `0..=8` | `0000`..`1000` | Open with adjacent mine count (`0` to `8`) | `true` | `true` | `false` | `false` | [`CellType::Opened`] |
+/// | `9` | `1001` | Inferred Clear | `false` | `true` | `false` | `true` | [`CellType::Cleared`] |
 /// | `10` | `1010` | Unknown | `false` | `false` | `false` | `false` | [`CellType::Unknown`] |
 /// | `12` | `1100` | Interior Wall | `false` | `false` | `false` | `false` | [`CellType::Wall`] |
 /// | `14` | `1110` | User Mine | `false` | `false` | `true` | `false` | [`CellType::Mine`] |
@@ -181,12 +181,12 @@ impl Display for CellIdx {
 ///
 /// # Invariants & Predicates
 ///
-/// - [`Self::is_clear`]: value $\le 9$ (all open cells `0..=8` and inferred clear `9`).
-/// - [`Self::is_open`]: value $< 9$ (`0..=8`). Note that [`Self::is_clear`] returns `true` for inferred clear cells too;
-///   use [`Self::safe_mine_count`] or [`Self::is_open`] to identify true opened cells.
+/// - `is_safe()` (test-only helper): value $\le 9$ (all opened cells `0..=8` and inferred cleared `9`).
+/// - [`Self::is_opened`]: value $< 9$ (`0..=8`). Use [`Self::safe_mine_count`] or [`Self::is_opened`]
+///   to identify true opened cells.
 /// - [`Self::is_mine`]: value $\ge 14$ (user mine `14` and inferred flag `15`).
-/// - [`Self::is_wall`]: value $== 12$ ([`Self::WALL`]).
-/// - [`Self::is_inferred`]: `value & 0b1001 == 0b1001` (matches only `9` and `15`).
+/// - `is_wall()` (debug/test helper): value $== 12$ ([`Self::WALL`]).
+/// - `is_inferred()` (debug/test helper): `value & 0b1001 == 0b1001` (matches only `9` and `15`).
 /// - [`Self::cell_type`]: calculated via `value.saturating_sub(8)` mapped to [`CellType`].
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -307,6 +307,13 @@ impl CellValue {
         })
     }
 
+    /// Updates `field.cells[idx]` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
+    /// back-reference bitmasks in parallel via SIMD, and queues affected cells onto
+    /// `desolved_queue` and `solved_queue`.
+    ///
+    /// Returns [`ChangeStatus::NoChange`] if the value is unchanged, [`ChangeStatus::NonBreaking`]
+    /// when neighboring inferences remain valid (e.g., `Unknown -> *`, `Flagged -> Mine`, or
+    /// `(Cleared|Opened|Wall) -> (Cleared|Opened|Wall)`), or [`ChangeStatus::Breaking`] otherwise.
     pub(super) fn apply_change(
         field: &mut MineField,
         idx: CellIdx,
@@ -332,13 +339,19 @@ impl CellValue {
 
         // Update the new value and all neighbor back references
         field.cells[idx] = new_value;
-        let toggle_bits = Self::update_neighbors(
+        Self::update_neighbors(
             &mut field.cell_neighbors,
             neighbor_vec,
             prev_value,
             new_value,
             indices,
         );
+        #[cfg(feature = "debug")]
+        {
+            // This does a full board validation with all neighbor references after each change.
+            // This is quite expensive.
+            Self::validate_board(field, &pre_change, idx, new_value);
+        }
 
         // We were previously solved iff we were opened with no unknown neighbors
         if prev_value.is_opened() {
@@ -357,17 +370,13 @@ impl CellValue {
         if new_value.is_opened() {
             field.solved_queue.push(&mut field.cell_flags, idx);
         }
-        if prev_value.is_unknown() || new_value.is_mine() != prev_value.is_mine() {
+        if prev_value.is_unknown()
+            || new_value.is_unknown()
+            || prev_value.is_mine() != new_value.is_mine()
+        {
             for i in field.neighbor_iter(idx, neighbors.opened) {
                 field.solved_queue.push(&mut field.cell_flags, i);
             }
-        }
-
-        #[cfg(feature = "debug")]
-        {
-            // This does a full board validation with all neighbor references after each change.
-            // This is quite expensive.
-            Self::validate_board(field, &pre_change, idx, new_value);
         }
 
         // A non-breaking change is one that does not impact the inference of neighboring cells.
@@ -380,7 +389,7 @@ impl CellValue {
         //
         // The following inequality is a concise way of saying the above
         if prev_value.is_unknown()
-            || toggle_bits & (CellType::MINE_MASK | CellType::UNKNOWN_MASK) == 0
+            || (!new_value.is_unknown() && (prev_value.is_mine() == new_value.is_mine()))
         {
             ChangeStatus::NonBreaking
         } else {
@@ -388,13 +397,18 @@ impl CellValue {
         }
     }
 
+    /// Applies a single SIMD XOR scatter across all 8 neighbor [`CellNeighbors`] structs.
+    ///
+    /// Spreads the 4-bit [`CellType`] difference (`prev ^ new`) across the 4 bytes of a `u32`
+    /// and shifts left by `[7, 6, 5, 4, 3, 2, 1, 0]` for NW..SE respectively—because from a
+    /// neighbor's point of view at lane `k`, `idx` lies in the opposite direction (`7 - k`).
     fn update_neighbors(
         cell_neighbors: &mut [CellNeighbors],
         neighbors: u32x8,
         prev_value: CellValue,
         new_value: CellValue,
         indices: [usize; 8],
-    ) -> u8 {
+    ) {
         let cell_neighbors = CellNeighbors::as_mut_slice(cell_neighbors);
 
         // obtain the type bits that need to be toggled from the previous value to the new
@@ -411,8 +425,6 @@ impl CellValue {
                 Simd::from_array(indices),
             );
         }
-
-        toggle_bits
     }
 
     // Get all neighbor indices
@@ -653,13 +665,13 @@ pub(super) fn create_grid_with_border(
 
 /// High-level classification of a cell's value used to simplify traversal and neighbor updates.
 ///
-/// Note: [`CellType::Open`] represents a user-provided open cell that has an adjacent mine count.
+/// Note: [`CellType::Opened`] represents a user-provided open cell that has an adjacent mine count.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum CellType {
     /// An interior wall
     Wall = 0,
-    /// User-provided safe cell with an adjacent mine count (`is_open() == true`).
+    /// User-provided safe cell with an adjacent mine count (`is_opened() == true`).
     Opened = Self::OPENED_MASK,
     /// Cell deduced by the solver to be safe.
     Cleared = Self::INFERRED_MASK,
@@ -685,6 +697,12 @@ impl CellType {
     }
 }
 
+/// Packed 4-byte neighbor direction bitsets maintained per cell for `O(1)` neighborhood queries.
+///
+/// The field order (`unknown`, `opened`, `mines`, `inferred`) and `#[repr(C, align(4))]` layout
+/// match [`CellType::UNKNOWN_MASK`], [`CellType::OPENED_MASK`], [`CellType::MINE_MASK`], and
+/// [`CellType::INFERRED_MASK`] so [`CellValue::update_neighbors`] can toggle all 4 masks across
+/// all 8 neighbors via SIMD gather/XOR/scatter on `[u32]`.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(C, align(4))]
 pub(super) struct CellNeighbors {
@@ -712,11 +730,17 @@ impl CellNeighbors {
     }
 
     fn as_slice(slice: &[Self]) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *mut u32, slice.len()) }
+        const {
+            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
+        }
+        unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
     }
 
     fn as_mut_slice(slice: &mut [Self]) -> &mut [u32] {
-        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len()) }
+        const {
+            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
+        }
+        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
     }
 
     fn gather_neighbors_neighbors(slice: &[Self], indices: usizex8) -> u32x8 {
@@ -969,8 +993,7 @@ impl Hasher for FastNumberHasher {
             "FastNumberHasher should only be used on types with a single primitive"
         );
         let mut padded = [0u8; 4];
-        padded[..bytes.len().min(4)]
-            .copy_from_slice(bytes[..bytes.len().min(4)].try_into().unwrap());
+        padded[..bytes.len().min(4)].copy_from_slice(bytes[..bytes.len().min(4)].into());
         self.0 = u32::from_le_bytes(padded);
     }
 
@@ -988,7 +1011,7 @@ impl Hasher for FastNumberHasher {
 
     // Return the final computed hash value
     fn finish(&self) -> u64 {
-        self.0 as u64
+        (self.0 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 }
 
@@ -1023,7 +1046,7 @@ pub(super) struct CellOrdering {
 
 #[allow(dead_code)]
 impl CellOrdering {
-    /// Constructs a [`CellOrdering`] if `cell` holds a known count (`Safe(n)`), or `None` otherwise.
+    /// Constructs a [`CellOrdering`] if `cell` holds a known count (`Opened(n)`), or `None` otherwise.
     pub(super) fn from_cell(
         idx: CellIdx,
         cell: CellValue,
@@ -1304,12 +1327,21 @@ mod tests {
     #[test]
     fn test_fast_number_hasher_and_builder() {
         let builder = FastNumberHasherBuilder;
-        let mut hasher = builder.build_hasher();
-        hasher.write_u16(42);
-        assert_eq!(hasher.finish(), 42);
+        let mut h1 = builder.build_hasher();
+        h1.write_u16(1);
+        let hash1 = h1.finish();
 
-        hasher.write_u32(100_000);
-        assert_eq!(hasher.finish(), 100_000);
+        let mut h2 = builder.build_hasher();
+        h2.write_u16(2);
+        let hash2 = h2.finish();
+
+        assert_ne!(hash1, hash2);
+        // Top 7 bits (SwissTable H2 tag) should be non-zero and well-distributed for small sequential IDs
+        assert_ne!(hash1 >> 57, hash2 >> 57);
+
+        let mut h3 = builder.build_hasher();
+        h3.write_u32(100_000);
+        assert_ne!(h3.finish(), 0);
 
         let mut map: HashMap<CellIdx, usize, FastNumberHasherBuilder> =
             HashMap::with_hasher(FastNumberHasherBuilder);

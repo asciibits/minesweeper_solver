@@ -30,7 +30,12 @@ impl<'a> ColoredMineField<'a> {
     }
 
     /// Writes a single board row (prefixed by its starting linear cell index) and its cell values.
-    fn print_row(&self, row: u32, f: &mut Formatter<'_>) -> fmt::Result {
+    fn print_row(
+        &self,
+        row: u32,
+        f: &mut Formatter<'_>,
+        partition_ids: &HashMap<PartitionId, usize>,
+    ) -> fmt::Result {
         if self.field.width() == 0 {
             return Ok(());
         }
@@ -39,8 +44,7 @@ impl<'a> ColoredMineField<'a> {
         write!(f, "{:4} ", row * width)?;
         for col in 1..width {
             let idx = (col + row * width) as usize;
-            if col == 0 || !self.field.cells[idx - 1].is_wall() || !self.field.cells[idx].is_wall()
-            {
+            if !self.field.cells[idx - 1].is_wall() || !self.field.cells[idx].is_wall() {
                 write!(f, "{}", "│ ".bold())?;
             } else {
                 write!(f, "{}", "  ".on_white())?;
@@ -84,17 +88,11 @@ impl<'a> ColoredMineField<'a> {
                 },
             };
 
-            let partition_ids: HashMap<PartitionId, usize> = self
-                .field
-                .partitions
-                .keys()
-                .enumerate()
-                .map(|(i, &pid)| (pid, i))
-                .collect();
             let printable = if let Some(&i) = partition_ids.get(&self.field.partition_ids[idx]) {
-                match i % 2 {
+                match i % 3 {
                     0 => printable.bold().on_yellow(),
                     1 => printable.bold().on_magenta(),
+                    2 => printable.bold().on_white(),
                     _ => unreachable!(),
                 }
             } else {
@@ -234,6 +232,14 @@ impl<'a> ColoredMineField<'a> {
 
 impl Display for ColoredMineField<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let partition_ids: HashMap<PartitionId, usize> = self
+            .field
+            .partitions
+            .keys()
+            .enumerate()
+            .map(|(i, &pid)| (pid, i))
+            .collect();
+
         if self.field.height_with_border == 2 {
             return Ok(());
         }
@@ -241,10 +247,10 @@ impl Display for ColoredMineField<'_> {
         // get the current partitions
         self.print_pre_header(f)?;
         self.print_header(f)?;
-        self.print_row(1, f)?;
+        self.print_row(1, f, &partition_ids)?;
         for row in 2..self.field.height_with_border - 1 {
             self.print_separator(row, f)?;
-            self.print_row(row, f)?;
+            self.print_row(row, f, &partition_ids)?;
         }
         self.print_footer(f)?;
 
@@ -301,7 +307,7 @@ impl<'a> Display for DetailMineField<'a> {
             write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
             write!(f, "{cell_spacer}neighbors: {},", neighbors)?;
             write!(f, "{cell_spacer}flags: {flags},")?;
-            write!(f, "{cell_spacer}pid: {pid},")?;
+            write!(f, "{cell_spacer}pid: {pid} }}")?;
         }
         write!(f, "{spacer}}},")?;
         write!(

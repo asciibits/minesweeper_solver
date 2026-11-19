@@ -1,13 +1,13 @@
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 use std::cmp;
 use std::fmt;
 use std::fmt::Display;
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 use std::time::{Duration, Instant};
 
 use crate::solver::grid::DirectionSet;
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct Metrics {
     solve_passes: usize,
@@ -126,7 +126,7 @@ impl Metrics {
     }
 }
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 impl Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         pub(super) fn write_duration_field(
@@ -163,13 +163,13 @@ impl Display for Metrics {
             f,
             "Partitions created {} ({:.3} per solve)",
             self.partitions_created,
-            self.partitions_created / self.solve_passes
+            self.partitions_created as f64 / self.solve_passes as f64
         )?;
         write!(
             f,
             "Neighbor visits {} ({:.3} per solve)",
             self.neighbor_visits,
-            self.neighbor_visits / self.solve_passes
+            self.neighbor_visits as f64 / self.solve_passes as f64
         )?;
         write_duration_field(f, "Time spent on indexing", self.indexing_duration())?;
         write_duration_field(
@@ -307,7 +307,7 @@ impl Display for AggregatedMetrics {
     }
 }
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 #[derive(Debug, Default, Copy, Clone)]
 pub(super) struct AggregatedMetric {
     n: f64,
@@ -318,7 +318,7 @@ pub(super) struct AggregatedMetric {
     min: f64,
 }
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "debug"))]
 impl AggregatedMetric {
     fn apply(&mut self, metric: f64) {
         // Welford’s Algorithm
@@ -360,11 +360,11 @@ impl AggregatedMetric {
     }
 }
 
-#[cfg(not(any(debug_assertions, test)))]
+#[cfg(not(any(debug_assertions, test, feature = "debug")))]
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct Metrics;
 
-#[cfg(not(any(debug_assertions, test)))]
+#[cfg(not(any(debug_assertions, test, feature = "debug")))]
 impl Metrics {
     #[inline(always)]
     pub(super) fn inc_solve_passes(&mut self) {}
@@ -397,7 +397,7 @@ impl Metrics {
     pub(super) fn mark_now(&mut self) {}
 }
 
-#[cfg(not(any(debug_assertions, test)))]
+#[cfg(not(any(debug_assertions, test, feature = "debug")))]
 impl Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Metrics not available in release mode")
@@ -436,26 +436,32 @@ mod tests {
         assert_eq!(m.neighbor_visits(), 3);
     }
 
-    // #[test]
-    // fn test_metrics_durations_and_display() {
-    //     let mut m = Metrics::default();
-    //     m.mark_now();
-    //     m.inc_indexing_duration();
-    //     m.inc_desolved_duration();
-    //     m.inc_basic_solve_duration();
-    //     m.inc_partition_duration();
+    #[test]
+    fn test_metrics_durations_and_display() {
+        let mut m = Metrics::default();
+        // Zero solve passes should not panic when displayed
+        let zero_disp = format!("{}", m);
+        assert!(zero_disp.contains("Metrics {"));
+        assert!(zero_disp.contains("solves: 0"));
 
-    //     let total = m.total_duration();
-    //     assert_eq!(
-    //         total,
-    //         m.indexing_duration()
-    //             + m.desolved_duration()
-    //             + m.basic_solve_duration()
-    //             + m.partition_duration()
-    //     );
+        m.inc_solve_passes();
+        m.inc_partitions_created();
+        m.mark_now();
+        m.inc_indexing_duration();
+        m.inc_desolved_duration();
+        m.inc_basic_solve_duration();
+        m.inc_partition_duration();
 
-    //     let disp = format!("{}", m);
-    //     assert!(disp.contains("Metrics {"));
-    //     assert!(disp.contains("games: 0"));
-    // }
+        let total = m.total_duration().total();
+        let sum = m.indexing_duration().total()
+            + m.desolved_duration().total()
+            + m.basic_solve_duration().total()
+            + m.partition_duration().total();
+        assert!((total - sum).abs() < 1e-6);
+
+        let disp = format!("{}", m);
+        assert!(disp.contains("Metrics {"));
+        assert!(disp.contains("solves: 1"));
+        assert!(disp.contains("Total time:"));
+    }
 }

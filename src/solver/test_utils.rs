@@ -9,7 +9,7 @@
 //! separate rows.
 //!
 //! Each character in a row maps to a coordinate `(x, y)` as follows:
-//! - `'0'..='8'`: Sets the cell to [`crate::CellValue::Safe(n)`](crate::CellValue::Safe) (or, in
+//! - `'0'..='8'`: Sets the cell to [`crate::CellValue::Opened(n)`](crate::CellValue::Opened) (or, in
 //!   [`FieldBuilder::from_spec`], asserts that the computed adjacent mine count equals `n`).
 //! - `'*'`: Sets the cell to [`crate::CellValue::Mine`].
 //! - `'_'`, `'x'`, or `'#'`: Explicitly sets the cell to [`crate::CellValue::Unknown`] (useful with [`MineField::update`]
@@ -63,9 +63,9 @@ use std::{
 /// ```
 #[derive(Debug)]
 pub struct FieldBuilder {
-    /// Ground-truth board values in row-major order: `0..=8` for clue counts, or [`Self::MINE`] for mines.
+    /// Ground-truth board values in row-major order: `0..=8` for clue counts, or `MineOrCount::MINE` for mines.
     mines: Box<[MineOrCount]>,
-    /// The solver's [`MineField`] instance whose cells are progressively revealed via [`Self::expose_cells`] or [`Self::expand_cells`].
+    /// The solver's [`MineField`] instance whose cells are progressively revealed via [`Self::expose_points`] or [`Self::expand_points`].
     field: MineField,
 }
 
@@ -171,7 +171,7 @@ impl FieldBuilder {
     ///    Contains only the mine layout (`'*'` for mines, `'.'` for safe cells, or optional verified
     ///    clue digits `'0'..='8'`). True neighbor mine counts are computed for all non-mine cells,
     ///    and all cells in the underlying [`MineField`] start as [`CellValue::Unknown`](crate::CellValue::Unknown)
-    ///    until revealed with `expose_cells` or `expand_cells`.
+    ///    until revealed with `expose_points` or `expand_points`.
     ///
     /// 2. **Two-part field spec (ground truth and field state)**:
     ///    Consists of two field specs separated by a single line containing one contiguous set of
@@ -413,6 +413,7 @@ impl FieldBuilder {
         self.field
     }
 
+    /// Reveals the ground-truth values at `points` on the underlying [`MineField`] and runs a solver pass.
     pub fn expose_points(&mut self, points: impl IntoIterator<Item = Point>) -> &mut Self {
         let width = self.field.width();
         self.field
@@ -852,7 +853,7 @@ mod tests {
             ),
         ) in inc_field
             .cell_data_iter()
-            .zip(inc_field.cell_data_iter())
+            .zip(fresh_field.cell_data_iter())
             .enumerate()
         {
             if inc_cell != fresh_cell
@@ -948,7 +949,8 @@ mod tests {
                             ColoredMineField::eprintln(&builder.field);
                         }
                         panic!(
-                            "Partition lengths disagree. From partitions: {len}, from walking: [{member:?}]"
+                            "Partition lengths disagree. From partitions: {len}, from walking (member {member}): {}",
+                            members.len()
                         );
                     }
                     let idx = builder.hint(&members, selector(rng)).unwrap_or_else(|| {
@@ -998,5 +1000,80 @@ mod tests {
             }
         }
         metrics.apply_metrics(&builder.field.metrics);
+    }
+
+    #[test]
+    fn test_field_builder_random_zero_and_max_mines() {
+        let zero_mines = FieldBuilder::random(4, 4, 0, shuffle(&mut StdRng::seed_from_u64(1)));
+        assert_eq!(zero_mines.field.mine_count(), Some(0));
+        assert!(zero_mines.mines.iter().all(|m| !m.is_mine()));
+
+        let max_mines = FieldBuilder::random_with_zero_region(
+            4,
+            4,
+            16 - 9,
+            Point { x: 1, y: 1 },
+            shuffle(&mut StdRng::seed_from_u64(2)),
+        );
+        assert_eq!(max_mines.field.mine_count(), Some(7));
+    }
+
+    #[test]
+    fn test_deterministic_incremental_matches_fresh_rebuild() {
+        let mut validation_metrics = AggregatedMetrics::default();
+        for seed in 0..10u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let width = 12;
+            let height = 10;
+            let start_pt = Point {
+                x: rng.random_range(0..width),
+                y: rng.random_range(0..height),
+            };
+            let mut builder = FieldBuilder::random_with_zero_region(
+                width,
+                height,
+                22,
+                start_pt,
+                shuffle(&mut rng),
+            );
+            builder.expand_points([start_pt]);
+            validate_incremental_field(&builder.field, &mut validation_metrics);
+
+            // Step through incremental playthrough, validating against rebuild_from_scratch at each step
+            for _ in 0..40 {
+                let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
+                if !inferred.is_empty() {
+                    builder.expand_points(inferred);
+                } else if let Some(&Partition { member, len }) =
+                    builder.field.partitions.values().choose(&mut rng)
+                {
+                    let members = builder.field.members(member, len);
+                    if let Some(idx) = builder.hint(&members, selector(&mut rng)) {
+                        builder.expand_points([builder.field.coordinates(idx)]);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+                validate_incremental_field(&builder.field, &mut validation_metrics);
+            }
+
+            // Also test breaking reversion updates against rebuild_from_scratch
+            let revert_pts: Vec<_> = builder
+                .field
+                .cells()
+                .filter(|c| c.cell.value != UserCellValue::Unknown)
+                .take(4)
+                .map(|c| UserCell {
+                    point: c.cell.point,
+                    value: UserCellValue::Unknown,
+                })
+                .collect();
+            if !revert_pts.is_empty() {
+                builder.field.set_cells(revert_pts).unwrap();
+                validate_incremental_field(&builder.field, &mut validation_metrics);
+            }
+        }
     }
 }
