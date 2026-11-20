@@ -7,7 +7,6 @@ use std::{
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
-    simd::{Mask, Simd, u32x8, usizex8},
 };
 
 use crate::{
@@ -752,19 +751,6 @@ impl CellNeighbors {
             assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
         }
         unsafe { &mut *(self as *mut CellNeighbors as *mut u32) }
-    }
-
-    #[allow(dead_code)]
-    fn gather_neighbors_neighbors(slice: &[Self], indices: usizex8) -> u32x8 {
-        let cell_neighbors = Self::as_slice(slice);
-        unsafe {
-            u32x8::gather_select_unchecked(
-                cell_neighbors,
-                Mask::splat(true),
-                indices,
-                Simd::splat(0),
-            )
-        }
     }
 
     pub(super) fn unknown(&self) -> DirectionSet {
