@@ -283,11 +283,10 @@ impl CellValue {
         // only valid for count cells
         debug_assert!(self.is_opened());
         let mine_neighbors = neighbors.mines.len() as i8;
-        let unknown_neighbors = neighbors.unknown.len() as i8;
-        self.safe_mine_count().is_some_and(|mine_count| {
-            let mines_remaining = mine_count as i8 - mine_neighbors;
-            mines_remaining < 0 || mines_remaining > unknown_neighbors
-        })
+        let mine_count = self.mine_count();
+        let mines_remaining = mine_count as i8 - mine_neighbors;
+        mines_remaining < 0
+            || (mines_remaining > 0 && mines_remaining > neighbors.unknown.len() as i8)
     }
 
     // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
@@ -296,18 +295,24 @@ impl CellValue {
         // only valid for count cells
         debug_assert!(self.is_opened());
 
-        self.safe_mine_count().and_then(|mine_count| {
-            let unknown_count = neighbors.unknown.len() as i8;
-            let remaining = mine_count as i8 - neighbors.mines.len() as i8;
-            (remaining <= 0)
-                .then_some(CellValue::CLEARED)
-                .or((remaining >= unknown_count).then_some(CellValue::FLAGGED))
-        })
+        let remaining = self.mine_count() as i8 - neighbors.mines.len() as i8;
+        if remaining <= 0 {
+            Some(CellValue::CLEARED)
+        } else if remaining >= neighbors.unknown.len() as i8 {
+            Some(CellValue::FLAGGED)
+        } else {
+            None
+        }
     }
 
     /// Updates `field.cells[idx].value` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
     /// back-reference bitmasks, and queues affected cells onto `desolved_queue` and `solved_queue`.
-    pub(super) fn apply_change(field: &mut MineField, idx: CellIdx, new_value: CellValue) {
+    pub(super) fn apply_change(
+        field: &mut MineField,
+        offsets: &[i32; 8],
+        idx: CellIdx,
+        new_value: CellValue,
+    ) {
         #[cfg(feature = "debug")]
         let pre_change = field.clone();
 
@@ -350,8 +355,10 @@ impl CellValue {
         // opened/mine cell; whenever `desolve_neighbors` holds, `mine_changed` also requires a
         // neighbor re-solve, so both queues can share a single `neighbors.opened` pass.
         let desolve_neighbors = !prev_value.is_unknown() && mine_changed;
-        if prev_value.is_unknown() || new_value.is_unknown() || mine_changed {
-            for n_idx in field.neighbor_iter(idx, neighbors.opened) {
+        if (prev_value.is_unknown() || new_value.is_unknown() || mine_changed)
+            && !neighbors.opened.is_empty()
+        {
+            for n_idx in idx.neighbor_iter(offsets, neighbors.opened) {
                 if desolve_neighbors {
                     field.desolved_queue.push(&mut field.cells, n_idx);
                 }
@@ -841,24 +848,30 @@ impl IndexMut<CellIdx> for [CellNeighbors] {
 #[derive(Debug, Copy, Clone)]
 pub(super) struct IndexedCell {
     pub(super) idx: CellIdx,
+    pub(super) cell: Cell,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(super) struct IndexedCellValue {
+    pub(super) idx: CellIdx,
     pub(super) value: CellValue,
 }
 
-impl PartialEq for IndexedCell {
+impl PartialEq for IndexedCellValue {
     fn eq(&self, other: &Self) -> bool {
         self.idx == other.idx
     }
 }
 
-impl Eq for IndexedCell {}
+impl Eq for IndexedCellValue {}
 
-impl PartialOrd for IndexedCell {
+impl PartialOrd for IndexedCellValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for IndexedCell {
+impl Ord for IndexedCellValue {
     fn cmp(&self, other: &Self) -> Ordering {
         self.idx.cmp(&other.idx)
     }
@@ -940,12 +953,12 @@ impl FlagMask {
     }
 }
 
-/// A FIFO queue of [`CellIdx`] instances backed by a [`Vec`] + cursor and guarded by a
+/// A LIFO queue of [`CellIdx`] instances backed by a [`Vec`] and guarded by a
 /// compile-time `MASK` bit in each cell's [`CellFlags`].
 ///
 /// Ensures elements are added at most once without linear duplicate scans. When an element is pushed,
 /// its corresponding flag bit is marked; pushing an already-marked cell is a no-op. When popped, the flag
-/// bit is automatically cleared, and the backing `Vec` resets once fully drained.
+/// bit is automatically cleared.
 #[derive(Debug, Clone)]
 pub(super) struct GuardedQueue<const MASK: u8> {
     queue: Vec<CellIdx>,
@@ -967,12 +980,30 @@ impl<const MASK: u8> GuardedQueue<MASK> {
         }
     }
 
-    /// Pops the front index in FIFO order and clears `MASK` on its cell flags.
+    /// Pops the front index in LIFO order and clears `MASK` on its cell flags.
     #[inline]
-    pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
-        self.queue.pop().inspect(|&i| {
-            cells[i].flags.clear_mask(MASK);
+    pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<IndexedCell> {
+        self.queue.pop().map(|idx| {
+            let cell = &mut cells[idx];
+            // Read the 8-byte `Cell` before writing the 1-byte `flags` field (`clear_mask`) to
+            // avoid an x86-64 store-to-load forwarding stall where a wide 8-byte load overlaps a
+            // preceding narrow 1-byte store in the store buffer.
+            let mut copy = *cell;
+            cell.flags.clear_mask(MASK);
+            copy.flags.clear_mask(MASK);
+            IndexedCell { idx, cell: copy }
         })
+    }
+
+    /// Pops the front index in LIFO order, but preserves the `MASK` on its cell flags.
+    #[inline]
+    pub(super) fn pop_keep_mask(&mut self) -> Option<CellIdx> {
+        self.queue.pop()
+    }
+
+    #[inline]
+    pub(super) fn clear_mask(&self, cells: &mut [Cell], idx: CellIdx) {
+        cells[idx].flags.clear_mask(MASK);
     }
 
     #[cfg(any(test, feature = "debug"))]
@@ -1122,7 +1153,7 @@ impl Ord for CellOrdering {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{assert_matches, collections::HashMap};
 
     use super::*;
     use crate::solver::grid::{E, S, SE, SW, W};
@@ -1457,18 +1488,30 @@ mod tests {
         let items: Vec<_> = queue.iter().collect();
         assert_eq!(items, vec![CellIdx(1)]);
 
-        // Push another index and verify FIFO pop + drain reset
+        // Push another index and verify LIFO pop + drain reset
         queue.push(&mut cells, CellIdx(3));
         assert_eq!(
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
-        assert_eq!(queue.pop(&mut cells), Some(CellIdx(3)));
+        assert_matches!(
+            queue.pop(&mut cells),
+            Some(IndexedCell {
+                idx: CellIdx(3),
+                cell: Cell::UNKNOWN,
+            })
+        );
         assert!(!cells[3].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(1)]);
-        assert_eq!(queue.pop(&mut cells), Some(CellIdx(1)));
+        assert_matches!(
+            queue.pop(&mut cells),
+            Some(IndexedCell {
+                idx: CellIdx(1),
+                cell: Cell::UNKNOWN,
+            })
+        );
         assert!(!cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
-        assert_eq!(queue.pop(&mut cells), None);
+        assert_matches!(queue.pop(&mut cells), None);
     }
 }

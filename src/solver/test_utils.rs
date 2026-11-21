@@ -480,8 +480,10 @@ impl FieldBuilder {
             len as usize,
             crate::solver::cell::FastNumberHasherBuilder,
         )));
+        let offsets = self.field.neighbor_offsets;
         self.field.visit_partition(
             member,
+            &offsets,
             &mut |_, idx| visited.borrow_mut().insert(idx),
             &mut |_, idx| visited.borrow_mut().insert(idx),
         );

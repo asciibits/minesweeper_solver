@@ -297,7 +297,6 @@ where
 impl<'a> Display for DetailMineField<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let spacer = if f.alternate() { "\n  " } else { " " };
-        let cell_spacer = if f.alternate() { "\n    " } else { " " };
         write!(f, "MineField ({}x{}", self.0.width(), self.0.height())?;
         if let Some(mine_count) = self.0.mine_count {
             write!(f, ", {mine_count}*")?;
@@ -310,14 +309,7 @@ impl<'a> Display for DetailMineField<'a> {
             }
             let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(
-                f,
-                "{spacer}{idx}: Cell {{{cell_spacer}value: {},",
-                cell.value
-            )?;
-            write!(f, "{cell_spacer}neighbors: {},", cell.neighbors)?;
-            write!(f, "{cell_spacer}flags: {},", cell.flags)?;
-            write!(f, "{cell_spacer}pid: {} }}", cell.partition_id)?;
+            write!(f, "{spacer}{idx}: {cell}")?;
         }
         write!(f, "{spacer}}},")?;
         write!(
@@ -330,7 +322,7 @@ impl<'a> Display for DetailMineField<'a> {
             write!(f, "({}: {})", c.idx, c.value)
         })?;
         write!(f, "],")?;
-        write!(f, "{spacer}unsolved: [")?;
+        write!(f, "{spacer}desolved: [")?;
         write_comma_separated(f, self.0.desolved_queue.iter(), |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
         write!(f, "{spacer}solved: [")?;
