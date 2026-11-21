@@ -413,25 +413,23 @@ impl CellValue {
 
         let i = idx.0 as usize;
         let width = width as usize;
-        let idx_up = i - width;
-        let idx_down = i + width;
-        debug_assert!(idx_up >= 1 && idx_down + 1 < cells.len());
-
         let toggle_bits = (prev_value.cell_type().mask() ^ new_value.cell_type().mask()) as usize;
         let masks = TOGGLE_MASKS[toggle_bits];
 
-        // SAFETY: Playable cells are padded by a border of WALL cells, guaranteeing
-        // `idx_up - 1 >= 0` and `idx_down + 1 < cells.len()`.
-        unsafe {
-            *cells.get_unchecked_mut(idx_up - 1).neighbors.as_u32_mut() ^= masks[0];
-            *cells.get_unchecked_mut(idx_up).neighbors.as_u32_mut() ^= masks[1];
-            *cells.get_unchecked_mut(idx_up + 1).neighbors.as_u32_mut() ^= masks[2];
-            *cells.get_unchecked_mut(i - 1).neighbors.as_u32_mut() ^= masks[3];
-            *cells.get_unchecked_mut(i + 1).neighbors.as_u32_mut() ^= masks[4];
-            *cells.get_unchecked_mut(idx_down - 1).neighbors.as_u32_mut() ^= masks[5];
-            *cells.get_unchecked_mut(idx_down).neighbors.as_u32_mut() ^= masks[6];
-            *cells.get_unchecked_mut(idx_down + 1).neighbors.as_u32_mut() ^= masks[7];
-        }
+        // Single contiguous window covering all 8 neighbors around `i` so LLVM proves every
+        // neighbor offset is in bounds from a single slice check.
+        let start = i
+            .checked_sub(width + 1)
+            .expect("cell index must not lie in top/left border");
+        let window = &mut cells[start..][..2 * width + 3];
+        *window[0].neighbors.as_u32_mut() ^= masks[0];
+        *window[1].neighbors.as_u32_mut() ^= masks[1];
+        *window[2].neighbors.as_u32_mut() ^= masks[2];
+        *window[width].neighbors.as_u32_mut() ^= masks[3];
+        *window[width + 2].neighbors.as_u32_mut() ^= masks[4];
+        *window[2 * width].neighbors.as_u32_mut() ^= masks[5];
+        *window[2 * width + 1].neighbors.as_u32_mut() ^= masks[6];
+        *window[2 * width + 2].neighbors.as_u32_mut() ^= masks[7];
     }
 
     #[cfg(feature = "debug")]
@@ -784,30 +782,6 @@ impl CellNeighbors {
             mines: DirectionSet::EMPTY,
             inferred: DirectionSet::EMPTY,
         }
-    }
-
-    #[allow(dead_code)]
-    fn as_slice(slice: &[Self]) -> &[u32] {
-        const {
-            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
-        }
-        unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
-    }
-
-    #[allow(dead_code)]
-    fn as_mut_slice(slice: &mut [Self]) -> &mut [u32] {
-        const {
-            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
-        }
-        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
-    }
-
-    #[allow(dead_code)]
-    fn as_u32(&self) -> u32 {
-        const {
-            assert!(size_of::<Self>() == 4 && align_of::<Self>() == 4);
-        }
-        unsafe { *(self as *const CellNeighbors as *const u32) }
     }
 
     fn as_u32_mut(&mut self) -> &mut u32 {

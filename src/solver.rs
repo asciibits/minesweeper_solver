@@ -261,6 +261,14 @@ impl MineField {
     #[track_caller]
     pub fn update(&mut self, field_spec: &str) {
         for cell in Self::cells_from_spec(field_spec) {
+            assert!(
+                cell.point.x < self.width() && cell.point.y < self.height(),
+                "Coordinates ({}, {}) out of bounds for {}x{} field",
+                cell.point.x,
+                cell.point.y,
+                self.width(),
+                self.height()
+            );
             self.pending.push(IndexedCell {
                 idx: self.cell_idx(cell.point),
                 value: cell.value.into(),
@@ -1481,6 +1489,20 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err_y, SolverError::CoordinatesOutOfBounds { .. }));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_update_x_out_of_bounds_panics() {
+        let mut field = MineField::new(2, 2).unwrap();
+        field.update("..1");
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_update_y_out_of_bounds_panics() {
+        let mut field = MineField::new(2, 2).unwrap();
+        field.update("..\n..\n1");
     }
 
     fn cell(field: &MineField, x: u32, y: u32) -> (CellValue, CellNeighbors) {
