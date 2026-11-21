@@ -2,6 +2,7 @@
 //! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and internal cell representations.
 
 use std::{
+    borrow::Borrow,
     cmp::Ordering,
     collections::VecDeque,
     fmt::{self, Display, Formatter},
@@ -117,27 +118,26 @@ pub struct UserCellWithInference {
 pub(super) struct CellIdx(pub(super) u32);
 
 impl CellIdx {
-    pub(super) fn neighbor_iter(
+    /// Sentinel value representing no cell (used to avoid `Option<CellIdx>` discriminant overhead
+    /// in recursive partition traversals; valid cell indices are bounded well below `u32::MAX`).
+    pub(super) const NONE: Self = Self(u32::MAX);
+
+    pub(super) fn neighbor_offsets(width: u32) -> [i32; 8] {
+        let w = width as i32;
+        [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1]
+    }
+
+    pub(super) fn neighbor_iter<O: Borrow<[i32; 8]>>(
         &self,
-        width: u32,
+        offsets: O,
         directions: DirectionSet,
-    ) -> impl Iterator<Item = CellIdx> + use<> {
-        let idx = self.0;
-        let idx_u = idx - width;
-        let idx_d = idx + width;
-
-        let indices = [
-            CellIdx(idx_u - 1),
-            CellIdx(idx_u),
-            CellIdx(idx_u + 1),
-            CellIdx(idx - 1),
-            CellIdx(idx + 1),
-            CellIdx(idx_d - 1),
-            CellIdx(idx_d),
-            CellIdx(idx_d + 1),
-        ];
-
-        BinaryIterator(directions.mask()).map(move |i| indices[i as usize])
+    ) -> impl Iterator<Item = CellIdx> + use<O> {
+        let idx = self.0 as i32;
+        BinaryIterator(directions.mask()).map(move |i| {
+            let index = idx + offsets.borrow()[i as usize];
+            debug_assert!(index >= 0);
+            CellIdx(index as u32)
+        })
     }
 }
 
@@ -474,28 +474,28 @@ impl CellValue {
             }
             let n_idx = CellIdx(idx as u32);
             let neighbors = field.cell_neighbors[n_idx];
-            for infer_idx in n_idx.neighbor_iter(field.width_with_border, neighbors.opened()) {
+            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.opened()) {
                 if !field.cells[infer_idx].is_opened() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
-            for infer_idx in n_idx.neighbor_iter(field.width_with_border, neighbors.unknown()) {
+            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.unknown()) {
                 if !field.cells[infer_idx].is_unknown() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
-            for infer_idx in n_idx.neighbor_iter(field.width_with_border, neighbors.mines()) {
+            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.mines()) {
                 if !field.cells[infer_idx].is_mine() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
-            for infer_idx in n_idx.neighbor_iter(field.width_with_border, neighbors.inferred()) {
+            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.inferred()) {
                 if !field.cells[infer_idx].is_inferred() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
             for infer_idx in
-                n_idx.neighbor_iter(field.width_with_border, DirectionSet::ALL - neighbors.all())
+                n_idx.neighbor_iter(&field.neighbor_offsets, DirectionSet::ALL - neighbors.all())
             {
                 if !field.cells[infer_idx].is_wall() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
@@ -1282,7 +1282,8 @@ mod tests {
     #[test]
     fn test_neighbor_iter() {
         // use a 3x3 grid, indices going from 0..=8, center 4
-        let neighbors: Vec<_> = CellIdx(4).neighbor_iter(3, E | S | SE).collect();
+        let offsets = CellIdx::neighbor_offsets(3);
+        let neighbors: Vec<_> = CellIdx(4).neighbor_iter(&offsets, E | S | SE).collect();
         assert_eq!(
             neighbors.iter().map(|idx| idx.0).collect::<Vec<_>>(),
             vec![5, 7, 8]
