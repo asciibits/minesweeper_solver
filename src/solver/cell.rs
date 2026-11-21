@@ -197,9 +197,9 @@ impl CellValue {
     /// The solver deduced the cell is safe.
     pub(super) const CLEARED: Self = Self(0b1001);
     /// Nothing is known about the cell.
-    pub(super) const UNKNOWN: Self = Self(0b1010);
+    pub(super) const UNKNOWN: Self = Self(0b1100);
     /// Cell is an interior wall.
-    pub(super) const WALL: Self = Self(0b1100);
+    pub(super) const WALL: Self = Self(0b1010);
     /// The cell is provided as a mine.
     pub(super) const MINE: Self = Self(0b1110);
     /// The solver deduced the cell is a mine.
@@ -262,8 +262,8 @@ impl CellValue {
         match self.0.saturating_sub(8) {
             0b000 => CellType::Opened,
             0b001 => CellType::Cleared,
-            0b010 => CellType::Unknown,
-            0b100 => CellType::Wall,
+            0b010 => CellType::Wall,
+            0b100 => CellType::Unknown,
             0b110 => CellType::Mine,
             0b111 => CellType::Flag,
             _ => unreachable!(),
