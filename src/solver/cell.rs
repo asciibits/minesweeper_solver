@@ -949,7 +949,6 @@ impl FlagMask {
 #[derive(Debug, Clone)]
 pub(super) struct GuardedQueue<const MASK: u8> {
     queue: Vec<CellIdx>,
-    head: usize,
 }
 
 impl<const MASK: u8> GuardedQueue<MASK> {
@@ -957,7 +956,6 @@ impl<const MASK: u8> GuardedQueue<MASK> {
     pub(super) fn with_capacity(capacity: usize) -> GuardedQueue<MASK> {
         GuardedQueue {
             queue: Vec::with_capacity(capacity),
-            head: 0,
         }
     }
 
@@ -972,34 +970,24 @@ impl<const MASK: u8> GuardedQueue<MASK> {
     /// Pops the front index in FIFO order and clears `MASK` on its cell flags.
     #[inline]
     pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
-        if self.head < self.queue.len() {
-            let i = self.queue[self.head];
-            self.head += 1;
+        self.queue.pop().inspect(|&i| {
             cells[i].flags.clear_mask(MASK);
-            if self.head == self.queue.len() {
-                self.queue.clear();
-                self.head = 0;
-            }
-            Some(i)
-        } else {
-            None
-        }
+        })
     }
 
     #[cfg(any(test, feature = "debug"))]
     pub(super) fn iter(&self) -> impl Iterator<Item = CellIdx> {
-        self.queue[self.head..].iter().copied()
+        self.queue.iter().copied()
     }
 
     #[inline]
     pub(super) fn is_empty(&self) -> bool {
-        self.head >= self.queue.len()
+        self.queue.is_empty()
     }
 
     #[cfg(test)]
     pub(super) fn clear(&mut self) {
         self.queue.clear();
-        self.head = 0;
     }
 }
 
@@ -1475,11 +1463,11 @@ mod tests {
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
-        assert_eq!(queue.pop(&mut cells), Some(CellIdx(1)));
-        assert!(!cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
-        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
         assert_eq!(queue.pop(&mut cells), Some(CellIdx(3)));
         assert!(!cells[3].flags.is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(1)]);
+        assert_eq!(queue.pop(&mut cells), Some(CellIdx(1)));
+        assert!(!cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
         assert_eq!(queue.pop(&mut cells), None);
     }
