@@ -67,15 +67,14 @@ fn record_game_batches(seed: u64, width: u32, height: u32, mine_count: u32) -> V
     batches
 }
 
-#[bench]
-fn bench_solver_incremental_replay_1000_games(b: &mut Bencher) {
-    let games: Vec<Vec<Vec<Cell>>> = (0..1000)
-        .map(|seed| record_game_batches(seed, 30, 24, 130))
+fn bench_replay(b: &mut Bencher, game_count: u64, width: u32, height: u32, mine_count: u32) {
+    let games: Vec<Vec<Vec<Cell>>> = (0..game_count)
+        .map(|seed| record_game_batches(seed, width, height, mine_count))
         .collect();
 
     b.iter(|| {
         for game in &games {
-            let mut field = MineField::with_mine_count(30, 24, 130).unwrap();
+            let mut field = MineField::with_mine_count(width, height, mine_count).unwrap();
             for batch in game {
                 field.set_cells(batch.iter().copied()).unwrap();
             }
@@ -84,13 +83,32 @@ fn bench_solver_incremental_replay_1000_games(b: &mut Bencher) {
     });
 }
 
-#[bench]
-fn bench_end_to_end_incremental_playthrough_1000_games(b: &mut Bencher) {
+fn bench_playthrough(b: &mut Bencher, game_count: u64, width: u32, height: u32, mine_count: u32) {
     b.iter(|| {
-        for seed in 0..1000 {
-            play_single_game(seed, 30, 24, 130, |builder| {
+        for seed in 0..game_count {
+            play_single_game(seed, width, height, mine_count, |builder| {
                 black_box(&*builder);
             });
         }
     });
+}
+
+#[bench]
+fn bench_solver_incremental_replay_1000_games(b: &mut Bencher) {
+    bench_replay(b, 1000, 30, 24, 130);
+}
+
+#[bench]
+fn bench_end_to_end_incremental_playthrough_1000_games(b: &mut Bencher) {
+    bench_playthrough(b, 1000, 30, 24, 130);
+}
+
+#[bench]
+fn bench_solver_incremental_replay_100x100_100_games(b: &mut Bencher) {
+    bench_replay(b, 100, 100, 100, 1806);
+}
+
+#[bench]
+fn bench_end_to_end_incremental_playthrough_100x100_100_games(b: &mut Bencher) {
+    bench_playthrough(b, 100, 100, 100, 1806);
 }
