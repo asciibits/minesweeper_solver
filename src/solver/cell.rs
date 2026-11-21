@@ -4,7 +4,6 @@
 use std::{
     borrow::Borrow,
     cmp::Ordering,
-    collections::VecDeque,
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
@@ -350,25 +349,22 @@ impl CellValue {
         if prev_value.is_opened() {
             field.desolved_queue.push(&mut field.cell_flags, idx);
         }
-        let neighbors = field.cell_neighbors[idx];
-        // Queue neighbor desolves if we had a neighbor-desolving change (i.e. changing our
-        // neighbors' Unknown or Mine counts)
-        if !prev_value.is_unknown() && prev_value.is_mine() != new_value.is_mine() {
-            // this change affects neighbor solves
-            for n_idx in field.neighbor_iter(idx, neighbors.opened) {
-                field.desolved_queue.push(&mut field.cell_flags, n_idx);
-            }
-        }
-
         if new_value.is_opened() {
             field.solved_queue.push(&mut field.cell_flags, idx);
         }
-        if prev_value.is_unknown()
-            || new_value.is_unknown()
-            || prev_value.is_mine() != new_value.is_mine()
-        {
-            for i in field.neighbor_iter(idx, neighbors.opened) {
-                field.solved_queue.push(&mut field.cell_flags, i);
+
+        let neighbors = field.cell_neighbors[idx];
+        let mine_changed = prev_value.is_mine() != new_value.is_mine();
+        // Queue neighbor desolves if we changed our neighbors' known mine count or cleared an
+        // opened/mine cell; whenever `desolve_neighbors` holds, `mine_changed` also requires a
+        // neighbor re-solve, so both queues can share a single `neighbors.opened` pass.
+        let desolve_neighbors = !prev_value.is_unknown() && mine_changed;
+        if prev_value.is_unknown() || new_value.is_unknown() || mine_changed {
+            for n_idx in field.neighbor_iter(idx, neighbors.opened) {
+                if desolve_neighbors {
+                    field.desolved_queue.push(&mut field.cell_flags, n_idx);
+                }
+                field.solved_queue.push(&mut field.cell_flags, n_idx);
             }
         }
 
@@ -381,9 +377,7 @@ impl CellValue {
         // - (Cleared|Opened|Wall) -> (Cleared|Opened|Wall)
         //
         // The following inequality is a concise way of saying the above
-        if prev_value.is_unknown()
-            || (!new_value.is_unknown() && (prev_value.is_mine() == new_value.is_mine()))
-        {
+        if prev_value.is_unknown() || (!new_value.is_unknown() && !mine_changed) {
             ChangeStatus::NonBreaking
         } else {
             ChangeStatus::Breaking
@@ -869,15 +863,33 @@ impl CellFlags {
         CellFlags(0)
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn is_marked(&self, mask: FlagMask) -> bool {
         self.0 & mask.0 != 0
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn mark(&mut self, mask: FlagMask) -> bool {
-        if !self.is_marked(mask) {
-            self.0 |= mask.0;
+        self.mark_mask(mask.0)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn clear(&mut self, mask: FlagMask) {
+        self.clear_mask(mask.0);
+    }
+
+    #[inline]
+    fn is_marked_mask(&self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    fn mark_mask(&mut self, mask: u8) -> bool {
+        if !self.is_marked_mask(mask) {
+            self.0 |= mask;
             true
         } else {
             false
@@ -885,21 +897,21 @@ impl CellFlags {
     }
 
     #[inline]
-    pub(super) fn clear(&mut self, mask: FlagMask) {
-        self.0 &= !mask.0;
+    fn clear_mask(&mut self, mask: u8) {
+        self.0 &= !mask;
     }
 }
 
 impl Display for CellFlags {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
-        if self.is_marked(FlagMask::PENDING_PARTITION) {
+        if self.is_marked_mask(FlagMask::PENDING_PARTITION.0) {
             write!(f, "PENDING_PARTITION,")?;
         }
-        if self.is_marked(FlagMask::SOLVED_QUEUE) {
+        if self.is_marked_mask(FlagMask::SOLVED_QUEUE.0) {
             write!(f, "SOLVED,")?;
         }
-        if self.is_marked(FlagMask::DESOLVE_FLAG) {
+        if self.is_marked_mask(FlagMask::DESOLVE_FLAG.0) {
             write!(f, "DESOLVED,")?;
         }
         write!(f, "]")
@@ -929,54 +941,72 @@ impl FlagMask {
     pub(super) const PENDING_PARTITION: FlagMask = FlagMask(0b1);
     pub(super) const SOLVED_QUEUE: FlagMask = FlagMask(0b10);
     pub(super) const DESOLVE_FLAG: FlagMask = FlagMask(0b100);
+
+    pub(super) const fn mask(&self) -> u8 {
+        self.0
+    }
 }
 
-/// A queue of [`CellIdx`] instances backed by a [`VecDeque`] and guarded by a [`FlagMask`] in each cell's [`CellFlags`].
+/// A FIFO queue of [`CellIdx`] instances backed by a [`Vec`] + cursor and guarded by a
+/// compile-time `MASK` bit in each cell's [`CellFlags`].
 ///
 /// Ensures elements are added at most once without linear duplicate scans. When an element is pushed,
 /// its corresponding flag bit is marked; pushing an already-marked cell is a no-op. When popped, the flag
-/// bit is automatically cleared.
+/// bit is automatically cleared, and the backing `Vec` resets once fully drained.
 #[derive(Debug, Clone)]
-pub(super) struct GuardedQueue {
-    queue: VecDeque<CellIdx>,
-    mask: FlagMask,
+pub(super) struct GuardedQueue<const MASK: u8> {
+    queue: Vec<CellIdx>,
+    head: usize,
 }
 
-impl GuardedQueue {
-    /// Creates a new [`GuardedQueue`] with the specified initial capacity and guarding [`FlagMask`].
-    pub(super) fn with_capacity(capacity: usize, mask: FlagMask) -> GuardedQueue {
+impl<const MASK: u8> GuardedQueue<MASK> {
+    /// Creates a new [`GuardedQueue`] with the specified initial capacity.
+    pub(super) fn with_capacity(capacity: usize) -> GuardedQueue<MASK> {
         GuardedQueue {
-            queue: VecDeque::with_capacity(capacity),
-            mask,
+            queue: Vec::with_capacity(capacity),
+            head: 0,
         }
     }
 
-    /// Pushes `idx` to the back of the queue if not already marked with this queue's mask.
+    /// Pushes `idx` to the back of the queue if not already marked with `MASK`.
+    #[inline]
     pub(super) fn push(&mut self, flags: &mut [CellFlags], idx: CellIdx) {
-        flags[idx]
-            .mark(self.mask)
-            .then(|| self.queue.push_back(idx));
+        if flags[idx].mark_mask(MASK) {
+            self.queue.push(idx);
+        }
     }
 
-    /// Pops the front index from the queue and clears its corresponding flag mask.
+    /// Pops the front index in FIFO order and clears `MASK` on its cell flags.
+    #[inline]
     pub(super) fn pop(&mut self, flags: &mut [CellFlags]) -> Option<CellIdx> {
-        self.queue
-            .pop_front()
-            .inspect(|&i| flags[i].clear(self.mask))
+        if self.head < self.queue.len() {
+            let i = self.queue[self.head];
+            self.head += 1;
+            flags[i].clear_mask(MASK);
+            if self.head == self.queue.len() {
+                self.queue.clear();
+                self.head = 0;
+            }
+            Some(i)
+        } else {
+            None
+        }
     }
 
     #[cfg(any(test, feature = "debug"))]
     pub(super) fn iter(&self) -> impl Iterator<Item = CellIdx> {
-        self.queue.iter().copied()
+        self.queue[self.head..].iter().copied()
     }
 
+    #[inline]
     pub(super) fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+        self.head >= self.queue.len()
     }
 
     #[cfg(test)]
     pub(super) fn clear(&mut self) {
         self.queue.clear();
+        self.head = 0;
     }
 }
 
@@ -1433,7 +1463,7 @@ mod tests {
     #[test]
     fn test_guarded_queue_push_pop_remove_dedup() {
         let mut flags = vec![CellFlags::new(); 4].into_boxed_slice();
-        let mut queue = GuardedQueue::with_capacity(4, FlagMask::PENDING_PARTITION);
+        let mut queue = GuardedQueue::<{ FlagMask::PENDING_PARTITION.0 }>::with_capacity(4);
         assert!(queue.is_empty());
 
         // First push succeeds
@@ -1446,11 +1476,18 @@ mod tests {
         let items: Vec<_> = queue.iter().collect();
         assert_eq!(items, vec![CellIdx(1)]);
 
-        // Push another index
+        // Push another index and verify FIFO pop + drain reset
         queue.push(&mut flags, CellIdx(3));
         assert_eq!(
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
+        assert_eq!(queue.pop(&mut flags), Some(CellIdx(1)));
+        assert!(!flags[1].is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
+        assert_eq!(queue.pop(&mut flags), Some(CellIdx(3)));
+        assert!(!flags[3].is_marked(FlagMask::PENDING_PARTITION));
+        assert!(queue.is_empty());
+        assert_eq!(queue.pop(&mut flags), None);
     }
 }

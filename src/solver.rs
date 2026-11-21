@@ -10,12 +10,15 @@ use std::{
 };
 
 use crate::{
-    InferredValue, solver::{
+    InferredValue,
+    solver::{
         cell::{
             CellFlags, CellIdx, CellNeighbors, CellValue, ChangeStatus, FastNumberHasherBuilder,
             FlagMask, GuardedQueue, IndexedCell, UserCellWithInference, UserValueWithInference,
             cell_idx, coordinates, create_grid_with_border,
-        }, grid::DirectionSet, metrics::Metrics,
+        },
+        grid::DirectionSet,
+        metrics::Metrics,
     },
 };
 
@@ -54,12 +57,12 @@ pub struct MineField {
     /// User-supplied cell updates waiting to be applied by [`MineField::index_pending`].
     pending: Vec<IndexedCell>,
     /// Queue of opened (or formerly opened) cells whose breaking changes require inferences in their connected components to be reset.
-    desolved_queue: GuardedQueue,
+    desolved_queue: GuardedQueue<{ FlagMask::DESOLVE_FLAG.mask() }>,
     /// Queue of cells (typically satisfying [`CellValue::is_opened`]) whose neighbors may have become trivially solvable;
     /// non-open cells forwarded from `desolved_queue` are skipped for solving and forwarded to `pending_partition_queue`.
-    solved_queue: GuardedQueue,
+    solved_queue: GuardedQueue<{ FlagMask::SOLVED_QUEUE.mask() }>,
     /// Queue of opened or unknown cells whose connected frontier needs to be partitioned, repartitioned, or reset to unpartitioned.
-    pending_partition_queue: GuardedQueue,
+    pending_partition_queue: GuardedQueue<{ FlagMask::PENDING_PARTITION.mask() }>,
     /// Performance and step counters recorded during solving.
     metrics: Metrics,
     /// Cell indices whose inference changed during the most recent solve cycle.
@@ -143,12 +146,9 @@ impl MineField {
             cell_neighbors,
             next_partition_id: PartitionId(1),
             pending: Vec::with_capacity(area / 4),
-            desolved_queue: GuardedQueue::with_capacity(0, FlagMask::DESOLVE_FLAG),
-            solved_queue: GuardedQueue::with_capacity(perimeter, FlagMask::SOLVED_QUEUE),
-            pending_partition_queue: GuardedQueue::with_capacity(
-                area / 4,
-                FlagMask::PENDING_PARTITION,
-            ),
+            desolved_queue: GuardedQueue::with_capacity(0),
+            solved_queue: GuardedQueue::with_capacity(perimeter),
+            pending_partition_queue: GuardedQueue::with_capacity(area / 4),
             metrics: Metrics::default(),
             recent_inferred: Vec::with_capacity(perimeter / 2),
             recent_invalid: Vec::new(),

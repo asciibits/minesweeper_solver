@@ -500,8 +500,10 @@ impl FieldBuilder {
             })
             .collect();
         candidates.sort_unstable();
-        (!candidates.is_empty())
-            .then(|| self.field.coordinates(candidates[idx_selector(candidates.len())]))
+        (!candidates.is_empty()).then(|| {
+            self.field
+                .coordinates(candidates[idx_selector(candidates.len())])
+        })
     }
 
     // Selects a random member of a live partition to expose.
