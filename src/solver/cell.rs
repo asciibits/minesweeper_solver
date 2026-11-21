@@ -305,7 +305,7 @@ impl CellValue {
         })
     }
 
-    /// Updates `field.cells[idx]` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
+    /// Updates `field.cells[idx].value` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
     /// back-reference bitmasks in parallel via SIMD, and queues affected cells onto
     /// `desolved_queue` and `solved_queue`.
     ///
@@ -320,7 +320,7 @@ impl CellValue {
         #[cfg(feature = "debug")]
         let pre_change = field.clone();
 
-        let prev_value = field.cells[idx];
+        let prev_value = field.cells[idx].value;
         if prev_value == new_value {
             return ChangeStatus::NoChange;
         }
@@ -330,9 +330,9 @@ impl CellValue {
         }
 
         // Update the new value and all neighbor back references
-        field.cells[idx] = new_value;
+        field.cells[idx].value = new_value;
         Self::update_neighbors(
-            &mut field.cell_neighbors,
+            &mut field.cells,
             field.width_with_border,
             idx,
             prev_value,
@@ -347,13 +347,13 @@ impl CellValue {
 
         // We were previously solved iff we were opened with no unknown neighbors
         if prev_value.is_opened() {
-            field.desolved_queue.push(&mut field.cell_flags, idx);
+            field.desolved_queue.push(&mut field.cells, idx);
         }
         if new_value.is_opened() {
-            field.solved_queue.push(&mut field.cell_flags, idx);
+            field.solved_queue.push(&mut field.cells, idx);
         }
 
-        let neighbors = field.cell_neighbors[idx];
+        let neighbors = field.cells[idx].neighbors;
         let mine_changed = prev_value.is_mine() != new_value.is_mine();
         // Queue neighbor desolves if we changed our neighbors' known mine count or cleared an
         // opened/mine cell; whenever `desolve_neighbors` holds, `mine_changed` also requires a
@@ -362,9 +362,9 @@ impl CellValue {
         if prev_value.is_unknown() || new_value.is_unknown() || mine_changed {
             for n_idx in field.neighbor_iter(idx, neighbors.opened) {
                 if desolve_neighbors {
-                    field.desolved_queue.push(&mut field.cell_flags, n_idx);
+                    field.desolved_queue.push(&mut field.cells, n_idx);
                 }
-                field.solved_queue.push(&mut field.cell_flags, n_idx);
+                field.solved_queue.push(&mut field.cells, n_idx);
             }
         }
 
@@ -390,7 +390,7 @@ impl CellValue {
     /// Lane `k` (`0..=7`, corresponding to NW..SE) toggles bit `7 - k` in the neighbor because
     /// from that neighbor's point of view, `idx` lies in the opposite compass direction.
     fn update_neighbors(
-        cell_neighbors: &mut [CellNeighbors],
+        cells: &mut [Cell],
         width: u32,
         idx: CellIdx,
         prev_value: CellValue,
@@ -415,22 +415,22 @@ impl CellValue {
         let width = width as usize;
         let idx_up = i - width;
         let idx_down = i + width;
-        debug_assert!(idx_up >= 1 && idx_down + 1 < cell_neighbors.len());
+        debug_assert!(idx_up >= 1 && idx_down + 1 < cells.len());
 
         let toggle_bits = (prev_value.cell_type().mask() ^ new_value.cell_type().mask()) as usize;
         let masks = TOGGLE_MASKS[toggle_bits];
 
         // SAFETY: Playable cells are padded by a border of WALL cells, guaranteeing
-        // `idx_up - 1 >= 0` and `idx_down + 1 < cell_neighbors.len()`.
+        // `idx_up - 1 >= 0` and `idx_down + 1 < cells.len()`.
         unsafe {
-            *cell_neighbors.get_unchecked_mut(idx_up - 1).as_u32_mut() ^= masks[0];
-            *cell_neighbors.get_unchecked_mut(idx_up).as_u32_mut() ^= masks[1];
-            *cell_neighbors.get_unchecked_mut(idx_up + 1).as_u32_mut() ^= masks[2];
-            *cell_neighbors.get_unchecked_mut(i - 1).as_u32_mut() ^= masks[3];
-            *cell_neighbors.get_unchecked_mut(i + 1).as_u32_mut() ^= masks[4];
-            *cell_neighbors.get_unchecked_mut(idx_down - 1).as_u32_mut() ^= masks[5];
-            *cell_neighbors.get_unchecked_mut(idx_down).as_u32_mut() ^= masks[6];
-            *cell_neighbors.get_unchecked_mut(idx_down + 1).as_u32_mut() ^= masks[7];
+            *cells.get_unchecked_mut(idx_up - 1).neighbors.as_u32_mut() ^= masks[0];
+            *cells.get_unchecked_mut(idx_up).neighbors.as_u32_mut() ^= masks[1];
+            *cells.get_unchecked_mut(idx_up + 1).neighbors.as_u32_mut() ^= masks[2];
+            *cells.get_unchecked_mut(i - 1).neighbors.as_u32_mut() ^= masks[3];
+            *cells.get_unchecked_mut(i + 1).neighbors.as_u32_mut() ^= masks[4];
+            *cells.get_unchecked_mut(idx_down - 1).neighbors.as_u32_mut() ^= masks[5];
+            *cells.get_unchecked_mut(idx_down).neighbors.as_u32_mut() ^= masks[6];
+            *cells.get_unchecked_mut(idx_down + 1).neighbors.as_u32_mut() ^= masks[7];
         }
     }
 
@@ -463,35 +463,35 @@ impl CellValue {
         }
         use crate::solver::display::DetailMineField;
         for (idx, cell) in field.cells.iter().copied().enumerate() {
-            if cell.is_wall() {
+            if cell.value.is_wall() {
                 continue;
             }
             let n_idx = CellIdx(idx as u32);
-            let neighbors = field.cell_neighbors[n_idx];
+            let neighbors = field.cells[n_idx].neighbors;
             for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.opened()) {
-                if !field.cells[infer_idx].is_opened() {
+                if !field.cells[infer_idx].value.is_opened() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
             for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.unknown()) {
-                if !field.cells[infer_idx].is_unknown() {
+                if !field.cells[infer_idx].value.is_unknown() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
             for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.mines()) {
-                if !field.cells[infer_idx].is_mine() {
+                if !field.cells[infer_idx].value.is_mine() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
             for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.inferred()) {
-                if !field.cells[infer_idx].is_inferred() {
+                if !field.cells[infer_idx].value.is_inferred() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
             for infer_idx in
                 n_idx.neighbor_iter(&field.neighbor_offsets, DirectionSet::ALL - neighbors.all())
             {
-                if !field.cells[infer_idx].is_wall() {
+                if !field.cells[infer_idx].value.is_wall() {
                     failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
                 }
             }
@@ -573,22 +573,6 @@ impl From<CellValue> for UserValueWithInference {
     }
 }
 
-impl Index<CellIdx> for [CellValue] {
-    type Output = CellValue;
-
-    #[inline]
-    fn index(&self, index: CellIdx) -> &Self::Output {
-        &self[index.0 as usize]
-    }
-}
-
-impl IndexMut<CellIdx> for [CellValue] {
-    #[inline]
-    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
-        &mut self[index.0 as usize]
-    }
-}
-
 impl Display for CellValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
@@ -602,52 +586,138 @@ impl Display for CellValue {
     }
 }
 
-pub(super) fn create_grid_with_border(
-    width: u32,
-    height: u32,
-) -> (Box<[CellValue]>, Box<[CellNeighbors]>) {
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct PartitionId(pub(super) u16);
+
+impl PartitionId {
+    pub(super) const ZERO: PartitionId = PartitionId(0);
+    #[cfg(test)]
+    pub(super) const MAX: PartitionId = PartitionId(u16::MAX);
+    pub(super) const COMPACT_THRESHOLD: PartitionId = PartitionId(u16::MAX >> 1);
+
+    #[inline]
+    pub(super) fn inc(&mut self) {
+        self.0 = self
+            .0
+            .checked_add(1)
+            .expect("PartitionId overflow: too many partitions");
+    }
+
+    #[inline]
+    pub(super) fn set(&mut self, id: u16) {
+        self.0 = id;
+    }
+}
+
+impl Display for PartitionId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Packed 8-byte AoS per-cell state combining neighbor masks, partition ID, value, and queue flags.
+///
+/// Packs all per-cell solver state into a single `#[repr(C, align(8))]` allocation with zero
+/// padding so `MineField` only pays one bounds check and one base-pointer load per cell access.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(C, align(8))]
+pub(super) struct Cell {
+    pub(super) value: CellValue,
+    pub(super) flags: CellFlags,
+    pub(super) partition_id: PartitionId,
+    pub(super) neighbors: CellNeighbors,
+}
+
+impl Cell {
+    pub(super) const UNKNOWN: Self = Self {
+        neighbors: CellNeighbors::all_unknown(),
+        partition_id: PartitionId::ZERO,
+        value: CellValue::UNKNOWN,
+        flags: CellFlags::new(),
+    };
+    pub(super) const WALL: Self = Self {
+        neighbors: CellNeighbors::all_unknown(),
+        partition_id: PartitionId::ZERO,
+        value: CellValue::WALL,
+        flags: CellFlags::new(),
+    };
+}
+
+impl Display for Cell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let spacer = if f.alternate() { "\n    " } else { " " };
+        write!(f, "Cell[{}] {{ ", self.value)?;
+        write!(f, "{spacer}neighbors: {}", self.neighbors)?;
+        write!(f, "{spacer}partition_id: {}", self.partition_id)?;
+        write!(f, "{spacer}flags: {}", self.flags)?;
+        if f.alternate() {
+            write!(f, "\n")?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl Index<CellIdx> for [Cell] {
+    type Output = Cell;
+
+    #[inline]
+    fn index(&self, index: CellIdx) -> &Self::Output {
+        &self[index.0 as usize]
+    }
+}
+
+impl IndexMut<CellIdx> for [Cell] {
+    #[inline]
+    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
+        &mut self[index.0 as usize]
+    }
+}
+
+pub(super) fn create_grid_with_border(width: u32, height: u32) -> Box<[Cell]> {
+    const {
+        assert!(size_of::<Cell>() == 8 && align_of::<Cell>() == 8);
+    }
     let width = width as usize;
     let height = height as usize;
     let len = (width + 1) * (height + 2) + 1;
-    let mut values = vec![CellValue::UNKNOWN; len];
-    let mut neighbors = vec![CellNeighbors::all_unknown(); len];
+    let mut cells = vec![Cell::UNKNOWN; len];
 
     // Set the border
-    values[0..width + 2].fill(CellValue::WALL);
-    values[len - width - 2..len].fill(CellValue::WALL);
-    for value in values.iter_mut().skip(width + 1).step_by(width + 1) {
-        *value = CellValue::WALL;
+    cells[0..width + 2].fill(Cell::WALL);
+    cells[len - width - 2..len].fill(Cell::WALL);
+    for cell in cells.iter_mut().skip(width + 1).step_by(width + 1) {
+        *cell = Cell::WALL;
     }
 
     // Set the edge neighbors
-    for neighbors in neighbors.iter_mut().skip(width + 2).take(width) {
+    for cell in cells.iter_mut().skip(width + 2).take(width) {
         // top border row
-        neighbors.unknown -= DirectionSet::N_DIRECTIONS;
+        cell.neighbors.unknown -= DirectionSet::N_DIRECTIONS;
     }
-    for neighbors in neighbors.iter_mut().skip(len - 2 * width - 2).take(width) {
+    for cell in cells.iter_mut().skip(len - 2 * width - 2).take(width) {
         // bottom row
-        neighbors.unknown -= DirectionSet::S_DIRECTIONS;
+        cell.neighbors.unknown -= DirectionSet::S_DIRECTIONS;
     }
-    for neighbors in neighbors
+    for cell in cells
         .iter_mut()
         .skip(width + 2)
         .step_by(width + 1)
         .take(height)
     {
         // left col
-        neighbors.unknown -= DirectionSet::W_DIRECTIONS;
+        cell.neighbors.unknown -= DirectionSet::W_DIRECTIONS;
     }
-    for neighbors in neighbors
+    for cell in cells
         .iter_mut()
         .skip(2 * width + 1)
         .step_by(width + 1)
         .take(height)
     {
         // right col
-        neighbors.unknown -= DirectionSet::E_DIRECTIONS;
+        cell.neighbors.unknown -= DirectionSet::E_DIRECTIONS;
     }
 
-    (values.into_boxed_slice(), neighbors.into_boxed_slice())
+    cells.into_boxed_slice()
 }
 
 /// High-level classification of a cell's value used to simplify traversal and neighbor updates.
@@ -707,7 +777,7 @@ pub(super) struct CellNeighbors {
 }
 
 impl CellNeighbors {
-    pub(super) fn all_unknown() -> Self {
+    pub(super) const fn all_unknown() -> Self {
         Self {
             unknown: DirectionSet::ALL,
             opened: DirectionSet::EMPTY,
@@ -859,7 +929,7 @@ pub(super) enum ChangeStatus {
 pub(super) struct CellFlags(u8);
 
 impl CellFlags {
-    pub(super) fn new() -> CellFlags {
+    pub(super) const fn new() -> CellFlags {
         CellFlags(0)
     }
 
@@ -918,22 +988,6 @@ impl Display for CellFlags {
     }
 }
 
-impl Index<CellIdx> for [CellFlags] {
-    type Output = CellFlags;
-
-    #[inline]
-    fn index(&self, index: CellIdx) -> &Self::Output {
-        &self[index.0 as usize]
-    }
-}
-
-impl IndexMut<CellIdx> for [CellFlags] {
-    #[inline]
-    fn index_mut(&mut self, index: CellIdx) -> &mut Self::Output {
-        &mut self[index.0 as usize]
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 pub(super) struct FlagMask(u8);
 
@@ -970,19 +1024,19 @@ impl<const MASK: u8> GuardedQueue<MASK> {
 
     /// Pushes `idx` to the back of the queue if not already marked with `MASK`.
     #[inline]
-    pub(super) fn push(&mut self, flags: &mut [CellFlags], idx: CellIdx) {
-        if flags[idx].mark_mask(MASK) {
+    pub(super) fn push(&mut self, cells: &mut [Cell], idx: CellIdx) {
+        if cells[idx].flags.mark_mask(MASK) {
             self.queue.push(idx);
         }
     }
 
     /// Pops the front index in FIFO order and clears `MASK` on its cell flags.
     #[inline]
-    pub(super) fn pop(&mut self, flags: &mut [CellFlags]) -> Option<CellIdx> {
+    pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<CellIdx> {
         if self.head < self.queue.len() {
             let i = self.queue[self.head];
             self.head += 1;
-            flags[i].clear_mask(MASK);
+            cells[i].flags.clear_mask(MASK);
             if self.head == self.queue.len() {
                 self.queue.clear();
                 self.head = 0;
@@ -1165,9 +1219,9 @@ mod tests {
     #[test]
     fn test_processed_cell_initialization_and_display() {
         let width = 3;
-        let (_, grid) = create_grid_with_border(width, 3);
+        let grid = create_grid_with_border(width, 3);
         let idx = Point { x: 1, y: 1 }.to_index(width + 1) as usize;
-        let pc = grid[idx];
+        let pc = grid[idx].neighbors;
         assert_eq!(pc.unknown, E | S | SE);
         assert_eq!(pc.opened, DirectionSet::EMPTY);
         assert_eq!(pc.mines, DirectionSet::EMPTY);
@@ -1243,51 +1297,51 @@ mod tests {
     #[test]
     fn test_cell_is_invalid_detects_unsatisfiable_counts() {
         // 2x1 strip [Count(2), Unknown]: needs 2 mines but only 1 unknown neighbor -> invalid
-        let (_, neighbors) = create_grid_with_border(2, 1);
+        let cells = create_grid_with_border(2, 1);
         let idx = Point { x: 1, y: 1 }.to_index(3) as usize;
         let cell = CellValue::for_mine_count(2);
         assert!(
-            cell.is_invalid(neighbors[idx]),
+            cell.is_invalid(cells[idx].neighbors),
             "needs 2 mines but only 1 unknown neighbor"
         );
 
-        let (_, mut neighbors) = create_grid_with_border(2, 1);
-        neighbors[idx].unknown = !!E;
+        let mut cells = create_grid_with_border(2, 1);
+        cells[idx].neighbors.unknown = !!E;
         let cell = CellValue::for_mine_count(1);
-        assert!(!cell.is_invalid(neighbors[idx]));
+        assert!(!cell.is_invalid(cells[idx].neighbors));
     }
 
     #[test]
     fn test_cell_is_invalid_handles_excess_mine_neighbors() {
         // a Count(0) next to a known mine is over-satisfied
-        let (_, mut neighbors) = create_grid_with_border(2, 1);
+        let mut cells = create_grid_with_border(2, 1);
         let idx = Point { x: 1, y: 1 }.to_index(3) as usize;
-        neighbors[idx].mines |= E;
+        cells[idx].neighbors.mines |= E;
         let cell = CellValue::for_mine_count(0);
-        assert!(cell.is_invalid(neighbors[idx]));
+        assert!(cell.is_invalid(cells[idx].neighbors));
     }
 
     #[test]
     fn test_ordered_cell_from_cell_and_ordering() {
-        let (_, grid) = create_grid_with_border(3, 3);
-        let neighbors = grid[0];
+        let grid = create_grid_with_border(3, 3);
+        let neighbors = grid[0].neighbors;
         assert!(CellOrdering::from_cell(CellIdx(0), CellValue::UNKNOWN, neighbors).is_none());
 
         assert!(CellOrdering::from_cell(CellIdx(0), CellValue::MINE, neighbors).is_none());
 
         // Trivial cell A: 2 available, 2 remaining -> choose(2, 2) = 1 solution
-        let mut neighbors_a = grid[0];
+        let mut neighbors_a = grid[0].neighbors;
         let cell_a = CellValue::for_mine_count(2);
         neighbors_a.unknown = E | S;
 
         // Trivial cell B: 5 available, 0 remaining (1 mine already found) -> choose(5, 0) = 1 solution, lower mine_count
-        let mut neighbor_b = grid[1];
+        let mut neighbor_b = grid[1].neighbors;
         let cell_b = CellValue::for_mine_count(1);
         neighbor_b.unknown = neighbor_b.all() - S;
         neighbor_b.mines = !!S;
 
         // Non-trivial cell C: 3 available, 1 remaining -> choose(3, 1) = 3 solutions
-        let mut neighbors_c = grid[2];
+        let mut neighbors_c = grid[2].neighbors;
         let cell_c = CellValue::for_mine_count(1);
         neighbors_c.unknown = W | SW | S;
 
@@ -1462,32 +1516,32 @@ mod tests {
 
     #[test]
     fn test_guarded_queue_push_pop_remove_dedup() {
-        let mut flags = vec![CellFlags::new(); 4].into_boxed_slice();
+        let mut cells = vec![Cell::UNKNOWN; 4].into_boxed_slice();
         let mut queue = GuardedQueue::<{ FlagMask::PENDING_PARTITION.0 }>::with_capacity(4);
         assert!(queue.is_empty());
 
         // First push succeeds
-        queue.push(&mut flags, CellIdx(1));
+        queue.push(&mut cells, CellIdx(1));
         assert!(!queue.is_empty());
-        assert!(flags[1].is_marked(FlagMask::PENDING_PARTITION));
+        assert!(cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
 
         // Duplicate push of the same index is ignored
-        queue.push(&mut flags, CellIdx(1));
+        queue.push(&mut cells, CellIdx(1));
         let items: Vec<_> = queue.iter().collect();
         assert_eq!(items, vec![CellIdx(1)]);
 
         // Push another index and verify FIFO pop + drain reset
-        queue.push(&mut flags, CellIdx(3));
+        queue.push(&mut cells, CellIdx(3));
         assert_eq!(
             queue.iter().collect::<Vec<_>>(),
             vec![CellIdx(1), CellIdx(3)]
         );
-        assert_eq!(queue.pop(&mut flags), Some(CellIdx(1)));
-        assert!(!flags[1].is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.pop(&mut cells), Some(CellIdx(1)));
+        assert!(!cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert_eq!(queue.iter().collect::<Vec<_>>(), vec![CellIdx(3)]);
-        assert_eq!(queue.pop(&mut flags), Some(CellIdx(3)));
-        assert!(!flags[3].is_marked(FlagMask::PENDING_PARTITION));
+        assert_eq!(queue.pop(&mut cells), Some(CellIdx(3)));
+        assert!(!cells[3].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
-        assert_eq!(queue.pop(&mut flags), None);
+        assert_eq!(queue.pop(&mut cells), None);
     }
 }

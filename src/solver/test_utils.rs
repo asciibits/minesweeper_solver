@@ -492,7 +492,7 @@ impl FieldBuilder {
             .into_inner()
             .into_iter()
             .filter(|&i| {
-                if !self.field.cells[i].is_unknown() {
+                if !self.field.cells[i].value.is_unknown() {
                     return false;
                 }
                 let pt = self.field.coordinates(i);
@@ -520,7 +520,7 @@ impl FieldBuilder {
                 let pt = self.field.coordinates(i);
                 self.mines[(pt.x + pt.y * width) as usize] != MineOrCount::MINE
             })
-            .filter_map(|&i| self.field.cells[i].is_unknown().then_some(i))
+            .filter_map(|&i| self.field.cells[i].value.is_unknown().then_some(i))
             .collect();
         (!members.is_empty()).then_some(members[idx_selector(members.len())])
     }
@@ -726,7 +726,9 @@ mod tests {
         assert_eq!(field.cell(zero_pt).value, UserCellValue::Opened(0));
         for dir in DirectionSet::all_neighbors(zero_pt, 6, 5) {
             assert!(matches!(
-                field.cells[field.cell_idx(zero_pt.neighbor(dir))].cell_type(),
+                field.cells[field.cell_idx(zero_pt.neighbor(dir))]
+                    .value
+                    .cell_type(),
                 CellType::Opened
             ));
         }
@@ -894,20 +896,15 @@ mod tests {
         }
 
         // validate cells are identical, aside from a partition_id remapping
-        for (
-            idx,
-            (
-                (inc_cell, inc_flags, inc_neighbors, _inc_pid),
-                (fresh_cell, fresh_flags, fresh_neighbors, _fresh_pid),
-            ),
-        ) in inc_field
-            .cell_data_iter()
-            .zip(fresh_field.cell_data_iter())
+        for (idx, (&inc_cell, &fresh_cell)) in inc_field
+            .cells
+            .iter()
+            .zip(fresh_field.cells.iter())
             .enumerate()
         {
-            if inc_cell != fresh_cell
-                || inc_neighbors != fresh_neighbors
-                || inc_flags != fresh_flags
+            if inc_cell.value != fresh_cell.value
+                || inc_cell.neighbors != fresh_cell.neighbors
+                || inc_cell.flags != fresh_cell.flags
             {
                 #[cfg(debug_assertions)]
                 {
@@ -916,9 +913,7 @@ mod tests {
                     eprintln!("Fresh:");
                     ColoredMineField::eprintln(&fresh_field);
                 }
-                panic!(
-                    "Cells [{idx}] don't match: {inc_cell}|{inc_neighbors}, {fresh_cell}|{fresh_neighbors}"
-                );
+                panic!("Cells [{idx}] don't match: {inc_cell}, {fresh_cell}");
             }
         }
     }
@@ -1012,7 +1007,7 @@ mod tests {
                                 .join(",")
                         )
                     });
-                    if builder.field.cells[idx] != CellValue::UNKNOWN {
+                    if builder.field.cells[idx].value != CellValue::UNKNOWN {
                         eprintln!(
                             "Members: [{:?}]",
                             members
@@ -1024,16 +1019,16 @@ mod tests {
                         eprintln!("Hinted member is not UNKNOWN: {idx}");
                         panic!();
                     }
-                    assert_eq!(builder.field.cells[idx], CellValue::UNKNOWN);
+                    assert_eq!(builder.field.cells[idx].value, CellValue::UNKNOWN);
                     builder.expand_points([builder.field.coordinates(idx)]);
-                    assert_ne!(builder.field.cells[idx], CellValue::UNKNOWN);
+                    assert_ne!(builder.field.cells[idx].value, CellValue::UNKNOWN);
                 } else {
                     break;
                 }
             } else {
                 for &p in inferred.iter() {
                     assert_eq!(
-                        builder.field.cells[builder.field.cell_idx(p)],
+                        builder.field.cells[builder.field.cell_idx(p)].value,
                         CellValue::CLEARED
                     );
                 }

@@ -44,12 +44,13 @@ impl<'a> ColoredMineField<'a> {
         write!(f, "{:4} ", row * width)?;
         for col in 1..width {
             let idx = (col + row * width) as usize;
-            if !self.field.cells[idx - 1].is_wall() || !self.field.cells[idx].is_wall() {
+            if !self.field.cells[idx - 1].value.is_wall() || !self.field.cells[idx].value.is_wall()
+            {
                 write!(f, "{}", "│ ".bold())?;
             } else {
                 write!(f, "{}", "  ".on_white())?;
             }
-            let cell = self.field.cells[idx];
+            let cell = self.field.cells[idx].value;
             let user_value: UserValueWithInference = cell.into();
             let printable = match user_value {
                 UserValueWithInference {
@@ -88,7 +89,8 @@ impl<'a> ColoredMineField<'a> {
                 },
             };
 
-            let printable = if let Some(&i) = partition_ids.get(&self.field.partition_ids[idx]) {
+            let printable = if let Some(&i) = partition_ids.get(&self.field.cells[idx].partition_id)
+            {
                 match i % 3 {
                     0 => printable.bold().on_yellow(),
                     1 => printable.bold().on_magenta(),
@@ -102,8 +104,8 @@ impl<'a> ColoredMineField<'a> {
             write!(f, "{printable}")?;
 
             if col == width - 1
-                || !self.field.cells[idx].is_wall()
-                || !self.field.cells[idx + 1].is_wall()
+                || !self.field.cells[idx].value.is_wall()
+                || !self.field.cells[idx + 1].value.is_wall()
             {
                 write!(f, "{}", " ".bold())?;
             } else {
@@ -137,7 +139,7 @@ impl<'a> ColoredMineField<'a> {
         write!(f, "     ")?;
         write!(f, "{}", "┌───".bold())?;
         for i in width as usize + 2..2 * width as usize {
-            if self.field.cells[i - 1].is_wall() && self.field.cells[i].is_wall() {
+            if self.field.cells[i - 1].value.is_wall() && self.field.cells[i].value.is_wall() {
                 write!(f, "{}", "────".bold())?;
             } else {
                 write!(f, "{}", "┬───".bold())?;
@@ -155,8 +157,8 @@ impl<'a> ColoredMineField<'a> {
 
         write!(f, "     ")?;
         let mut idx = row as usize * width as usize + 1;
-        if self.field.cells[idx - width as usize + 1].is_wall()
-            && self.field.cells[idx + 1].is_wall()
+        if self.field.cells[idx - width as usize + 1].value.is_wall()
+            && self.field.cells[idx + 1].value.is_wall()
         {
             write!(f, "{}{} ", "│ ".bold(), " ".on_white())?;
         } else {
@@ -164,15 +166,15 @@ impl<'a> ColoredMineField<'a> {
         }
         for _ in 2..width as usize {
             idx += 1;
-            let nw = self.field.cells[idx - width as usize - 1].is_wall();
-            let ne = self.field.cells[idx - width as usize].is_wall();
-            let sw = self.field.cells[idx - 1].is_wall();
-            let se = self.field.cells[idx].is_wall();
+            let nw = self.field.cells[idx - width as usize - 1].value.is_wall();
+            let ne = self.field.cells[idx - width as usize].value.is_wall();
+            let sw = self.field.cells[idx - 1].value.is_wall();
+            let se = self.field.cells[idx].value.is_wall();
             let post_bold = if ne
                 && se
                 && idx + 1 < self.field.cells.len()
-                && self.field.cells[idx - width as usize + 1].is_wall()
-                && self.field.cells[idx + 1].is_wall()
+                && self.field.cells[idx - width as usize + 1].value.is_wall()
+                && self.field.cells[idx + 1].value.is_wall()
             {
                 " ".on_white()
             } else {
@@ -200,7 +202,9 @@ impl<'a> ColoredMineField<'a> {
             };
             write!(f, "{}{}{}{}", lines.0, lines.1, lines.2, lines.3)?;
         }
-        if self.field.cells[idx - width as usize].is_wall() && self.field.cells[idx].is_wall() {
+        if self.field.cells[idx - width as usize].value.is_wall()
+            && self.field.cells[idx].value.is_wall()
+        {
             write!(f, "{}", "│".bold())?;
         } else {
             writeln!(f, "{}", "┤".bold())?;
@@ -219,7 +223,9 @@ impl<'a> ColoredMineField<'a> {
         write!(f, "{}", "└───".bold())?;
         let idx = self.field.cells.len() - 2 * width as usize - 2;
         for i in 2..width as usize {
-            if self.field.cells[idx + i].is_wall() && self.field.cells[idx + i + 1].is_wall() {
+            if self.field.cells[idx + i].value.is_wall()
+                && self.field.cells[idx + i + 1].value.is_wall()
+            {
                 write!(f, "{}", "────".bold())?;
             } else {
                 write!(f, "{}", "┴───".bold())?;
@@ -297,17 +303,21 @@ impl<'a> Display for DetailMineField<'a> {
             write!(f, ", {mine_count}*")?;
         }
         write!(f, ") {{")?;
-        for (idx, (cell, flags, neighbors, pid)) in self.0.cell_data_iter().enumerate() {
+        for (idx, &cell) in self.0.cells.iter().enumerate() {
             let pt = coordinates(idx as u32, self.0.width_with_border);
             if pt.x == 0 || pt.y == 0 || pt.y == self.0.height() + 1 {
                 continue;
             }
             let idx = CellIdx(idx as u32);
             // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(f, "{spacer}{idx}: Cell {{{cell_spacer}value: {},", cell)?;
-            write!(f, "{cell_spacer}neighbors: {},", neighbors)?;
-            write!(f, "{cell_spacer}flags: {flags},")?;
-            write!(f, "{cell_spacer}pid: {pid} }}")?;
+            write!(
+                f,
+                "{spacer}{idx}: Cell {{{cell_spacer}value: {},",
+                cell.value
+            )?;
+            write!(f, "{cell_spacer}neighbors: {},", cell.neighbors)?;
+            write!(f, "{cell_spacer}flags: {},", cell.flags)?;
+            write!(f, "{cell_spacer}pid: {} }}", cell.partition_id)?;
         }
         write!(f, "{spacer}}},")?;
         write!(
