@@ -14,9 +14,9 @@ use crate::{
     InferredValue,
     solver::{
         cell::{
-            Cell, CellIdx, CellValue, ChangeStatus, FastNumberHasherBuilder, FlagMask,
-            GuardedQueue, IndexedCell, PartitionId, UserCellWithInference, UserValueWithInference,
-            cell_idx, coordinates, create_grid_with_border,
+            Cell, CellIdx, CellValue, FastNumberHasherBuilder, FlagMask, GuardedQueue, IndexedCell,
+            PartitionId, UserCellWithInference, UserValueWithInference, cell_idx, coordinates,
+            create_grid_with_border,
         },
         grid::DirectionSet,
         metrics::Metrics,
@@ -363,13 +363,12 @@ impl MineField {
             .map(|&i| self.coordinates(i))
     }
 
-    /// Updates a cell's value, synchronizes neighbor direction bitmasks via SIMD, queues affected
-    /// cells for desolving/solving, and returns a [`ChangeStatus`] indicating whether existing
-    /// neighbor inferences remain valid.
+    /// Updates a cell's value, synchronizes neighbor direction bitmasks, queues affected cells
+    /// for desolving/solving.
     ///
     /// Delegates directly to [`CellValue::apply_change`].
-    fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) -> ChangeStatus {
-        CellValue::apply_change(self, idx, new_value)
+    fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) {
+        CellValue::apply_change(self, idx, new_value);
     }
 
     pub(super) fn compact_partition(&mut self) {
@@ -559,10 +558,8 @@ impl MineField {
                 && let Some(value) = cell.infer_neighbors(neighbors)
             {
                 for n_idx in self.neighbor_iter(idx, unknown_neighbors) {
-                    let change_type = self.change_cell_value(n_idx, value);
-                    if change_type == ChangeStatus::NonBreaking {
-                        self.recent_inferred.push(n_idx);
-                    }
+                    self.change_cell_value(n_idx, value);
+                    self.recent_inferred.push(n_idx);
                 }
             }
         }
@@ -1021,75 +1018,33 @@ mod tests {
         let c2 = field.cell_idx(Point::new(2, 0));
 
         // 1. Unknown -> Opened(1) on cell 0
-        let status = field.change_cell_value(c0, CellValue::for_mine_count(1));
-        assert_eq!(status, ChangeStatus::NonBreaking);
+        field.change_cell_value(c0, CellValue::for_mine_count(1));
         assert_eq!(field.cells[c0].value, CellValue::for_mine_count(1));
         // Cell 0's `unknown` mask points to Cell 1 (E), and Cell 1's `opened` mask points to Cell 0 (W)
         assert_eq!(field.cells[c0].neighbors.unknown(), !!E);
         assert_eq!(field.cells[c1].neighbors.opened(), !!W);
 
         // 2. Unknown -> Cleared on cell 2
-        let status = field.change_cell_value(c2, CellValue::CLEARED);
-        assert_eq!(status, ChangeStatus::NonBreaking);
+        field.change_cell_value(c2, CellValue::CLEARED);
         assert_eq!(field.cells[c2].value, CellValue::CLEARED);
         // Cell 1's `inferred` mask points to Cell 2 (E)
         assert_eq!(field.cells[c1].neighbors.inferred(), !!E);
 
         // 3. Cleared -> Opened(0) on cell 2
-        let status = field.change_cell_value(c2, CellValue::for_mine_count(0));
-        assert_eq!(status, ChangeStatus::NonBreaking);
+        field.change_cell_value(c2, CellValue::for_mine_count(0));
         assert_eq!(field.cells[c2].value, CellValue::for_mine_count(0));
         // Cell 1 drops Cell 2 from `inferred` and adds Cell 2 to `opened`
         assert!(field.cells[c1].neighbors.inferred().is_empty());
         assert_eq!(field.cells[c1].neighbors.opened(), W | E);
 
         // 4. Unknown -> Mine on cell 1
-        let status = field.change_cell_value(c1, CellValue::MINE);
-        assert_eq!(status, ChangeStatus::NonBreaking);
+        field.change_cell_value(c1, CellValue::MINE);
         assert_eq!(field.cells[c1].value, CellValue::MINE);
         // Both cell 0 and cell 2 drop cell 1 from `unknown` and set cell 1 in `mines`
         assert!(field.cells[c0].neighbors.unknown().is_empty());
         assert_eq!(field.cells[c0].neighbors.mines(), !!E);
         assert!(field.cells[c2].neighbors.unknown().is_empty());
         assert_eq!(field.cells[c2].neighbors.mines(), !!W);
-
-        for cell in field.cells.iter() {
-            assert_neighbor_invariants(cell.neighbors);
-        }
-    }
-
-    #[test]
-    fn test_breaking_cell_value_transitions() {
-        let mut field = MineField::new(3, 1).unwrap();
-        let c0 = field.cell_idx(Point::new(0, 0));
-        field.change_cell_value(c0, CellValue::for_mine_count(1));
-
-        // Count -> different Count is triggers a desolve for that cell, but is not Breaking for the
-        // (neighbors their mine_count and unknown_count are unchanged)
-        let status = field.change_cell_value(c0, CellValue::for_mine_count(2));
-        assert_eq!(status, ChangeStatus::NonBreaking);
-
-        // Count -> Unknown is Breaking
-        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
-        assert_eq!(status, ChangeStatus::Breaking);
-
-        // Unknown -> Mine is NonBreaking
-        let status = field.change_cell_value(c0, CellValue::MINE);
-        assert_eq!(status, ChangeStatus::NonBreaking);
-
-        // Mine -> Unknown is Breaking
-        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
-        assert_eq!(status, ChangeStatus::Breaking);
-
-        // InferredSafe -> Unknown is Breaking
-        field.change_cell_value(c0, CellValue::CLEARED);
-        let status = field.change_cell_value(c0, CellValue::UNKNOWN);
-        assert_eq!(status, ChangeStatus::Breaking);
-
-        // Mine -> Count is Breaking
-        field.change_cell_value(c0, CellValue::MINE);
-        let status = field.change_cell_value(c0, CellValue::for_mine_count(1));
-        assert_eq!(status, ChangeStatus::Breaking);
 
         for cell in field.cells.iter() {
             assert_neighbor_invariants(cell.neighbors);
@@ -1134,13 +1089,11 @@ mod tests {
         let c1 = field.cell_idx(Point::new(1, 0));
 
         // Unknown -> Wall is non-breaking
-        let status = field.change_cell_value(c1, CellValue::WALL);
-        assert_eq!(status, ChangeStatus::NonBreaking);
+        field.change_cell_value(c1, CellValue::WALL);
         assert_eq!(field.cells[c1].value, CellValue::WALL);
 
         // Wall -> Unknown is Breaking
-        let status = field.change_cell_value(c1, CellValue::UNKNOWN);
-        assert_eq!(status, ChangeStatus::Breaking);
+        field.change_cell_value(c1, CellValue::UNKNOWN);
         assert_eq!(field.cells[c1].value, CellValue::UNKNOWN);
 
         for cell in field.cells.iter() {
@@ -2528,14 +2481,8 @@ mod tests {
 
         // Confirming Flagged -> Mine and Cleared -> Opened(1) are both NonBreaking.
         // Because (3,0)=1 now has 1 unknown neighbor (4,0) and 0 mines, (4,0) is inferred as Mine.
-        assert_eq!(
-            field.change_cell_value(c1, CellValue::MINE),
-            ChangeStatus::NonBreaking
-        );
-        assert_eq!(
-            field.change_cell_value(c3, CellValue::for_mine_count(1)),
-            ChangeStatus::NonBreaking
-        );
+        field.change_cell_value(c1, CellValue::MINE);
+        field.change_cell_value(c3, CellValue::for_mine_count(1));
         field.solve();
         assert_eq!(field.cell(Point::new(4, 0)).inferred, InferredValue::Mine);
     }

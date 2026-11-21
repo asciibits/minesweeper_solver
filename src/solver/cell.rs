@@ -306,23 +306,14 @@ impl CellValue {
     }
 
     /// Updates `field.cells[idx].value` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
-    /// back-reference bitmasks in parallel via SIMD, and queues affected cells onto
-    /// `desolved_queue` and `solved_queue`.
-    ///
-    /// Returns [`ChangeStatus::NoChange`] if the value is unchanged, [`ChangeStatus::NonBreaking`]
-    /// when neighboring inferences remain valid (e.g., `Unknown -> *`, `Flagged -> Mine`, or
-    /// `(Cleared|Opened|Wall) -> (Cleared|Opened|Wall)`), or [`ChangeStatus::Breaking`] otherwise.
-    pub(super) fn apply_change(
-        field: &mut MineField,
-        idx: CellIdx,
-        new_value: CellValue,
-    ) -> ChangeStatus {
+    /// back-reference bitmasks, and queues affected cells onto `desolved_queue` and `solved_queue`.
+    pub(super) fn apply_change(field: &mut MineField, idx: CellIdx, new_value: CellValue) {
         #[cfg(feature = "debug")]
         let pre_change = field.clone();
 
         let prev_value = field.cells[idx].value;
         if prev_value == new_value {
-            return ChangeStatus::NoChange;
+            return;
         }
         #[cfg(feature = "debug")]
         {
@@ -366,21 +357,6 @@ impl CellValue {
                 }
                 field.solved_queue.push(&mut field.cells, n_idx);
             }
-        }
-
-        // A non-breaking change is one that does not impact the inference of neighboring cells.
-        // This means that it preserves their mine-count, and their unknown-count must not increase.
-        // This yields the following non-breaking changes:
-        //
-        // - Unknown -> *
-        // - Flagged -> Mine
-        // - (Cleared|Opened|Wall) -> (Cleared|Opened|Wall)
-        //
-        // The following inequality is a concise way of saying the above
-        if prev_value.is_unknown() || (!new_value.is_unknown() && !mine_changed) {
-            ChangeStatus::NonBreaking
-        } else {
-            ChangeStatus::Breaking
         }
     }
 
@@ -649,7 +625,7 @@ impl Display for Cell {
         write!(f, "{spacer}partition_id: {}", self.partition_id)?;
         write!(f, "{spacer}flags: {}", self.flags)?;
         if f.alternate() {
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
         write!(f, "}}")
     }
@@ -886,17 +862,6 @@ impl Ord for IndexedCell {
     fn cmp(&self, other: &Self) -> Ordering {
         self.idx.cmp(&other.idx)
     }
-}
-
-/// Status returned by cell value updates indicating the impact on current inferences.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(super) enum ChangeStatus {
-    /// The cell value did not change.
-    NoChange,
-    /// The value changed along a fast path where existing inferences remain valid.
-    NonBreaking,
-    /// The value changed in a way that may invalidate existing inferences.
-    Breaking,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
