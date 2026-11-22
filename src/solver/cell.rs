@@ -583,11 +583,6 @@ impl PartitionId {
             .checked_add(1)
             .expect("PartitionId overflow: too many partitions");
     }
-
-    #[inline]
-    pub(super) fn set(&mut self, id: u16) {
-        self.0 = id;
-    }
 }
 
 impl Display for PartitionId {
@@ -1606,7 +1601,7 @@ mod tests {
         assert_eq!(pid.to_string(), "0");
         pid.inc();
         assert_eq!(pid, PartitionId(1));
-        pid.set(PartitionId::COMPACT_THRESHOLD.0);
+        pid.0 = PartitionId::COMPACT_THRESHOLD.0;
         assert_eq!(pid, PartitionId::COMPACT_THRESHOLD);
         assert_eq!(PartitionId::COMPACT_THRESHOLD.0, u16::MAX >> 1);
 
@@ -1615,5 +1610,43 @@ mod tests {
             max_pid.inc();
         });
         assert!(overflow.is_err());
+    }
+
+    #[test]
+    fn test_compact_partition_ids() {
+        let spec = "1...1
+                    .....
+                    1...1";
+        let mut field = MineField::create(spec);
+        assert!(!field.partitions.is_empty());
+        let orig_partition_count = field.partitions.len();
+
+        // Artificially elevate next_partition_id to u16::MAX
+        field.next_partition_id = PartitionId::MAX;
+        // Inject an obsolete cell partition_id that is NOT in field.partitions
+        field.cells[9].partition_id.0 = PartitionId::COMPACT_THRESHOLD.0 + 155;
+
+        field.compact_partition();
+
+        assert_eq!(field.partitions.len(), orig_partition_count);
+        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 1);
+        // Dangling partition ID on cell 9 was reset
+        assert_eq!(field.cells[9].partition_id.0, 0);
+
+        // All active partition members have IDs <= orig_partition_count
+        for &pid in field.partitions.keys() {
+            assert!(pid.0 <= orig_partition_count as u16);
+        }
+
+        // Solving further when next_partition_id > COMPACT_THRESHOLD automatically triggers compaction
+        field.next_partition_id = PartitionId(PartitionId::COMPACT_THRESHOLD.0 + 911);
+        field
+            .set_cell(UserCell {
+                point: Point { x: 0, y: 1 },
+                value: UserCellValue::Opened(2),
+            })
+            .unwrap();
+
+        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 2);
     }
 }

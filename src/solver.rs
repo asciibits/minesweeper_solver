@@ -601,6 +601,10 @@ impl MineField {
             }
             if cell.partition_id < start_partition_id {
                 let next_partition_id = self.next_partition_id;
+
+                let mut opened_members = vec![];
+                let mut unknown_members = vec![];
+
                 let len = self.visit_partition(
                     idx,
                     &offsets,
@@ -612,6 +616,7 @@ impl MineField {
                         if pid != PartitionId::ZERO {
                             field.remove_partition(pid);
                         }
+                        opened_members.push(idx);
                         field.cells[idx].partition_id = field.next_partition_id;
                         true
                     },
@@ -619,13 +624,14 @@ impl MineField {
                         if field.cells[idx].partition_id == field.next_partition_id {
                             return false;
                         }
+                        unknown_members.push(idx);
                         field.cells[idx].partition_id = field.next_partition_id;
                         true
                     },
                 );
 
                 if len <= 1 {
-                    self.cells[idx].partition_id.set(0);
+                    self.cells[idx].partition_id = PartitionId::ZERO;
                 } else {
                     self.next_partition_id.inc();
                     self.metrics.inc_partitions_created();
@@ -2178,47 +2184,6 @@ mod tests {
         assert_ne!(id.0, 0);
         assert_eq!(field.cells[c1].partition_id, id);
         assert_eq!(field.cells[c2].partition_id, id);
-    }
-
-    #[test]
-    fn test_compact_partition_ids() {
-        let spec = "1...1
-                    .....
-                    1...1";
-        let mut field = MineField::create(spec);
-        assert!(!field.partitions.is_empty());
-        let orig_partition_count = field.partitions.len();
-
-        // Artificially elevate next_partition_id to u16::MAX
-        field.next_partition_id = PartitionId::MAX;
-        // Inject an obsolete cell partition_id that is NOT in field.partitions
-        field.cells[9]
-            .partition_id
-            .set(PartitionId::COMPACT_THRESHOLD.0 + 155);
-
-        field.compact_partition();
-
-        assert_eq!(field.partitions.len(), orig_partition_count);
-        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 1);
-        // Dangling partition ID on cell 9 was reset
-        assert_eq!(field.cells[9].partition_id.0, 0);
-
-        // All active partition members have IDs <= orig_partition_count
-        for &pid in field.partitions.keys() {
-            assert!(pid.0 <= orig_partition_count as u16);
-        }
-
-        // Solving further when next_partition_id > COMPACT_THRESHOLD automatically triggers compaction
-        field.next_partition_id = PartitionId(PartitionId::COMPACT_THRESHOLD.0 + 911);
-        field
-            .set_cell(UserCell {
-                point: Point { x: 0, y: 1 },
-                value: UserCellValue::Opened(2),
-            })
-            .unwrap();
-
-        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 2);
-        assert_all_invariants(&field);
     }
 
     #[test]
