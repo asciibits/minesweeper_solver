@@ -22,21 +22,25 @@ impl Point {
         Point { x, y }
     }
 
-    /// Provide the x/y coordinates of a Cell with the given `cell_idx` in a fixed
-    /// width field. This is the corollary to [`Point::to_index`].
+    /// Provide the `(x, y)` coordinates of the cell at `idx` in a grid of width `width`.
+    /// This is the inverse of [`Point::to_index`].
     pub(super) const fn from_index(idx: u32, width: u32) -> Point {
         let y = idx / width;
         let x = idx - y * width;
         Point { x, y }
     }
 
-    /// Get a unique ID for the point in a given-width field. Useful for indexing in
-    /// a Vector or Array. This is the corollary to [`Point::from_index`].
+    /// Return the row-major cell index of `self` in a grid of width `width`.
+    /// This is the inverse of [`Point::from_index`].
     #[inline]
     pub(super) const fn to_index(self, width: u32) -> u32 {
         self.x + self.y * width
     }
 
+    /// Returns the adjacent [`Point`] in direction `d`.
+    ///
+    /// Callers must ensure `self` does not lie on an edge where stepping in `d` would
+    /// underflow `u32` (for north/west edges) or exceed grid bounds.
     #[inline]
     pub(super) const fn neighbor(self, d: Direction) -> Point {
         let Point { x, y } = self;
@@ -162,7 +166,7 @@ impl DirectionSet {
         self.0.count_ones() as u8
     }
 
-    /// Returns the number of directions currently in the set (`0..=8`).
+    /// Returns the raw 8-bit bitmask of directions currently in the set.
     #[inline]
     pub fn mask(&self) -> u8 {
         self.0
@@ -442,9 +446,10 @@ impl Iterator for DirectionSetIterator {
 }
 impl ExactSizeIterator for DirectionSetIterator {}
 
-/// An iterator that returns all the `1` digits in a binary number.
-/// Ex. the values 11 in binary is 0b1011; this iterator will generate the
-/// values: [0b0001, 0b0010, 0b1000]
+/// An iterator that yields the 0-based bit indices of all `1` bits in a binary number,
+/// from least significant to most significant bit.
+///
+/// For example, `11` (`0b1011`) yields `0`, `1`, `3`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BinaryIterator<T>(pub(super) T);
 
@@ -651,5 +656,42 @@ mod tests {
     fn test_point_into() {
         assert_eq!(Point { x: 3, y: 5 }, (3, 5).into());
         assert_eq!((3, 5), Point { x: 3, y: 5 }.into());
+    }
+
+    #[test]
+    fn test_point_neighbor_all_directions() {
+        let center = Point::new(2, 2);
+        assert_eq!(center.neighbor(NW), Point::new(1, 1));
+        assert_eq!(center.neighbor(N), Point::new(2, 1));
+        assert_eq!(center.neighbor(NE), Point::new(3, 1));
+        assert_eq!(center.neighbor(W), Point::new(1, 2));
+        assert_eq!(center.neighbor(E), Point::new(3, 2));
+        assert_eq!(center.neighbor(SW), Point::new(1, 3));
+        assert_eq!(center.neighbor(S), Point::new(2, 3));
+        assert_eq!(center.neighbor(SE), Point::new(3, 3));
+    }
+
+    #[test]
+    fn test_direction_set_display_and_iterator_size_hint() {
+        assert_eq!(DirectionSet::EMPTY.to_string(), "[]");
+        let set = N | E | SW;
+        let disp = set.to_string();
+        assert_eq!(disp, "[N, E, SW]");
+
+        let mut iter = set.iter();
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+        assert!(iter.next().is_some());
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+    }
+
+    #[test]
+    fn test_binary_iterator_usize() {
+        let iter = BinaryIterator(0b1010_0101usize);
+        assert_eq!(iter.len(), 4);
+        assert_eq!(iter.size_hint(), (4, Some(4)));
+        assert_eq!(iter.collect::<Vec<_>>(), vec![0, 2, 5, 7]);
+        assert_eq!(BinaryIterator(0usize).next(), None);
     }
 }

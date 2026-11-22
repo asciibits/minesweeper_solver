@@ -353,94 +353,34 @@ impl<'a> Display for DetailMineField<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::solver::test_utils::FieldBuilder;
-
-    use super::super::*;
     use super::*;
-    use rand::{rng, seq::SliceRandom};
-
-    fn create_test_field(
-        width: u32,
-        height: u32,
-        mine_count: u32,
-        zero_point: Point,
-    ) -> FieldBuilder {
-        let mut field_builder =
-            FieldBuilder::random_with_zero_region(width, height, mine_count, zero_point, |cells| {
-                cells.shuffle(&mut rng())
-            });
-        field_builder.expand_points([zero_point]);
-
-        field_builder
-    }
 
     #[test]
-    fn test_print() {
-        let mut builder = create_test_field(30, 16, 99, Point { x: 10, y: 5 });
-        builder
-            .mine_field()
-            .set_cells([
-                UserCell {
-                    point: Point { x: 23, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 24, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 25, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 23, y: 2 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 25, y: 2 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 23, y: 3 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 24, y: 3 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 25, y: 3 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 16, y: 0 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 17, y: 0 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 18, y: 0 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 16, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 17, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-                UserCell {
-                    point: Point { x: 18, y: 1 },
-                    value: UserCellValue::Wall,
-                },
-            ])
-            .unwrap();
-        ColoredMineField::eprintln(builder.mine_field());
-        println!("{}", builder.mine_field());
-        // eprintln!("{:#}", DetailMineField(builder.mine_field()));
+    fn test_colored_minefield_display() {
+        let field = MineField::create(
+            "1.*@@1
+             0123@@
+             45678.",
+        );
+        let colored = format!("{}", ColoredMineField { field: &field });
+
+        // Header contains 1-based column indices (1..=6) and Unicode top border
+        assert!(colored.contains(" 1 "));
+        assert!(colored.contains(" 6 "));
+        assert!(colored.contains("┌───"));
+        // Row prefixes equal row * width_with_border (`1 * 7 = 7`, `2 * 7 = 14`, `3 * 7 = 21`)
+        assert!(colored.contains("   7 "));
+        assert!(colored.contains("  14 "));
+        assert!(colored.contains("  21 "));
+        // Clues 1..=8 are present in rendered cells
+        for digit in '1'..='8' {
+            assert!(colored.contains(digit));
+        }
+
+        // Empty-interior height (0 rows would fail MineField::new, so test minimum 1x1)
+        let small = MineField::new(1, 1).unwrap();
+        let small_colored = format!("{}", ColoredMineField { field: &small });
+        assert!(small_colored.contains("   1 "));
     }
 
     #[test]

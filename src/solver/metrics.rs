@@ -1,3 +1,8 @@
+//! Instrumentation and phase-timing counters collected during debug/test builds.
+//!
+//! In release builds without the `debug` feature, [`Metrics`] compiles down to a
+//! zero-sized no-op struct so instrumentation has zero runtime cost.
+
 #[cfg(any(debug_assertions, test, feature = "debug"))]
 use std::cmp;
 use std::fmt;
@@ -161,13 +166,13 @@ impl Display for Metrics {
         write!(f, "\n    Max partition size: {}", self.max_partition_size)?;
         write!(
             f,
-            "Partitions created {} ({:.3} per solve)",
+            "\n    Partitions created {} ({:.3} per solve)",
             self.partitions_created,
             self.partitions_created as f64 / self.solve_passes as f64
         )?;
         write!(
             f,
-            "Neighbor visits {} ({:.3} per solve)",
+            "\n    Neighbor visits {} ({:.3} per solve)",
             self.neighbor_visits,
             self.neighbor_visits as f64 / self.solve_passes as f64
         )?;
@@ -462,6 +467,39 @@ mod tests {
         let disp = format!("{}", m);
         assert!(disp.contains("Metrics {"));
         assert!(disp.contains("solves: 1"));
+        assert!(disp.contains("\n    Partitions created 1 (1.000 per solve)"));
+        assert!(disp.contains("\n    Neighbor visits 0 (0.000 per solve)"));
         assert!(disp.contains("Total time:"));
+    }
+
+    #[test]
+    fn test_aggregated_metrics() {
+        let mut agg = AggregatedMetrics::default();
+        assert!(agg.is_empty());
+
+        let mut m1 = Metrics::default();
+        m1.inc_solve_passes();
+        m1.inc_partitions_created();
+        m1.set_max_partitions(2);
+        m1.set_max_partition_size(4);
+        m1.inc_neighbor_visits(N | E);
+        agg.apply_metrics(&m1);
+        assert!(!agg.is_empty());
+
+        let mut m2 = Metrics::default();
+        m2.inc_solve_passes();
+        m2.inc_solve_passes();
+        m2.set_max_partitions(5);
+        m2.set_max_partition_size(3);
+        m2.inc_neighbor_visits(!!W);
+        agg.apply_metrics(&m2);
+
+        let disp = format!("{agg}");
+        assert!(disp.contains("Metrics {"));
+        assert!(disp.contains("solves: 3(1.500 +/- "));
+        assert!(disp.contains("Max simultaneous partitions: 5"));
+        assert!(disp.contains("Max partition size: 4"));
+        assert!(disp.contains("Partitions created: 1(0.500 +/- "));
+        assert!(disp.contains("Neighbor visits: 3(1.500 +/- "));
     }
 }

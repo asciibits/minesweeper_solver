@@ -288,7 +288,7 @@ impl FieldBuilder {
     /// // Using a simple deterministic closure:
     /// let builder = FieldBuilder::random(4, 4, 3, |cells| cells.reverse());
     /// let field = builder.into_mine_field();
-    /// assert_eq!(field.mine_count(), 3);
+    /// assert_eq!(field.mine_count(), Some(3));
     /// ```
     #[cfg(test)]
     pub(super) fn random(
@@ -555,7 +555,6 @@ mod tests {
     use super::*;
     #[cfg(debug_assertions)]
     use crate::solver::display::ColoredMineField;
-    #[cfg(test)]
     use crate::solver::metrics::AggregatedMetrics;
     use crate::solver::{Partition, cell::CellType, display::DetailMineField};
     use rand::{
@@ -874,8 +873,6 @@ mod tests {
         }
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     fn validate_incremental_field(
         inc_field: &MineField,
         validation_metrics: &mut AggregatedMetrics,
@@ -1121,5 +1118,40 @@ mod tests {
                 validate_incremental_field(&builder.field, &mut validation_metrics);
             }
         }
+    }
+
+    #[test]
+    fn test_from_points_out_of_bounds_panics() {
+        let res = std::panic::catch_unwind(|| {
+            FieldBuilder::from_points(2, 2, [Point { x: 2, y: 0 }]);
+        });
+        assert!(res.is_err());
+
+        let res_y = std::panic::catch_unwind(|| {
+            FieldBuilder::from_points(2, 2, [Point { x: 0, y: 2 }]);
+        });
+        assert!(res_y.is_err());
+    }
+
+    #[test]
+    fn test_safe_frontier_hint_returns_safe_unknown_in_partition() {
+        // 3x2 board with mine at (2, 1), safe unknown frontier at {(0, 1), (1, 1), (2, 0)}
+        let mut builder = FieldBuilder::from_spec(
+            "...
+             ..*",
+        );
+        builder.expose_points([Point { x: 0, y: 0 }, Point { x: 1, y: 0 }]);
+        assert!(!builder.field.partitions.is_empty());
+
+        let hint = builder
+            .safe_frontier_hint(|_| 0)
+            .expect("partition frontier has safe unknown cells");
+        assert_ne!(hint, Point { x: 2, y: 1 });
+        assert_eq!(builder.field.cell(hint).value, UserCellValue::Unknown);
+
+        // Once no partitions remain, safe_frontier_hint returns None
+        let mut solved_builder = FieldBuilder::from_spec("...");
+        solved_builder.expose_points([Point { x: 0, y: 0 }]);
+        assert_eq!(solved_builder.safe_frontier_hint(|_| 0), None);
     }
 }

@@ -17,14 +17,14 @@ use crate::{
     },
 };
 
-/// Provide the x/y coordinates of a Cell with the given cell_id in a fixed
-/// width field. This is the corollary to `cell_id`.
+/// Returns the `(x, y)` [`Point`] for linear cell index `idx` in a grid of width `width`.
+/// This is the inverse of [`cell_idx`].
 pub(super) fn coordinates(idx: u32, width: u32) -> Point {
     Point::from_index(idx, width)
 }
 
-/// Get a unique ID for the cell in a given-width field. Useful for indexing in
-/// a Vector or Array. This is the corollary to `coordinates`.
+/// Returns the linear cell index for coordinate `p` in a grid of width `width`.
+/// This is the inverse of [`coordinates`].
 pub(super) fn cell_idx(p: Point, width: u32) -> u32 {
     p.to_index(width)
 }
@@ -172,8 +172,8 @@ impl Display for CellIdx {
 /// | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
 /// | `0..=8` | `0000`..`1000` | Open with adjacent mine count (`0` to `8`) | `true` | `true` | `false` | `false` | [`CellType::Opened`] |
 /// | `9` | `1001` | Inferred Clear | `false` | `true` | `false` | `true` | [`CellType::Cleared`] |
-/// | `10` | `1010` | Unknown | `false` | `false` | `false` | `false` | [`CellType::Unknown`] |
-/// | `12` | `1100` | Interior Wall | `false` | `false` | `false` | `false` | [`CellType::Wall`] |
+/// | `10` | `1010` | Interior Wall | `false` | `false` | `false` | `false` | [`CellType::Wall`] |
+/// | `12` | `1100` | Unknown | `false` | `false` | `false` | `false` | [`CellType::Unknown`] |
 /// | `14` | `1110` | User Mine | `false` | `false` | `true` | `false` | [`CellType::Mine`] |
 /// | `15` | `1111` | Inferred Mine (Flag) | `false` | `false` | `true` | `true` | [`CellType::Flag`] |
 ///
@@ -183,7 +183,7 @@ impl Display for CellIdx {
 /// - [`Self::is_opened`]: value $< 9$ (`0..=8`). Use [`Self::safe_mine_count`] or [`Self::is_opened`]
 ///   to identify true opened cells.
 /// - [`Self::is_mine`]: value $\ge 14$ (user mine `14` and inferred flag `15`).
-/// - `is_wall()` (debug/test helper): value $== 12$ ([`Self::WALL`]).
+/// - `is_wall()` (debug/test helper): value $== 10$ ([`Self::WALL`]).
 /// - `is_inferred()` (debug/test helper): `value & 0b1001 == 0b1001` (matches only `9` and `15`).
 /// - [`Self::cell_type`]: calculated via `value.saturating_sub(8)` mapped to [`CellType`].
 #[derive(Debug, Default, Hash, Clone, Copy, PartialEq, Eq)]
@@ -289,8 +289,8 @@ impl CellValue {
             || (mines_remaining > 0 && mines_remaining > neighbors.unknown.len() as i8)
     }
 
-    // If the cell is a count cell that is not yet solved, and the neighbors can be inferred as
-    // either a Mine or Safe...
+    /// Returns the inferred neighbor value (`CLEARED` or `FLAGGED`) if all remaining
+    /// unknown neighbors of this opened count cell are forced, or `None` otherwise.
     pub(super) fn infer_neighbors(&self, neighbors: CellNeighbors) -> Option<CellValue> {
         // only valid for count cells
         debug_assert!(self.is_opened());
@@ -341,7 +341,7 @@ impl CellValue {
             Self::validate_board(field, &pre_change, idx, new_value);
         }
 
-        // We were previously solved iff we were opened with no unknown neighbors
+        // If `idx` was previously opened, any partition/solved state recorded under it may be stale.
         if prev_value.is_opened() {
             field.desolved_queue.push(&mut field.cells, idx);
         }
@@ -739,8 +739,8 @@ impl CellType {
 ///
 /// The field order (`unknown`, `opened`, `mines`, `inferred`) and `#[repr(C, align(4))]` layout
 /// match [`CellType::UNKNOWN_MASK`], [`CellType::OPENED_MASK`], [`CellType::MINE_MASK`], and
-/// [`CellType::INFERRED_MASK`] so [`CellValue::update_neighbors`] can toggle all 4 masks across
-/// all 8 neighbors via SIMD gather/XOR/scatter on `[u32]`.
+/// [`CellType::INFERRED_MASK`] so [`CellValue::update_neighbors`] can toggle all 4 masks in each
+/// neighbor with a single precomputed `u32` XOR.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 #[repr(C, align(4))]
 pub(super) struct CellNeighbors {
@@ -980,7 +980,7 @@ impl<const MASK: u8> GuardedQueue<MASK> {
         }
     }
 
-    /// Pops the front index in LIFO order and clears `MASK` on its cell flags.
+    /// Pops the most recently pushed index (LIFO) and clears `MASK` on its cell flags.
     #[inline]
     pub(super) fn pop(&mut self, cells: &mut [Cell]) -> Option<IndexedCell> {
         self.queue.pop().map(|idx| {
@@ -995,12 +995,15 @@ impl<const MASK: u8> GuardedQueue<MASK> {
         })
     }
 
-    /// Pops the front index in LIFO order, but preserves the `MASK` on its cell flags.
+    /// Pops the most recently pushed index (LIFO) while preserving `MASK` on its cell flags.
+    ///
+    /// Call [`Self::clear_mask`] after processing the popped index so future pushes aren't blocked.
     #[inline]
     pub(super) fn pop_keep_mask(&mut self) -> Option<CellIdx> {
         self.queue.pop()
     }
 
+    /// Clears `MASK` on `cells[idx]`, allowing `idx` to be pushed onto this queue again.
     #[inline]
     pub(super) fn clear_mask(&self, cells: &mut [Cell], idx: CellIdx) {
         cells[idx].flags.clear_mask(MASK);
@@ -1074,7 +1077,7 @@ impl BuildHasher for FastNumberHasherBuilder {
 pub(super) struct CellOrdering {
     /// Linear index of the cell on the board.
     idx: CellIdx,
-    /// Original count count on the cell.
+    /// Original mine count on the cell.
     mine_count: u8,
     /// Number of mines still unaccounted for among the cell's unknown neighbors.
     remaining_mines: i8,
@@ -1175,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_processed_cell_initialization_and_display() {
+    fn test_cell_neighbors_initialization_and_display() {
         let width = 3;
         let grid = create_grid_with_border(width, 3);
         let idx = Point { x: 1, y: 1 }.to_index(width + 1) as usize;
@@ -1406,7 +1409,7 @@ mod tests {
             assert_eq!(
                 CellValue::for_mine_count(count).cell_type(),
                 CellType::Opened,
-                "Count {count} must map to CellType::Open"
+                "Count {count} must map to CellType::Opened"
             );
         }
     }
@@ -1488,7 +1491,7 @@ mod tests {
         let items: Vec<_> = queue.iter().collect();
         assert_eq!(items, vec![CellIdx(1)]);
 
-        // Push another index and verify LIFO pop + drain reset
+        // Push another index and verify LIFO pop clears flag
         queue.push(&mut cells, CellIdx(3));
         assert_eq!(
             queue.iter().collect::<Vec<_>>(),
@@ -1513,5 +1516,104 @@ mod tests {
         assert!(!cells[1].flags.is_marked(FlagMask::PENDING_PARTITION));
         assert!(queue.is_empty());
         assert_matches!(queue.pop(&mut cells), None);
+    }
+
+    #[test]
+    fn test_guarded_queue_pop_keep_mask_and_clear_mask() {
+        let mut cells = vec![Cell::UNKNOWN; 3].into_boxed_slice();
+        let mut queue = GuardedQueue::<{ FlagMask::SOLVED_QUEUE.0 }>::with_capacity(3);
+
+        queue.push(&mut cells, CellIdx(0));
+        queue.push(&mut cells, CellIdx(2));
+
+        // pop_keep_mask pops LIFO while keeping SOLVED_QUEUE marked so duplicate pushes remain blocked
+        assert_eq!(queue.pop_keep_mask(), Some(CellIdx(2)));
+        assert!(cells[2].flags.is_marked(FlagMask::SOLVED_QUEUE));
+        queue.push(&mut cells, CellIdx(2));
+        assert!(queue.iter().eq([CellIdx(0)]));
+
+        // Once clear_mask is called, the index can be pushed again
+        queue.clear_mask(&mut cells, CellIdx(2));
+        assert!(!cells[2].flags.is_marked(FlagMask::SOLVED_QUEUE));
+        queue.push(&mut cells, CellIdx(2));
+        assert_eq!(queue.pop_keep_mask(), Some(CellIdx(2)));
+        assert_eq!(queue.pop_keep_mask(), Some(CellIdx(0)));
+        assert_eq!(queue.pop_keep_mask(), None);
+    }
+
+    #[test]
+    fn test_cell_value_remaining_mines_infer_and_invalid() {
+        use crate::solver::grid::{E, N, S, W};
+
+        let val = CellValue::for_mine_count(2);
+
+        // 1 adjacent mine, 2 unknown -> 1 remaining mine, ambiguous (not inferable, valid)
+        let ambiguous = CellNeighbors {
+            unknown: N | S,
+            opened: DirectionSet::EMPTY,
+            mines: !!E,
+            inferred: DirectionSet::EMPTY,
+        };
+        assert_eq!(val.remaining_mines(ambiguous), 1);
+        assert_eq!(val.infer_neighbors(ambiguous), None);
+        assert!(!val.is_invalid(ambiguous));
+
+        // 1 adjacent mine, 1 unknown -> 1 remaining == unknown.len() -> infer FLAGGED
+        let force_mine = CellNeighbors {
+            unknown: !!N,
+            opened: DirectionSet::EMPTY,
+            mines: !!E,
+            inferred: DirectionSet::EMPTY,
+        };
+        assert_eq!(val.remaining_mines(force_mine), 1);
+        assert_eq!(val.infer_neighbors(force_mine), Some(CellValue::FLAGGED));
+        assert!(!val.is_invalid(force_mine));
+
+        // 2 adjacent mines, 1 unknown -> 0 remaining -> infer CLEARED
+        let force_safe = CellNeighbors {
+            unknown: !!S,
+            opened: DirectionSet::EMPTY,
+            mines: E | W,
+            inferred: DirectionSet::EMPTY,
+        };
+        assert_eq!(val.remaining_mines(force_safe), 0);
+        assert_eq!(val.infer_neighbors(force_safe), Some(CellValue::CLEARED));
+        assert!(!val.is_invalid(force_safe));
+
+        // Too few unknowns for remaining mines (1 mine, 0 unknowns for count 2) -> invalid
+        let underconstrained = CellNeighbors {
+            unknown: DirectionSet::EMPTY,
+            opened: DirectionSet::EMPTY,
+            mines: !!E,
+            inferred: DirectionSet::EMPTY,
+        };
+        assert!(val.is_invalid(underconstrained));
+
+        // Excess mines (3 mines for count 2) -> negative remaining_mines and invalid
+        let excess_mines = CellNeighbors {
+            unknown: DirectionSet::EMPTY,
+            opened: DirectionSet::EMPTY,
+            mines: N | E | W,
+            inferred: DirectionSet::EMPTY,
+        };
+        assert_eq!(val.remaining_mines(excess_mines), -1);
+        assert!(val.is_invalid(excess_mines));
+    }
+
+    #[test]
+    fn test_partition_id_ops() {
+        let mut pid = PartitionId::ZERO;
+        assert_eq!(pid.to_string(), "0");
+        pid.inc();
+        assert_eq!(pid, PartitionId(1));
+        pid.set(PartitionId::COMPACT_THRESHOLD.0);
+        assert_eq!(pid, PartitionId::COMPACT_THRESHOLD);
+        assert_eq!(PartitionId::COMPACT_THRESHOLD.0, u16::MAX >> 1);
+
+        let overflow = std::panic::catch_unwind(|| {
+            let mut max_pid = PartitionId::MAX;
+            max_pid.inc();
+        });
+        assert!(overflow.is_err());
     }
 }
