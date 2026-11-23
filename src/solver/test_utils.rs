@@ -464,35 +464,19 @@ impl FieldBuilder {
         &mut self,
         mut idx_selector: impl FnMut(usize) -> usize,
     ) -> Option<Point> {
-        use std::{cell::RefCell, collections::HashSet, rc::Rc};
-
         let n_partitions = self.field.partitions.len();
         if n_partitions == 0 {
             return None;
         }
-        let &crate::solver::Partition { member, len } = self
+        let partition = self
             .field
             .partitions
             .values()
             .nth(idx_selector(n_partitions))?;
 
-        let visited = Rc::new(RefCell::new(HashSet::with_capacity_and_hasher(
-            len as usize,
-            crate::solver::cell::FastNumberHasherBuilder,
-        )));
-        let offsets = self.field.neighbor_offsets;
-        self.field.visit_partition(
-            member,
-            &offsets,
-            &mut |_, idx| visited.borrow_mut().insert(idx),
-            &mut |_, idx| visited.borrow_mut().insert(idx),
-        );
-
         let width = self.field.width();
-        let mut candidates: Vec<CellIdx> = Rc::into_inner(visited)
-            .unwrap()
-            .into_inner()
-            .into_iter()
+        let mut candidates: Vec<CellIdx> = partition
+            .unknown_members()
             .filter(|&i| {
                 if !self.field.cells[i].value.is_unknown() {
                     return false;
@@ -553,10 +537,10 @@ impl Display for FieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(debug_assertions)]
+    use crate::solver::cell::CellType;
+    #[cfg(any(debug_assertions, feature = "debug-playthrough"))]
     use crate::solver::display::ColoredMineField;
     use crate::solver::metrics::AggregatedMetrics;
-    use crate::solver::{Partition, cell::CellType, display::DetailMineField};
     use rand::{
         Rng, RngExt, SeedableRng, rng,
         rngs::StdRng,
@@ -975,27 +959,14 @@ mod tests {
         loop {
             #[cfg(feature = "debug-playthrough")]
             {
-                // use crate::solver::display::DetailMineField;
-
                 // DetailMineField::eprintln(&builder.field);
-                ColoredMineField::println(&builder.field);
+                ColoredMineField::eprintln(&builder.field);
             }
             let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
             if inferred.is_empty() {
                 let partition = builder.field.partitions.values().choose(rng);
-                if let Some(&Partition { member, len }) = partition {
-                    let members = builder.field.members(member, len);
-                    if len != members.len() as u32 {
-                        DetailMineField::eprintln(&builder.field);
-                        #[cfg(debug_assertions)]
-                        {
-                            ColoredMineField::eprintln(&builder.field);
-                        }
-                        panic!(
-                            "Partition lengths disagree. From partitions: {len}, from walking (member {member}): {}",
-                            members.len()
-                        );
-                    }
+                if let Some(partition) = partition {
+                    let members = partition.unknown_members().collect::<Vec<_>>();
                     let idx = builder.hint(&members, selector(rng)).unwrap_or_else(|| {
                         panic!(
                             "Didn't get a hint from members: {:?}",
@@ -1087,10 +1058,8 @@ mod tests {
                 let inferred: Vec<_> = builder.field.recent_inferred_safe().collect();
                 if !inferred.is_empty() {
                     builder.expand_points(inferred);
-                } else if let Some(&Partition { member, len }) =
-                    builder.field.partitions.values().choose(&mut rng)
-                {
-                    let members = builder.field.members(member, len);
+                } else if let Some(partition) = builder.field.partitions.values().choose(&mut rng) {
+                    let members = partition.unknown_members().collect::<Vec<_>>();
                     if let Some(idx) = builder.hint(&members, selector(&mut rng)) {
                         builder.expand_points([builder.field.coordinates(idx)]);
                     } else {

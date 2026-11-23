@@ -15,10 +15,11 @@ use crate::{
     solver::{
         cell::{
             Cell, CellIdx, CellValue, FastNumberHasherBuilder, FlagMask, GuardedQueue, IndexedCell,
-            IndexedCellValue, PartitionId, UserCellWithInference, UserValueWithInference, cell_idx,
-            coordinates, create_grid_with_border,
+            IndexedCellValue, UserCellWithInference, UserValueWithInference, cell_idx, coordinates,
+            create_grid_with_border,
         },
         metrics::Metrics,
+        partition::{Partition, PartitionId},
     },
 };
 
@@ -27,8 +28,9 @@ pub(crate) mod cell;
 mod display;
 pub(crate) mod grid;
 mod metrics;
-mod stats;
+mod partition;
 pub(crate) mod test_utils;
+mod utils;
 
 /// Represents the state of a Minesweeper board and its active solving partitions.
 #[derive(Debug, Clone)]
@@ -51,6 +53,11 @@ pub struct MineField {
     pending: Vec<IndexedCellValue>,
     /// Queue of opened (or formerly opened) cells whose breaking changes require inferences in their connected components to be reset.
     desolved_queue: GuardedQueue<{ FlagMask::DESOLVE_FLAG.mask() }>,
+    /// Reusable scratch buffer used by [`MineField::process_desolved`] (lazily allocated on first desolve).
+    desolve_buf: Vec<CellIdx>,
+    /// Reusable BFS buffers used by [`MineField::partition`] to collect partition members.
+    partition_opened_buf: Vec<CellIdx>,
+    partition_unknown_buf: Vec<CellIdx>,
     /// Queue of cells (typically satisfying [`CellValue::is_opened`]) whose neighbors may have become trivially solvable;
     /// non-open cells forwarded from `desolved_queue` are skipped for solving and forwarded to `pending_partition_queue`.
     solved_queue: GuardedQueue<{ FlagMask::SOLVED_QUEUE.mask() }>,
@@ -134,9 +141,12 @@ impl MineField {
             mine_count,
             cells,
             partitions: HashMap::with_capacity_and_hasher(16, FastNumberHasherBuilder),
-            next_partition_id: PartitionId(1),
+            next_partition_id: PartitionId::ONE,
             pending: Vec::with_capacity(area / 4),
             desolved_queue: GuardedQueue::with_capacity(0),
+            desolve_buf: Vec::new(),
+            partition_opened_buf: Vec::new(),
+            partition_unknown_buf: Vec::new(),
             solved_queue: GuardedQueue::with_capacity(perimeter),
             pending_partition_queue: GuardedQueue::with_capacity(area / 4),
             metrics: Metrics::default(),
@@ -366,12 +376,123 @@ impl MineField {
             .map(|&i| self.coordinates(i))
     }
 
-    /// Updates a cell's value, synchronizes neighbor direction bitmasks, queues affected cells
-    /// for desolving/solving.
-    ///
-    /// Delegates directly to [`CellValue::apply_change`].
-    fn change_cell_value(&mut self, offsets: &[i32; 8], idx: CellIdx, new_value: CellValue) {
-        CellValue::apply_change(self, offsets, idx, new_value);
+    /// Updates `self.cells[idx].value` to `new_value`, synchronizes neighbor direction bitmasks,
+    /// and queues affected cells onto `desolved_queue` and `solved_queue`.
+    fn change_cell_value(&mut self, idx: CellIdx, new_value: CellValue) {
+        #[cfg(feature = "debug")]
+        let pre_change = self.clone();
+
+        let prev_value = self.cells[idx].value;
+        if prev_value == new_value {
+            return;
+        }
+        #[cfg(feature = "debug")]
+        {
+            eprintln!("Applying change: ({idx}): {prev_value} -> {new_value}");
+        }
+
+        // Update the new value and all neighbor back references
+        self.cells[idx].value = new_value;
+        CellValue::update_neighbors(
+            &mut self.cells,
+            self.width_with_border,
+            idx,
+            prev_value,
+            new_value,
+        );
+        #[cfg(feature = "debug")]
+        {
+            // This does a full board validation with all neighbor references after each change.
+            // This is quite expensive.
+            Self::validate_board(self, &pre_change, idx, new_value);
+        }
+
+        // If `idx` was previously opened, any partition/solved state recorded under it may be stale.
+        if prev_value.is_opened() {
+            self.desolved_queue.push(&mut self.cells, idx);
+        }
+        if new_value.is_opened() {
+            self.solved_queue.push(&mut self.cells, idx);
+        }
+
+        let neighbors = self.cells[idx].neighbors;
+        let mine_changed = prev_value.is_mine() != new_value.is_mine();
+        // Queue neighbor desolves if we changed our neighbors' known mine count or cleared an
+        // opened/mine cell; whenever `desolve_neighbors` holds, `mine_changed` also requires a
+        // neighbor re-solve, so both queues can share a single `neighbors.opened` pass.
+        let desolve_neighbors = !prev_value.is_unknown() && mine_changed;
+        if (prev_value.is_unknown() || new_value.is_unknown() || mine_changed)
+            && !neighbors.opened().is_empty()
+        {
+            let offsets = self.neighbor_offsets;
+            for n_idx in idx.neighbor_iter(&offsets, neighbors.opened()) {
+                if desolve_neighbors {
+                    self.desolved_queue.push(&mut self.cells, n_idx);
+                }
+                self.solved_queue.push(&mut self.cells, n_idx);
+            }
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    fn validate_board(&self, pre_change: &MineField, source_idx: CellIdx, new_value: CellValue) {
+        fn failure(
+            field: &MineField,
+            pre_change: &MineField,
+            source_idx: CellIdx,
+            n_idx: CellIdx,
+            infer_idx: CellIdx,
+            new_value: CellValue,
+        ) {
+            use crate::solver::display::ColoredMineField;
+
+            eprintln!(
+                "\nBoard validation failure (source idx: {source_idx}, neighbor idx: {n_idx}, infer idx: {infer_idx}, new_value: {new_value}.\nPost-change:"
+            );
+            ColoredMineField::eprintln(&field);
+            DetailMineField::eprintln(&field);
+            eprintln!("Pre-change:\n");
+            ColoredMineField::eprintln(&pre_change);
+            DetailMineField::eprintln(&pre_change);
+            panic!();
+        }
+        use crate::solver::display::DetailMineField;
+        for (idx, cell) in self.cells.iter().copied().enumerate() {
+            use crate::solver::grid::DirectionSet;
+
+            if cell.value.is_wall() {
+                continue;
+            }
+            let n_idx = CellIdx(idx as u32);
+            let neighbors = self.cells[n_idx].neighbors;
+            for infer_idx in n_idx.neighbor_iter(&self.neighbor_offsets, neighbors.opened()) {
+                if !self.cells[infer_idx].value.is_opened() {
+                    failure(self, pre_change, source_idx, n_idx, infer_idx, new_value);
+                }
+            }
+            for infer_idx in n_idx.neighbor_iter(&self.neighbor_offsets, neighbors.unknown()) {
+                if !self.cells[infer_idx].value.is_unknown() {
+                    failure(self, pre_change, source_idx, n_idx, infer_idx, new_value);
+                }
+            }
+            for infer_idx in n_idx.neighbor_iter(&self.neighbor_offsets, neighbors.mines()) {
+                if !self.cells[infer_idx].value.is_mine() {
+                    failure(self, pre_change, source_idx, n_idx, infer_idx, new_value);
+                }
+            }
+            for infer_idx in n_idx.neighbor_iter(&self.neighbor_offsets, neighbors.inferred()) {
+                if !self.cells[infer_idx].value.is_inferred() {
+                    failure(self, pre_change, source_idx, n_idx, infer_idx, new_value);
+                }
+            }
+            for infer_idx in
+                n_idx.neighbor_iter(&self.neighbor_offsets, DirectionSet::ALL - neighbors.all())
+            {
+                if !self.cells[infer_idx].value.is_wall() {
+                    failure(self, pre_change, source_idx, n_idx, infer_idx, new_value);
+                }
+            }
+        }
     }
 
     pub(super) fn compact_partition(&mut self) {
@@ -379,15 +500,15 @@ impl MineField {
             HashMap::with_capacity_and_hasher(self.partitions.len(), FastNumberHasherBuilder);
         let mut new_partitions =
             HashMap::with_capacity_and_hasher(self.partitions.len(), FastNumberHasherBuilder);
-        let mut new_pid = PartitionId(1);
+        let mut new_pid = PartitionId::ONE;
         for (old_pid, partition) in self.partitions.drain() {
             id_map.insert(old_pid, new_pid);
             new_partitions.insert(new_pid, partition);
-            new_pid.inc();
+            new_pid = new_pid.inc();
         }
         self.partitions = new_partitions;
         for cell in self.cells.iter_mut() {
-            if cell.partition_id.0 > 0 {
+            if cell.partition_id > PartitionId::ZERO {
                 cell.partition_id = id_map
                     .get(&cell.partition_id)
                     .copied()
@@ -462,100 +583,92 @@ impl MineField {
     }
 
     fn index_pending(&mut self) {
-        let offsets = self.neighbor_offsets;
         for i in 0..self.pending.len() {
             let IndexedCellValue { idx, value } = self.pending[i];
-            self.change_cell_value(&offsets, idx, value);
+            self.change_cell_value(idx, value);
         }
         self.pending.clear();
     }
 
     fn process_desolved(&mut self) {
         if !self.desolved_queue.is_empty() {
-            while let Some(cell) = self.desolved_queue.pop(&mut self.cells) {
-                if cell.cell.partition_id != self.next_partition_id {
-                    self.desolve_partition(cell);
+            let mut queue = std::mem::take(&mut self.desolve_buf);
+            queue.clear();
+            let est_cap = 2 * (self.width_with_border + self.height_with_border) as usize;
+            if queue.capacity() < est_cap {
+                queue.reserve(est_cap);
+            }
+            while let Some(IndexedCell { idx, cell }) = self.desolved_queue.pop(&mut self.cells) {
+                if cell.partition_id != self.next_partition_id {
+                    self.enqueue_desolve(&mut queue, idx, cell.partition_id);
+                    while let Some(idx) = queue.pop() {
+                        self.desolve_opened(idx, &mut queue);
+                    }
                 }
             }
-            self.next_partition_id.inc();
+            self.desolve_buf = queue;
+            self.next_partition_id = self.next_partition_id.inc();
         }
     }
 
-    // Kept out-of-line so `hashbrown`'s SIMD probing registers and stack spills do not
-    // bloat every frame of the recursive `desolve_partition` and `visit_partition` walkers.
-    #[inline(never)]
-    fn remove_partition(&mut self, pid: PartitionId) {
-        self.partitions.remove(&pid);
+    #[inline]
+    fn enqueue_desolve(&mut self, queue: &mut Vec<CellIdx>, idx: CellIdx, pid: PartitionId) {
+        if pid != PartitionId::ZERO {
+            self.partitions.remove(&pid);
+        }
+        self.cells[idx].partition_id = self.next_partition_id;
+        queue.push(idx);
     }
 
-    // Step through the cells of a partition. Note: This function assumes the starting cell is
-    // opened, or was prior to the recent change
-    fn desolve_partition(&mut self, cell: IndexedCell) {
-        // Takes `&[i32; 8]` separately from `field` so `idx.neighbor_iter` only borrows `offsets`
-        // (8-byte pointer) instead of copying `[i32; 8]` onto every recursive stack frame.
-        fn visit_opened(
-            field: &mut MineField,
-            offsets: &[i32; 8],
-            IndexedCell { idx, cell }: IndexedCell,
-        ) {
-            let neighbors = cell.neighbors;
-            #[cfg(feature = "debug")]
-            {
-                eprintln!("Desolving {idx} (inferred: {})", neighbors.inferred());
-            }
-
-            field.solved_queue.push(&mut field.cells, idx);
-            let pid = cell.partition_id;
-            if pid.0 != 0 {
-                field.remove_partition(pid);
-            }
-
-            field.metrics.inc_neighbor_visits(neighbors.unknown());
-            for n_idx in idx.neighbor_iter(offsets, neighbors.unknown()) {
-                field.pending_partition_queue.push(&mut field.cells, n_idx);
-            }
-
-            field.cells[idx].partition_id = field.next_partition_id;
-
-            // reset all inferred neighbors
-            field.metrics.inc_neighbor_visits(neighbors.inferred());
-            for n_idx in idx.neighbor_iter(offsets, neighbors.inferred()) {
-                let cell = field.cells[n_idx];
-                if cell.partition_id != field.next_partition_id {
-                    visit_inferred(field, offsets, IndexedCell { idx: n_idx, cell });
-                }
-            }
-        }
-
-        fn visit_inferred(
-            field: &mut MineField,
-            offsets: &[i32; 8],
-            IndexedCell { idx, cell }: IndexedCell,
-        ) {
-            field.cells[idx].partition_id = field.next_partition_id;
-            let neighbors = cell.neighbors;
-            #[cfg(feature = "debug")]
-            {
-                eprintln!("Resetting inferred {idx} (opened: {})", neighbors.opened());
-            }
-
-            field.pending_partition_queue.push(&mut field.cells, idx);
-
-            // reset inferred to unknown
-            field.change_cell_value(offsets, idx, CellValue::UNKNOWN);
-
-            // walk all opened neighbors
-            field.metrics.inc_neighbor_visits(neighbors.opened());
-            for n_idx in idx.neighbor_iter(offsets, neighbors.opened()) {
-                let cell = field.cells[n_idx];
-                if cell.partition_id != field.next_partition_id {
-                    visit_opened(field, offsets, IndexedCell { idx: n_idx, cell });
-                }
-            }
-        }
-
+    fn desolve_opened(&mut self, idx: CellIdx, queue: &mut Vec<CellIdx>) {
+        let neighbors = self.cells[idx].neighbors;
         let offsets = self.neighbor_offsets;
-        visit_opened(self, &offsets, cell);
+        #[cfg(feature = "debug")]
+        {
+            eprintln!("Desolving {idx} (inferred: {})", neighbors.inferred());
+        }
+
+        self.solved_queue.push(&mut self.cells, idx);
+
+        self.metrics.inc_neighbor_visits(neighbors.unknown());
+        for n_idx in idx.neighbor_iter(&offsets, neighbors.unknown()) {
+            self.pending_partition_queue.push(&mut self.cells, n_idx);
+        }
+
+        // reset all inferred neighbors
+        self.metrics.inc_neighbor_visits(neighbors.inferred());
+        for inferred_idx in idx.neighbor_iter(&offsets, neighbors.inferred()) {
+            let inferred_cell = self.cells[inferred_idx];
+            if inferred_cell.partition_id != self.next_partition_id {
+                self.cells[inferred_idx].partition_id = self.next_partition_id;
+                let inferred_neighbors = inferred_cell.neighbors;
+                #[cfg(feature = "debug")]
+                {
+                    eprintln!(
+                        "Resetting inferred {inferred_idx} (opened: {})",
+                        inferred_neighbors.opened()
+                    );
+                }
+
+                self.pending_partition_queue
+                    .push(&mut self.cells, inferred_idx);
+
+                // reset inferred to unknown
+                self.change_cell_value(inferred_idx, CellValue::UNKNOWN);
+
+                // walk all opened neighbors
+                self.metrics
+                    .inc_neighbor_visits(inferred_neighbors.opened());
+                for opened_idx in
+                    inferred_idx.neighbor_iter(&offsets, inferred_neighbors.opened())
+                {
+                    let opened_cell = self.cells[opened_idx];
+                    if opened_cell.partition_id != self.next_partition_id {
+                        self.enqueue_desolve(queue, opened_idx, opened_cell.partition_id);
+                    }
+                }
+            }
+        }
     }
 
     fn process_solved(&mut self) {
@@ -571,7 +684,7 @@ impl MineField {
                 {
                     self.metrics.inc_neighbor_visits(unknown_neighbors);
                     for n_idx in idx.neighbor_iter(&offsets, unknown_neighbors) {
-                        self.change_cell_value(&offsets, n_idx, value);
+                        self.change_cell_value(n_idx, value);
                         self.recent_inferred.push(n_idx);
                     }
                 }
@@ -583,177 +696,136 @@ impl MineField {
     fn partition(&mut self) {
         let start_partition_id = self.next_partition_id;
         self.recent_invalid.clear();
-        let offsets = self.neighbor_offsets;
+        if self.pending_partition_queue.is_empty() {
+            return;
+        }
+
+        let mut opened_buf = std::mem::take(&mut self.partition_opened_buf);
+        let mut unknown_buf = std::mem::take(&mut self.partition_unknown_buf);
+        let est_cap = (self.width_with_border + self.height_with_border) as usize;
+        if opened_buf.capacity() < est_cap {
+            opened_buf.reserve(est_cap);
+        }
+        if unknown_buf.capacity() < est_cap {
+            unknown_buf.reserve(est_cap);
+        }
+
         while let Some(IndexedCell { idx, cell }) =
             self.pending_partition_queue.pop(&mut self.cells)
         {
-            if cell.value.is_opened() && cell.value.is_invalid(cell.neighbors) {
-                self.recent_invalid.push(idx);
-            }
-            if (cell.value.is_opened() && cell.neighbors.unknown().is_empty())
-                || (cell.value.is_unknown() && cell.neighbors.opened().is_empty())
-            {
-                if cell.partition_id != PartitionId::ZERO {
-                    self.remove_partition(cell.partition_id);
+            let is_opened = if cell.value.is_opened() {
+                if cell.value.is_invalid(cell.neighbors) {
+                    self.recent_invalid.push(idx);
+                }
+                if cell.neighbors.unknown().is_empty() {
+                    if cell.partition_id != PartitionId::ZERO {
+                        self.partitions.remove(&cell.partition_id);
+                        self.cells[idx].partition_id = PartitionId::ZERO;
+                    }
+                    continue;
+                }
+                true
+            } else if cell.value.is_unknown() {
+                if cell.neighbors.opened().is_empty() {
+                    if cell.partition_id != PartitionId::ZERO {
+                        self.partitions.remove(&cell.partition_id);
+                        self.cells[idx].partition_id = PartitionId::ZERO;
+                    }
+                    continue;
+                }
+                false
+            } else {
+                if cell.partition_id < start_partition_id {
                     self.cells[idx].partition_id = PartitionId::ZERO;
                 }
                 continue;
-            }
+            };
+
             if cell.partition_id < start_partition_id {
-                let next_partition_id = self.next_partition_id;
-
-                let len = self.visit_partition(
+                self.build_partition(
                     idx,
-                    &offsets,
-                    &mut |field, idx| {
-                        let pid = field.cells[idx].partition_id;
-                        if pid == field.next_partition_id {
-                            return false;
-                        }
-                        if pid != PartitionId::ZERO {
-                            field.remove_partition(pid);
-                        }
-                        field.cells[idx].partition_id = field.next_partition_id;
-                        true
-                    },
-                    &mut |field, idx| {
-                        if field.cells[idx].partition_id == field.next_partition_id {
-                            return false;
-                        }
-                        field.cells[idx].partition_id = field.next_partition_id;
-                        true
-                    },
+                    cell.partition_id,
+                    is_opened,
+                    &mut opened_buf,
+                    &mut unknown_buf,
                 );
-
-                if len <= 1 {
-                    self.cells[idx].partition_id = PartitionId::ZERO;
-                } else {
-                    self.next_partition_id.inc();
-                    self.metrics.inc_partitions_created();
-                    self.metrics.set_max_partition_size(len);
-                    self.partitions
-                        .insert(next_partition_id, Partition { member: idx, len });
-                    self.metrics.set_max_partitions(self.partitions.len());
-                }
             }
         }
+
+        self.partition_opened_buf = opened_buf;
+        self.partition_unknown_buf = unknown_buf;
     }
 
-    fn visit_partition(
+    fn build_partition(
         &mut self,
-        member: CellIdx,
-        offsets: &[i32; 8],
-        visit_opened: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-        visit_unknown: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-    ) -> u32 {
-        // Pass `offsets: &[i32; 8]` separately from `field` to avoid copying the 32-byte array
-        // per recursive frame, and pass `prev_neighbor` as a sentinel `CellIdx` rather than
-        // `Option<CellIdx>` so it fits in one register without a discriminant spill.
-        fn walk_partition_opened(
-            field: &mut MineField,
-            offsets: &[i32; 8],
-            idx: CellIdx,
-            prev_neighbor: CellIdx,
-            visit_opened: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-            visit_unknown: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-        ) -> u32 {
-            let mut len = 1;
-            let neighbors = field.cells[idx].neighbors.unknown();
-            field.metrics.inc_neighbor_visits(neighbors);
-            for n_idx in idx.neighbor_iter(offsets, neighbors) {
-                if prev_neighbor == n_idx {
-                    continue;
-                }
-                if visit_unknown(field, n_idx) {
-                    len += walk_partition_unknown(
-                        field,
-                        offsets,
-                        n_idx,
-                        idx,
-                        visit_opened,
-                        visit_unknown,
-                    );
-                }
-            }
-            len
-        }
+        root_idx: CellIdx,
+        root_pid: PartitionId,
+        is_opened: bool,
+        opened_buf: &mut Vec<CellIdx>,
+        unknown_buf: &mut Vec<CellIdx>,
+    ) {
+        opened_buf.clear();
+        unknown_buf.clear();
 
-        fn walk_partition_unknown(
-            field: &mut MineField,
-            offsets: &[i32; 8],
-            idx: CellIdx,
-            prev_neighbor: CellIdx,
-            visit_opened: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-            visit_unknown: &mut impl FnMut(&mut MineField, CellIdx) -> bool,
-        ) -> u32 {
-            let mut len = 1;
-            let neighbors = field.cells[idx].neighbors.opened();
-            field.metrics.inc_neighbor_visits(neighbors);
-            for n_idx in idx.neighbor_iter(offsets, neighbors) {
-                if prev_neighbor == n_idx {
-                    continue;
-                }
-                if visit_opened(field, n_idx) {
-                    len += walk_partition_opened(
-                        field,
-                        offsets,
-                        n_idx,
-                        idx,
-                        visit_opened,
-                        visit_unknown,
-                    );
-                }
-            }
-            len
-        }
-
-        let mut len = 0;
-
-        if self.cells[member].value.is_opened() {
-            if visit_opened(self, member) {
-                len = walk_partition_opened(
-                    self,
-                    offsets,
-                    member,
-                    CellIdx::NONE,
-                    visit_opened,
-                    visit_unknown,
-                );
-            }
-        } else if self.cells[member].value.is_unknown() && visit_unknown(self, member) {
-            len = walk_partition_unknown(
-                self,
-                offsets,
-                member,
-                CellIdx::NONE,
-                visit_opened,
-                visit_unknown,
-            )
-        };
-
-        len
-    }
-
-    /// Returns the slice of linear cell indices belonging to this partition.
-    #[cfg(test)]
-    fn members(&mut self, member: CellIdx, capacity: u32) -> Vec<CellIdx> {
-        use std::collections::HashSet;
-        use std::{cell::RefCell, rc::Rc};
-
-        let member_map = Rc::new(RefCell::new(HashSet::with_capacity_and_hasher(
-            capacity as usize,
-            FastNumberHasherBuilder,
-        )));
+        let next_pid = self.next_partition_id;
         let offsets = self.neighbor_offsets;
-        self.visit_partition(
-            member,
-            &offsets,
-            &mut |_, idx| member_map.borrow_mut().insert(idx),
-            &mut |_, idx| member_map.borrow_mut().insert(idx),
-        );
-        let mut members = Vec::with_capacity(capacity as usize);
-        members.extend(Rc::into_inner(member_map).unwrap().into_inner().iter());
-        members
+        self.cells[root_idx].partition_id = next_pid;
+        if is_opened {
+            if root_pid != PartitionId::ZERO {
+                self.partitions.remove(&root_pid);
+            }
+            opened_buf.push(root_idx);
+        } else {
+            unknown_buf.push(root_idx);
+        }
+
+        let mut opened_cursor = 0;
+        let mut unknown_cursor = 0;
+
+        while opened_cursor < opened_buf.len() || unknown_cursor < unknown_buf.len() {
+            while opened_cursor < opened_buf.len() {
+                let idx = opened_buf[opened_cursor];
+                opened_cursor += 1;
+                let unknown = self.cells[idx].neighbors.unknown();
+                self.metrics.inc_neighbor_visits(unknown);
+                for n_idx in idx.neighbor_iter(&offsets, unknown) {
+                    if self.cells[n_idx].partition_id != next_pid {
+                        self.cells[n_idx].partition_id = next_pid;
+                        unknown_buf.push(n_idx);
+                    }
+                }
+            }
+            while unknown_cursor < unknown_buf.len() {
+                let idx = unknown_buf[unknown_cursor];
+                unknown_cursor += 1;
+                let opened = self.cells[idx].neighbors.opened();
+                self.metrics.inc_neighbor_visits(opened);
+                for n_idx in idx.neighbor_iter(&offsets, opened) {
+                    let pid = self.cells[n_idx].partition_id;
+                    if pid != next_pid {
+                        if pid != PartitionId::ZERO {
+                            self.partitions.remove(&pid);
+                        }
+                        self.cells[n_idx].partition_id = next_pid;
+                        opened_buf.push(n_idx);
+                    }
+                }
+            }
+        }
+
+        let len = (opened_buf.len() + unknown_buf.len()) as u32;
+        if len <= 1 {
+            self.cells[root_idx].partition_id = PartitionId::ZERO;
+        } else {
+            self.next_partition_id = next_pid.inc();
+            self.metrics.inc_partitions_created();
+            self.metrics.set_max_partition_size(len);
+            self.partitions.insert(
+                next_pid,
+                Partition::new(opened_buf.as_slice(), unknown_buf.as_slice()),
+            );
+            self.metrics.set_max_partitions(self.partitions.len());
+        }
     }
 
     /// Get the cell index for the given x/y coordinates.
@@ -884,9 +956,12 @@ impl MineField {
             mine_count: self.mine_count,
             cells,
             partitions: self.partitions.clone(),
-            next_partition_id: PartitionId(1),
+            next_partition_id: PartitionId::ONE,
             pending,
             desolved_queue: self.desolved_queue.clone(),
+            desolve_buf: Vec::new(),
+            partition_opened_buf: Vec::new(),
+            partition_unknown_buf: Vec::new(),
             solved_queue: self.solved_queue.clone(),
             pending_partition_queue: self.pending_partition_queue.clone(),
             metrics: Metrics::default(),
@@ -903,14 +978,6 @@ impl MineField {
         field.solve();
         field
     }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct Partition {
-    #[allow(dead_code)]
-    member: CellIdx,
-    #[allow(dead_code)]
-    len: u32,
 }
 
 /// Errors that can occur when constructing or updating a [`MineField`].
@@ -1000,16 +1067,16 @@ mod tests {
     }
 
     fn assert_partition_invariants(field: &MineField) {
-        let mut partition_sizes: HashMap<PartitionId, u32> = HashMap::new();
+        let mut partition_sizes: HashMap<PartitionId, u16> = HashMap::new();
         for cell in &field.cells {
-            if cell.partition_id.0 != 0 {
+            if cell.partition_id != PartitionId::ZERO {
                 assert!(cell.partition_id < field.next_partition_id);
                 *partition_sizes.entry(cell.partition_id).or_insert(0) += 1;
             }
         }
-        for (&pid, &Partition { len, .. }) in &field.partitions {
-            assert_ne!(pid.0, 0);
-            assert_eq!(partition_sizes.get(&pid), Some(&len));
+        for (&pid, partition) in &field.partitions {
+            assert_ne!(pid, PartitionId::ZERO);
+            assert_eq!(partition_sizes.get(&pid), Some(&partition.len()));
         }
     }
 
@@ -1025,8 +1092,7 @@ mod tests {
     }
 
     fn change_cell_value(field: &mut MineField, idx: CellIdx, value: CellValue) {
-        let offsets = field.neighbor_offsets;
-        field.change_cell_value(&offsets, idx, value);
+        field.change_cell_value(idx, value);
     }
 
     #[test]
@@ -1583,12 +1649,12 @@ mod tests {
         assert_eq!(field.partitions.len(), 2);
         let p_left = field.cells[c00].partition_id;
         let p_right = field.cells[c40].partition_id;
-        assert_ne!(p_left.0, 0);
-        assert_ne!(p_right.0, 0);
+        assert_ne!(p_left, PartitionId::ZERO);
+        assert_ne!(p_right, PartitionId::ZERO);
         assert_ne!(p_left, p_right);
         assert_eq!(partition_cell_count(&field, p_left), 4);
         assert_eq!(partition_cell_count(&field, p_right), 4);
-        assert_eq!(field.cells[c20].partition_id.0, 0);
+        assert_eq!(field.cells[c20].partition_id, PartitionId::ZERO);
         assert!(field.cells[c20].neighbors.opened().is_empty());
         assert!(field.cells[c20].neighbors.inferred().is_empty());
         assert_all_invariants(&field);
@@ -1598,7 +1664,7 @@ mod tests {
         field.update("..2");
         assert_eq!(field.partitions.len(), 1);
         let merged_pid = field.cells[c20].partition_id;
-        assert_ne!(merged_pid.0, 0);
+        assert_ne!(merged_pid, PartitionId::ZERO);
         assert_eq!(partition_cell_count(&field, merged_pid), 10);
         assert_eq!(field.cells[c10].neighbors.opened(), W | E);
         assert_eq!(field.cells[c30].neighbors.opened(), W | E);
@@ -1623,7 +1689,7 @@ mod tests {
 
         assert_eq!(field.partitions.len(), 1);
         let initial_pid = field.cells[c00].partition_id;
-        assert_ne!(initial_pid.0, 0);
+        assert_ne!(initial_pid, PartitionId::ZERO);
         for y in 0..field.height() {
             for x in 0..field.width() {
                 assert_eq!(
@@ -1645,8 +1711,8 @@ mod tests {
 
         let left_pid = field.cells[c00].partition_id;
         let right_pid = field.cells[c40].partition_id;
-        assert_ne!(left_pid.0, 0);
-        assert_ne!(right_pid.0, 0);
+        assert_ne!(left_pid, PartitionId::ZERO);
+        assert_ne!(right_pid, PartitionId::ZERO);
         assert_ne!(left_pid, right_pid);
         assert_eq!(field.cells[c10].partition_id, left_pid);
         assert_eq!(field.cells[c01].partition_id, left_pid);
@@ -2042,19 +2108,19 @@ mod tests {
         // Right: {(3,0), (4,0), (4,1)}
         assert_eq!(field.partitions.len(), 2);
         let c20 = field.cell_idx(Point::new(2, 0));
-        assert_eq!(field.cells[c20].partition_id.0, 0);
+        assert_eq!(field.cells[c20].partition_id, PartitionId::ZERO);
         for x in 1..=3 {
             let idx = field.cell_idx(Point { x, y: 1 });
             assert!(field.cells[idx].value.is_mine());
-            assert_eq!(field.cells[idx].partition_id.0, 0);
+            assert_eq!(field.cells[idx].partition_id, PartitionId::ZERO);
         }
 
         let c00 = field.cell_idx(Point::new(0, 0));
         let c40 = field.cell_idx(Point::new(4, 0));
         let left_pid = field.cells[c00].partition_id;
         let right_pid = field.cells[c40].partition_id;
-        assert_ne!(left_pid.0, 0);
-        assert_ne!(right_pid.0, 0);
+        assert_ne!(left_pid, PartitionId::ZERO);
+        assert_ne!(right_pid, PartitionId::ZERO);
         assert_ne!(left_pid, right_pid);
         assert_eq!(partition_cell_count(&field, left_pid), 3);
         assert_eq!(partition_cell_count(&field, right_pid), 3);
@@ -2169,16 +2235,16 @@ mod tests {
 
         field.cells[c2].value = CellValue::for_mine_count(2);
 
-        let mut members = field.members(c0, 3);
-        members.sort();
-        assert_eq!(members, vec![c0, c1, c2]);
-
         field.pending_partition_queue.push(&mut field.cells, c0);
         field.partition();
         let id = field.cells[c0].partition_id;
-        assert_ne!(id.0, 0);
+        assert_ne!(id, PartitionId::ZERO);
         assert_eq!(field.cells[c1].partition_id, id);
         assert_eq!(field.cells[c2].partition_id, id);
+
+        let mut members = field.partitions[&id].members().collect::<Vec<_>>();
+        members.sort();
+        assert_eq!(members, vec![c0, c1, c2]);
     }
 
     #[test]
@@ -2253,7 +2319,7 @@ mod tests {
         field.update("_..._\n.....");
         assert!(field.desolved_queue.is_empty());
         // next_partition_id should not experience runaway increments
-        assert!(field.next_partition_id.0 <= pid_before.0 + 4);
+        assert!(field.next_partition_id <= pid_before.inc());
         assert_all_invariants(&field);
     }
 

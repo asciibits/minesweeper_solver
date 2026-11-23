@@ -1,7 +1,7 @@
 //! Terminal pretty-printing and [`Display`] formatting for [`MineField`].
 
 use crate::solver::{
-    CellIdx, Partition, PartitionId,
+    CellIdx, PartitionId,
     cell::{InferredValue, UserCellValue, UserValueWithInference},
     coordinates,
 };
@@ -77,22 +77,22 @@ impl<'a> ColoredMineField<'a> {
                     value: UserCellValue::Opened(c),
                     inferred: _,
                 } => match c {
-                    1 => "1".bright_blue(),
-                    2 => "2".green(),
-                    3 => "3".red(),
-                    4 => "4".purple(),
-                    5 => "5".yellow(),
-                    6 => "6".cyan(),
-                    7 => "7".bright_white(),
-                    8 => "8".bright_black(),
-                    _ => " ".clear(),
+                    1 => "1".bright_blue().bold(),
+                    2 => "2".green().bold(),
+                    3 => "3".red().bold(),
+                    4 => "4".purple().bold(),
+                    5 => "5".yellow().bold(),
+                    6 => "6".cyan().bold(),
+                    7 => "7".bright_white().bold(),
+                    8 => "8".bright_black().bold(),
+                    _ => " ".clear().bold(),
                 },
             };
 
             let printable = if let Some(&i) = partition_ids.get(&self.field.cells[idx].partition_id)
             {
                 match i % 3 {
-                    0 => printable.bold().on_yellow(),
+                    0 => printable.bold().on_bright_yellow(),
                     1 => printable.bold().on_magenta(),
                     2 => printable.bold().on_white(),
                     _ => unreachable!(),
@@ -302,21 +302,16 @@ impl<'a> Display for DetailMineField<'a> {
             write!(f, ", {mine_count}*")?;
         }
         write!(f, ") {{")?;
+        write!(f, "{spacer}cells: [")?;
         for (idx, &cell) in self.0.cells.iter().enumerate() {
             let pt = coordinates(idx as u32, self.0.width_with_border);
             if pt.x == 0 || pt.y == 0 || pt.y == self.0.height() + 1 {
                 continue;
             }
             let idx = CellIdx(idx as u32);
-            // Cells no longer carry their own index, so prefix it for debuggability.
-            write!(f, "{spacer}{idx}: {cell}")?;
+            write!(f, "{spacer}  {idx:3}: {cell}")?;
         }
-        write!(f, "{spacer}}},")?;
-        write!(
-            f,
-            "{spacer}next partition id: {},",
-            self.0.next_partition_id
-        )?;
+        write!(f, "{spacer}],")?;
         write!(f, "{spacer}pending: [")?;
         write_comma_separated(f, &self.0.pending, |f, c| {
             write!(f, "({}: {})", c.idx, c.value)
@@ -339,11 +334,16 @@ impl<'a> Display for DetailMineField<'a> {
         write!(f, "{spacer}recent invalid cells: [")?;
         write_comma_separated(f, &self.0.recent_invalid, |f, i| write!(f, "{i}"))?;
         write!(f, "],")?;
+        write!(
+            f,
+            "{spacer}next partition id: {},",
+            self.0.next_partition_id
+        )?;
         write!(f, "{spacer}partitions: [")?;
-        for (&pid, Partition { member, len }) in self.0.partitions.iter() {
-            write!(f, "{spacer}  {pid}: member: {member}, len: {len}")?;
+        for (&pid, partition) in self.0.partitions.iter() {
+            write!(f, "{spacer}  {:3}: {partition},", pid.val())?;
         }
-        write!(f, "]")?;
+        write!(f, "{spacer}],")?;
         if f.alternate() {
             writeln!(f)?;
         }

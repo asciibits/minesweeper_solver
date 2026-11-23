@@ -2,19 +2,16 @@
 //! ([`UserCell`], [`UserCellValue`], [`UserCellWithInference`]) and internal cell representations.
 
 use std::{
-    borrow::Borrow,
     cmp::Ordering,
     fmt::{self, Display, Formatter},
     hash::{BuildHasher, Hasher},
     ops::{Index, IndexMut},
 };
 
-use crate::{
-    MineField,
-    solver::{
-        grid::{BinaryIterator, DirectionSet, Point},
-        stats,
-    },
+use crate::solver::{
+    grid::{BinaryIterator, DirectionSet, Point},
+    partition::PartitionId,
+    utils,
 };
 
 /// Returns the `(x, y)` [`Point`] for linear cell index `idx` in a grid of width `width`.
@@ -117,26 +114,26 @@ pub struct UserCellWithInference {
 pub(super) struct CellIdx(pub(super) u32);
 
 impl CellIdx {
-    /// Sentinel value representing no cell (used to avoid `Option<CellIdx>` discriminant overhead
-    /// in recursive partition traversals; valid cell indices are bounded well below `u32::MAX`).
-    pub(super) const NONE: Self = Self(u32::MAX);
-
     pub(super) fn neighbor_offsets(width: u32) -> [i32; 8] {
         let w = width as i32;
         [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1]
     }
 
-    pub(super) fn neighbor_iter<O: Borrow<[i32; 8]>>(
+    pub(super) fn neighbor_iter<'a>(
         &self,
-        offsets: O,
+        offsets: &'a [i32; 8],
         directions: DirectionSet,
-    ) -> impl Iterator<Item = CellIdx> + use<O> {
+    ) -> impl Iterator<Item = CellIdx> + use<'a> {
         let idx = self.0 as i32;
         BinaryIterator(directions.mask()).map(move |i| {
-            let index = idx + offsets.borrow()[i as usize];
+            let index = idx + offsets[i as usize];
             debug_assert!(index >= 0);
             CellIdx(index as u32)
         })
+    }
+
+    pub(super) fn val(&self) -> u32 {
+        self.0
     }
 }
 
@@ -305,74 +302,12 @@ impl CellValue {
         }
     }
 
-    /// Updates `field.cells[idx].value` to `new_value`, updates all 8 neighbors' [`CellNeighbors`]
-    /// back-reference bitmasks, and queues affected cells onto `desolved_queue` and `solved_queue`.
-    pub(super) fn apply_change(
-        field: &mut MineField,
-        offsets: &[i32; 8],
-        idx: CellIdx,
-        new_value: CellValue,
-    ) {
-        #[cfg(feature = "debug")]
-        let pre_change = field.clone();
-
-        let prev_value = field.cells[idx].value;
-        if prev_value == new_value {
-            return;
-        }
-        #[cfg(feature = "debug")]
-        {
-            eprintln!("Applying change: ({idx}): {prev_value} -> {new_value}");
-        }
-
-        // Update the new value and all neighbor back references
-        field.cells[idx].value = new_value;
-        Self::update_neighbors(
-            &mut field.cells,
-            field.width_with_border,
-            idx,
-            prev_value,
-            new_value,
-        );
-        #[cfg(feature = "debug")]
-        {
-            // This does a full board validation with all neighbor references after each change.
-            // This is quite expensive.
-            Self::validate_board(field, &pre_change, idx, new_value);
-        }
-
-        // If `idx` was previously opened, any partition/solved state recorded under it may be stale.
-        if prev_value.is_opened() {
-            field.desolved_queue.push(&mut field.cells, idx);
-        }
-        if new_value.is_opened() {
-            field.solved_queue.push(&mut field.cells, idx);
-        }
-
-        let neighbors = field.cells[idx].neighbors;
-        let mine_changed = prev_value.is_mine() != new_value.is_mine();
-        // Queue neighbor desolves if we changed our neighbors' known mine count or cleared an
-        // opened/mine cell; whenever `desolve_neighbors` holds, `mine_changed` also requires a
-        // neighbor re-solve, so both queues can share a single `neighbors.opened` pass.
-        let desolve_neighbors = !prev_value.is_unknown() && mine_changed;
-        if (prev_value.is_unknown() || new_value.is_unknown() || mine_changed)
-            && !neighbors.opened.is_empty()
-        {
-            for n_idx in idx.neighbor_iter(offsets, neighbors.opened) {
-                if desolve_neighbors {
-                    field.desolved_queue.push(&mut field.cells, n_idx);
-                }
-                field.solved_queue.push(&mut field.cells, n_idx);
-            }
-        }
-    }
-
     /// Applies an in-place XOR across all 8 neighbor [`CellNeighbors`] structs using a
     /// precomputed 16-entry lookup table indexed by the 4-bit [`CellType`] difference (`prev ^ new`).
     ///
     /// Lane `k` (`0..=7`, corresponding to NW..SE) toggles bit `7 - k` in the neighbor because
     /// from that neighbor's point of view, `idx` lies in the opposite compass direction.
-    fn update_neighbors(
+    pub(super) fn update_neighbors(
         cells: &mut [Cell],
         width: u32,
         idx: CellIdx,
@@ -413,70 +348,6 @@ impl CellValue {
         *window[2 * width].neighbors.as_u32_mut() ^= masks[5];
         *window[2 * width + 1].neighbors.as_u32_mut() ^= masks[6];
         *window[2 * width + 2].neighbors.as_u32_mut() ^= masks[7];
-    }
-
-    #[cfg(feature = "debug")]
-    fn validate_board(
-        field: &MineField,
-        pre_change: &MineField,
-        source_idx: CellIdx,
-        new_value: CellValue,
-    ) {
-        fn failure(
-            field: &MineField,
-            pre_change: &MineField,
-            source_idx: CellIdx,
-            n_idx: CellIdx,
-            infer_idx: CellIdx,
-            new_value: CellValue,
-        ) {
-            use crate::solver::display::ColoredMineField;
-
-            eprintln!(
-                "\nBoard validation failure (source idx: {source_idx}, neighbor idx: {n_idx}, infer idx: {infer_idx}, new_value: {new_value}.\nPost-change:"
-            );
-            ColoredMineField::eprintln(&field);
-            DetailMineField::eprintln(&field);
-            eprintln!("Pre-change:\n");
-            ColoredMineField::eprintln(&pre_change);
-            DetailMineField::eprintln(&pre_change);
-            panic!();
-        }
-        use crate::solver::display::DetailMineField;
-        for (idx, cell) in field.cells.iter().copied().enumerate() {
-            if cell.value.is_wall() {
-                continue;
-            }
-            let n_idx = CellIdx(idx as u32);
-            let neighbors = field.cells[n_idx].neighbors;
-            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.opened()) {
-                if !field.cells[infer_idx].value.is_opened() {
-                    failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
-                }
-            }
-            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.unknown()) {
-                if !field.cells[infer_idx].value.is_unknown() {
-                    failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
-                }
-            }
-            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.mines()) {
-                if !field.cells[infer_idx].value.is_mine() {
-                    failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
-                }
-            }
-            for infer_idx in n_idx.neighbor_iter(&field.neighbor_offsets, neighbors.inferred()) {
-                if !field.cells[infer_idx].value.is_inferred() {
-                    failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
-                }
-            }
-            for infer_idx in
-                n_idx.neighbor_iter(&field.neighbor_offsets, DirectionSet::ALL - neighbors.all())
-            {
-                if !field.cells[infer_idx].value.is_wall() {
-                    failure(field, pre_change, source_idx, n_idx, infer_idx, new_value);
-                }
-            }
-        }
     }
 }
 
@@ -567,30 +438,6 @@ impl Display for CellValue {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct PartitionId(pub(super) u16);
-
-impl PartitionId {
-    pub(super) const ZERO: PartitionId = PartitionId(0);
-    #[cfg(test)]
-    pub(super) const MAX: PartitionId = PartitionId(u16::MAX);
-    pub(super) const COMPACT_THRESHOLD: PartitionId = PartitionId(u16::MAX >> 1);
-
-    #[inline]
-    pub(super) fn inc(&mut self) {
-        self.0 = self
-            .0
-            .checked_add(1)
-            .expect("PartitionId overflow: too many partitions");
-    }
-}
-
-impl Display for PartitionId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// Packed 8-byte AoS per-cell state combining neighbor masks, partition ID, value, and queue flags.
 ///
 /// Packs all per-cell solver state into a single `#[repr(C, align(8))]` allocation with zero
@@ -622,9 +469,9 @@ impl Cell {
 impl Display for Cell {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let spacer = if f.alternate() { "\n    " } else { " " };
-        write!(f, "Cell[{}] {{ ", self.value)?;
-        write!(f, "{spacer}neighbors: {}", self.neighbors)?;
-        write!(f, "{spacer}partition_id: {}", self.partition_id)?;
+        write!(f, "Cell[{}] {{", self.value)?;
+        write!(f, "{spacer}neighbors: {},", self.neighbors)?;
+        write!(f, "{spacer}partition_id: {},", self.partition_id)?;
         write!(f, "{spacer}flags: {}", self.flags)?;
         if f.alternate() {
             writeln!(f)?;
@@ -812,15 +659,24 @@ impl CellNeighbors {
 
 impl Display for CellNeighbors {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let spacer = if f.alternate() { "\n    " } else { " " };
-        write!(f, "CellNeighbors{{{spacer}unknown: {},", self.unknown,)?;
+        let spacer;
+        if f.alternate() {
+            spacer = "\n    ";
+            write!(f, "CellNeighbors {{")?;
+        } else {
+            spacer = " ";
+            write!(f, "{{")?;
+        }
+        write!(f, "{spacer}unknown: {},", self.unknown,)?;
         write!(f, "{spacer}open: {},", self.opened,)?;
         write!(f, "{spacer}mine: {},", self.mines,)?;
-        write!(f, "{spacer}inferred: {},", self.inferred,)?;
+        write!(f, "{spacer}inferred: {}", self.inferred,)?;
         if f.alternate() {
             writeln!(f)?;
+        } else {
+            write!(f, " ")?;
         }
-        write!(f, " }}")
+        write!(f, "}}")
     }
 }
 
@@ -1093,7 +949,7 @@ impl CellOrdering {
         if let Some(mine_count) = cell.safe_mine_count() {
             let available_cells = neighbors.unknown.len();
             let remaining_mines = cell.remaining_mines(neighbors);
-            let solution_count = stats::choose(available_cells, remaining_mines) as u8;
+            let solution_count = utils::choose(available_cells, remaining_mines) as u8;
             Some(CellOrdering {
                 idx,
                 mine_count,
@@ -1184,8 +1040,8 @@ mod tests {
 
         let compact = format!("{pc}");
         let alternate = format!("{pc:#}");
-        assert!(compact.contains("CellNeighbors{ unknown: "));
-        assert!(alternate.contains("CellNeighbors{\n    unknown: "));
+        assert!(compact.contains("{ unknown: "));
+        assert!(alternate.contains("CellNeighbors {\n    unknown: "));
     }
 
     #[test]
@@ -1593,60 +1449,5 @@ mod tests {
         };
         assert_eq!(val.remaining_mines(excess_mines), -1);
         assert!(val.is_invalid(excess_mines));
-    }
-
-    #[test]
-    fn test_partition_id_ops() {
-        let mut pid = PartitionId::ZERO;
-        assert_eq!(pid.to_string(), "0");
-        pid.inc();
-        assert_eq!(pid, PartitionId(1));
-        pid.0 = PartitionId::COMPACT_THRESHOLD.0;
-        assert_eq!(pid, PartitionId::COMPACT_THRESHOLD);
-        assert_eq!(PartitionId::COMPACT_THRESHOLD.0, u16::MAX >> 1);
-
-        let overflow = std::panic::catch_unwind(|| {
-            let mut max_pid = PartitionId::MAX;
-            max_pid.inc();
-        });
-        assert!(overflow.is_err());
-    }
-
-    #[test]
-    fn test_compact_partition_ids() {
-        let spec = "1...1
-                    .....
-                    1...1";
-        let mut field = MineField::create(spec);
-        assert!(!field.partitions.is_empty());
-        let orig_partition_count = field.partitions.len();
-
-        // Artificially elevate next_partition_id to u16::MAX
-        field.next_partition_id = PartitionId::MAX;
-        // Inject an obsolete cell partition_id that is NOT in field.partitions
-        field.cells[9].partition_id.0 = PartitionId::COMPACT_THRESHOLD.0 + 155;
-
-        field.compact_partition();
-
-        assert_eq!(field.partitions.len(), orig_partition_count);
-        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 1);
-        // Dangling partition ID on cell 9 was reset
-        assert_eq!(field.cells[9].partition_id.0, 0);
-
-        // All active partition members have IDs <= orig_partition_count
-        for &pid in field.partitions.keys() {
-            assert!(pid.0 <= orig_partition_count as u16);
-        }
-
-        // Solving further when next_partition_id > COMPACT_THRESHOLD automatically triggers compaction
-        field.next_partition_id = PartitionId(PartitionId::COMPACT_THRESHOLD.0 + 911);
-        field
-            .set_cell(UserCell {
-                point: Point { x: 0, y: 1 },
-                value: UserCellValue::Opened(2),
-            })
-            .unwrap();
-
-        assert_eq!(field.next_partition_id.0, orig_partition_count as u16 + 2);
     }
 }
