@@ -94,8 +94,8 @@ fn bench_playthrough(b: &mut Bencher, game_count: u64, width: u32, height: u32, 
 }
 
 #[bench]
-fn bench_solver_incremental_replay_1000_games(b: &mut Bencher) {
-    bench_replay(b, 1000, 30, 24, 130);
+fn bench_solver_incremental_replay_100_games(b: &mut Bencher) {
+    bench_replay(b, 100, 30, 24, 130);
 }
 
 #[bench]
@@ -104,8 +104,8 @@ fn bench_end_to_end_incremental_playthrough_1000_games(b: &mut Bencher) {
 }
 
 #[bench]
-fn bench_solver_incremental_replay_100x100_100_games(b: &mut Bencher) {
-    bench_replay(b, 100, 100, 100, 1806);
+fn bench_solver_incremental_replay_100x100_10_games(b: &mut Bencher) {
+    bench_replay(b, 10, 100, 100, 1806);
 }
 
 #[bench]
