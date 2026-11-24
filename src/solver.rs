@@ -602,9 +602,6 @@ impl MineField {
             if cell.partition_id < start_partition_id {
                 let next_partition_id = self.next_partition_id;
 
-                let mut opened_members = vec![];
-                let mut unknown_members = vec![];
-
                 let len = self.visit_partition(
                     idx,
                     &offsets,
@@ -616,7 +613,6 @@ impl MineField {
                         if pid != PartitionId::ZERO {
                             field.remove_partition(pid);
                         }
-                        opened_members.push(idx);
                         field.cells[idx].partition_id = field.next_partition_id;
                         true
                     },
@@ -624,7 +620,6 @@ impl MineField {
                         if field.cells[idx].partition_id == field.next_partition_id {
                             return false;
                         }
-                        unknown_members.push(idx);
                         field.cells[idx].partition_id = field.next_partition_id;
                         true
                     },
