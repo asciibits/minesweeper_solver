@@ -1,29 +1,5 @@
 //! Combinatorial utilities for computing solution counts on cell neighborhoods.
 
-/// Maximum size of the precomputed Pascal's triangle (`0..=8` neighbors).
-const TRIANGLE_SIZE: usize = 9;
-
-/// Compile-time lookup table of binomial coefficients $\binom{n}{k}$ for $0 \le n, k \le 8$.
-const PASCAL_TRIANGLE: [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] = pascal_triangle();
-
-/// Computes Pascal's triangle up to [`TRIANGLE_SIZE`] at compile time.
-const fn pascal_triangle() -> [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] {
-    let mut triangle = [[0u64; TRIANGLE_SIZE]; TRIANGLE_SIZE];
-    let mut n = 0;
-    while n < triangle.len() {
-        triangle[n][0] = 1;
-        let mut k = 1;
-        while k < n {
-            triangle[n][k] = triangle[n - 1][k - 1] + triangle[n - 1][k];
-            k += 1;
-        }
-        triangle[n][n] = 1;
-
-        n += 1;
-    }
-    triangle
-}
-
 /// Returns the binomial coefficient $\binom{n}{k}$ ("`n` choose `k`") for up to $n, k = 8$.
 ///
 /// Returns `0` if `k < 0` (or if `k > n` within bounds).
@@ -32,10 +8,31 @@ const fn pascal_triangle() -> [[u64; TRIANGLE_SIZE]; TRIANGLE_SIZE] {
 ///
 /// Panics if `n >= 9` or `k >= 9`.
 #[inline]
-pub fn choose(n: u8, k: i8) -> u64 {
+pub fn choose(n: u8, k: i8) -> u8 {
     if k < 0 {
         return 0;
     }
+    /// Maximum size of the precomputed Pascal's triangle (`0..=8` neighbors).
+    const TRIANGLE_SIZE: usize = 9;
+
+    /// Compile-time lookup table of binomial coefficients $\binom{n}{k}$ for $0 \le n, k \le 8$.
+    const PASCAL_TRIANGLE: [[u8; TRIANGLE_SIZE]; TRIANGLE_SIZE] = const {
+        let mut triangle = [[0u8; TRIANGLE_SIZE]; TRIANGLE_SIZE];
+        let mut n = 0;
+        while n < triangle.len() {
+            triangle[n][0] = 1;
+            let mut k = 1;
+            while k < n {
+                triangle[n][k] = triangle[n - 1][k - 1] + triangle[n - 1][k];
+                k += 1;
+            }
+            triangle[n][n] = 1;
+
+            n += 1;
+        }
+        triangle
+    };
+
     PASCAL_TRIANGLE[n as usize][k as usize]
 }
 
@@ -47,7 +44,7 @@ mod tests {
     fn test_choose_known_values() {
         assert_eq!(choose(0, 0), 1);
         assert_eq!(choose(7, 3), 35);
-        let row_8: Vec<u64> = (0..=8).map(|k| choose(8, k)).collect();
+        let row_8: Vec<u8> = (0..=8).map(|k| choose(8, k)).collect();
         assert_eq!(row_8, vec![1, 8, 28, 56, 70, 56, 28, 8, 1]);
     }
 

@@ -7,7 +7,7 @@ use std::{
     ops::{BitXor, BitXorAssign},
 };
 
-use crate::solver::{Cell, CellIdx, FastNumberHasherBuilder};
+use crate::solver::{Cell, CellIdx, FastNumberHasherBuilder, grid::DirectionSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct BitMask<const N: usize>([u64; N]);
@@ -218,6 +218,17 @@ impl Display for Partition {
                 .join(","),
         )
     }
+}
+
+fn normalize_neighbors(
+    idx: CellIdx,
+    neighbors: DirectionSet,
+    width: u32,
+) -> (CellIdx, DirectionSet) {
+    let (dx, dy, new_neighbors) = neighbors.normalize_in_grid();
+    let idx = idx.0 as i32 + dy as i32 * width as i32 + dx as i32;
+
+    (CellIdx(idx as u32), new_neighbors)
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

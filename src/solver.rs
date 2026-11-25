@@ -29,6 +29,7 @@ mod display;
 pub(crate) mod grid;
 mod metrics;
 mod partition;
+mod stats;
 pub(crate) mod test_utils;
 mod utils;
 

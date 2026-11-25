@@ -141,6 +141,10 @@ impl DirectionSet {
         DirectionSet(0)
     }
 
+    pub const fn from_mask(mask: u8) -> DirectionSet {
+        DirectionSet(mask)
+    }
+
     /// Given a point in a fixed size field, return the set of neighbors, taking
     /// edges into consideration.
     pub fn all_neighbors(p: Point, width: u32, height: u32) -> DirectionSet {
@@ -176,6 +180,76 @@ impl DirectionSet {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
+    }
+
+    /// A location in a grid with a DirectionSet "points" at 0 to 8 neighbors. That set of
+    /// neighbors can sometimes also be captured by a different location, using a different
+    /// DirectionSet.
+    ///
+    /// For example, a point at (1,0) with a DirectionSet SW|S|SE refers to the cells with
+    /// coordinates [(0,1), (1,1), (2,1)].
+    ///
+    /// Those are the same coordinates pointed to by a point at (1,2) whose DirectionSet uses
+    /// NW|N|NE.
+    ///
+    /// This function yields a transformation that when applied to a point, points to the same set
+    /// of neighbors, but possibly from a different location. The first two values of the return
+    /// type are the dx and dy values to apply to the initial starting point. The third value is
+    /// the new DirectionSet to use from that location.
+    ///
+    /// For all point/DirectionSet pairs that point to the same set of cells, this function will
+    /// return a transformation that, once applied, makes all such pairs the same.
+    ///
+    /// In short, this provides a way to compare two distinct point/DirectionSet pairs to see if
+    /// they point at the same set of neighbors.
+    pub(super) fn normalize_in_grid(&self) -> (i8, i8, DirectionSet) {
+        const NORMALIZE_TABLE: [(u8, DirectionSet); 256] = const {
+            let mut table = [(0u8, DirectionSet::EMPTY); 256];
+            // initialize 0 (i.e. DirectionSet::EMPTY) to have offsets 2x2, yielding a dx/dy of 0/0
+            table[0] = (2u8 << 4 | 2u8, DirectionSet::EMPTY);
+
+            let mut i = 1u32;
+            'outer: while i <= u8::MAX as u32 {
+                // put the direction set into a 6x5 grid at position (2,2)
+                let cells = (i & 0b111) << 14
+                    | (i & 0b1_000) << 17
+                    | (i & 0b10_000) << 18
+                    | (i & 0b111_00_000) << 21;
+                let mut dy = 0u8;
+                while dy <= 2 {
+                    let mut dx = 0u8;
+                    while dx <= 3 {
+                        // create a 3x3 mask (with a hole) in a 6x5 grid, shifted into position
+                        let mask = 0b111000111000111 << (dx + dy * 6);
+                        if mask & cells == cells {
+                            // new mask works
+                            let shift = (dx << 4) | dy;
+                            let cells = cells >> (dx + dy * 6);
+
+                            let shifted_neighbors = cells & 0b111
+                                | (cells & 0b1_000000) >> 3
+                                | (cells & 0b10_000000) >> 4
+                                | (cells & 0b111_000000_000000) >> 7;
+                            table[i as usize] =
+                                (shift, DirectionSet::from_mask(shifted_neighbors as u8));
+                            i += 1;
+                            continue 'outer;
+                        }
+                        dx += 1;
+                    }
+
+                    dy += 1;
+                }
+                unreachable!();
+            }
+
+            table
+        };
+        let (delta, new_neighbors) = NORMALIZE_TABLE[self.0 as usize];
+        let dx = (delta >> 4) as i8 - 2;
+        let dy = (delta & 0xf) as i8 - 2;
+
+        (dx, dy, new_neighbors)
     }
 
     /// Returns an iterator over all [`Direction`]s in `self`.
@@ -693,5 +767,26 @@ mod tests {
         assert_eq!(iter.size_hint(), (4, Some(4)));
         assert_eq!(iter.collect::<Vec<_>>(), vec![0, 2, 5, 7]);
         assert_eq!(BinaryIterator(0usize).next(), None);
+    }
+
+    #[test]
+    fn test_normalize_in_grid() {
+        // EMPTY is already in normalized form
+        assert_eq!(
+            DirectionSet::EMPTY.normalize_in_grid(),
+            (0, 0, DirectionSet::EMPTY)
+        );
+
+        // The S_DIRECTIONS are already in normalized form
+        assert_eq!((SW | S | SE).normalize_in_grid(), (0, 0, SW | S | SE));
+        // The N_DIRECTIONS normalizes to S_DIRECTIONS
+        assert_eq!((NW | N | NE).normalize_in_grid(), (0, -2, SW | S | SE));
+
+        // NW gets normalized to SE
+        assert_eq!((!!NW).normalize_in_grid(), (-2, -2, !!SE));
+
+        //
+        eprintln!("{}", (N | W).normalize_in_grid().2);
+        assert_eq!((N | W).normalize_in_grid(), (-1, -1, E | S));
     }
 }
